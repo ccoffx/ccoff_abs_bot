@@ -32,6 +32,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: checks
     runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -83,16 +86,42 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Container maintenance smoke tests on both architectures
+  smoke:
+    name: Container maintenance smoke test (${{ matrix.platform }})
+    needs: candidate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Separate runners prevent Docker's classic image store from loading two
+      # platform variants of the same manifest-list digest into one daemon.
+      - name: Container maintenance smoke test
         env:
-          IMAGE: ${{ steps.image.outputs.name }}@${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
-        run: |
-          ./scripts/image-smoke.sh "$IMAGE" linux/amd64
-          ./scripts/image-smoke.sh "$IMAGE" linux/arm64
+          IMAGE: ${{ needs.candidate.outputs.image }}@${{ needs.candidate.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: ./scripts/image-smoke.sh "$IMAGE" "$PLATFORM"
+  bundle:
+    name: Package verified candidate
+    needs: [candidate, smoke]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
       - name: Source-free deployment bundle
         env:
-          IMAGE: ${{ steps.image.outputs.name }}
-          DIGEST: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+          IMAGE: ${{ needs.candidate.outputs.image }}
+          DIGEST: ${{ needs.candidate.outputs.digest }}
         run: |
           ./scripts/package-release.sh
           jq -n --arg commit "$GITHUB_SHA" --arg image "$IMAGE@$DIGEST" '{commit:$commit,image:$image,schemaCompatibility:"1",coverage:"Mock ABS and Telegram group tests; real ABS compatibility and real group permissions are not verified."}' > dist/candidate.json

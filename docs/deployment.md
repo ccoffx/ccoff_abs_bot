@@ -4,7 +4,7 @@
 
 ## GitHub 首次配置与发布
 
-将项目改动提交到 GitHub。仓库 Actions 开启后，`Check and build candidate` 会先执行普通测试、竞态检查、静态检查和部署脚本演练。PR 只检查；主分支检查通过后才有权限发布 GHCR 候选镜像，再执行两种架构的容器维护冒烟测试。
+将项目改动提交到 GitHub。仓库 Actions 开启后，`Check and build candidate` 会先执行普通测试、竞态检查、静态检查和部署脚本演练。PR 只检查；主分支检查通过后才有权限发布 GHCR 候选镜像，再在独立运行器上分别执行 amd64、arm64 容器维护冒烟测试，避免同一 Docker 镜像存储切换架构时发生 digest 冲突。两种架构均通过后才生成并上传部署包。
 
 镜像位置为 `ghcr.io/huliyoudiangou/yueer_abs_bot`。候选首次创建后，在 GitHub Packages 中确认可见性为 **Private**，授予仓库 Actions 对该包的写入权限。工作流使用自带 `GITHUB_TOKEN`，无需配置正式设备的 SSH 或 Bot/ABS 密钥。
 
