@@ -16,7 +16,7 @@ on:
         default: false
         type: boolean
       database_compatible:
-        description: Changes preserve schema compatibility 1 and passed upgrade regression tests
+        description: I verified fresh database initialization and restart with schema baseline 1
         required: true
         default: false
         type: boolean
@@ -76,9 +76,9 @@ jobs:
           cat > dist/notes.md <<EOF
           Candidate commit: $SHA
           Immutable image: $(jq -r .image dist/release.json)
-          Database compatibility: 1 (additive, backward compatible changes only).
+          Database compatibility group: 1 (current schema baseline; development databases are unsupported).
 
-          Automated unit, transaction, concurrency, migration and mock Telegram/ABS tests passed. The operator confirmed private-chat acceptance on the exact candidate.
+          Automated unit, transaction, concurrency, fresh database initialization, restart and mock Telegram/ABS tests passed. The operator confirmed private-chat acceptance on the exact candidate.
 
           Verification boundary: mock ABS does not establish real ABS API compatibility. Simulated group tests do not establish real Telegram group permissions or rendering. First production deployment still needs basic real-service checks.
 

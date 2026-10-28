@@ -174,11 +174,11 @@ func AdminAdjustDailyLimitExceeded(todayTotal int, delta int) bool {
 }
 
 // ghostWalletUsernamePrefix 钱包占位用户名前缀（用户没有 Telegram 用户名时）。
-// 该前缀的 username 是内部占位，不得出现在对外公告里（见 resolveSplashVictimLabels）。
-const GhostWalletUsernamePrefix = "ghost_tg_"
+// 该前缀的 username 是内部占位，对外展示应使用 DisplayName。
+const ghostWalletUsernamePrefix = "ghost_tg_"
 
 func ghostWalletUsername(userID int64) string {
-	return fmt.Sprintf("%s%d", GhostWalletUsernamePrefix, userID)
+	return fmt.Sprintf("%s%d", ghostWalletUsernamePrefix, userID)
 }
 
 func EnsureUserWalletInTx(tx *gorm.DB, tgUser *tgbotapi.User) (model.User, string, error) {
@@ -221,7 +221,7 @@ func EnsureUserWalletInTx(tx *gorm.DB, tgUser *tgbotapi.User) (model.User, strin
 }
 
 // syncUserDisplayNameTx 钱包事务内顺带刷新显示名缓存（尽力而为：失败仅记日志，不影响钱包主流程）。
-// 群公告（雷劫外溢等）按 DB 选人，靠这份缓存按真人称呼，替代 ghost_tg_* 占位用户名。
+// 对外展示使用缓存的真人称呼，替代 ghost_tg_* 占位用户名。
 // 仅在值变化时写入，避免热路径写放大。
 func syncUserDisplayNameTx(tx *gorm.DB, u *model.User, displayName string) {
 	if tx == nil || u == nil {

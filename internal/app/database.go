@@ -121,7 +121,6 @@ func InitDB() {
 		&model.SectWeeklyTaskSettlement{},
 		&model.SectListeningDailyProgress{},
 		&model.DailyListeningStat{},
-		&model.AbsLiveListeningCheckpoint{},
 		&model.ABSCrossDaySessionAdjustment{},
 		&model.ABSCrossDaySessionScanCursor{},
 		&model.SectShopPurchase{},
@@ -147,9 +146,6 @@ func InitDB() {
 	}
 	if err := storage.InitializeDatabaseIndexes(storage.DB); err != nil {
 		log.Fatalf("数据库索引初始化失败: %s", textfmt.FormatPlainError(err))
-	}
-	if err := storage.MigrateTradedCodeOwnership(storage.DB); err != nil {
-		log.Fatalf("历史交易卡密归属迁移失败: %s", textfmt.FormatPlainError(err))
 	}
 	if err := game.SeedDefaultCultivationConfigs(); err != nil {
 		log.Fatalf("斗气默认配置初始化失败: %s", textfmt.FormatPlainError(err))

@@ -182,6 +182,9 @@ func advanceABSCrossDaySessionBackfill(now time.Time) error {
 			if err := upsertABSCrossDaySessionObservations(tx, observations); err != nil {
 				return err
 			}
+			if err := recordSectRetreatListeningSessionsInTx(tx, cursor.UserID, cursor.AbsUserID, sessions); err != nil {
+				return err
+			}
 			updates := map[string]interface{}{
 				"next_page":         page + 1,
 				"pages_scanned":     gorm.Expr("pages_scanned + 1"),
@@ -226,7 +229,7 @@ func advanceABSCrossDaySessionBackfill(now time.Time) error {
 	return nil
 }
 
-func fetchABSCrossDayListeningSessionPage(absUserID string, page int) ([]absLiveListeningSession, int, error) {
+func fetchABSCrossDayListeningSessionPage(absUserID string, page int) ([]absListeningSession, int, error) {
 	if abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" || page < 0 {
 		return nil, 0, fmt.Errorf("ABS_CROSS_DAY_PAGE_ARGUMENT_INVALID")
 	}
@@ -241,13 +244,13 @@ func fetchABSCrossDayListeningSessionPage(absUserID string, page int) ([]absLive
 	if err != nil {
 		return nil, 0, err
 	}
-	sessions := make([]absLiveListeningSession, 0, len(rawSessions))
+	sessions := make([]absListeningSession, 0, len(rawSessions))
 	seen := make(map[string]struct{}, len(rawSessions))
 	for _, raw := range rawSessions {
 		if !absSessionBelongsToUser(raw, absUserID) {
 			continue
 		}
-		session, ok := parseAbsLiveListeningSession(raw, absUserID)
+		session, ok := parseABSListeningSession(raw, absUserID)
 		if !ok {
 			continue
 		}

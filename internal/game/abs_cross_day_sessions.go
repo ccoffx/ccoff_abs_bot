@@ -20,8 +20,6 @@ import (
 )
 
 const (
-	dailyListeningLiveCheckpointSource     = "abs_live_session"
-	dailyListeningLiveProvisionalStatus    = "provisional"
 	dailyListeningCrossDaySource           = "abs_sessions_cross_day"
 	dailyListeningCrossDayStatus           = "corrected"
 	dailyListeningCrossDayClockTolerance   = 2 * time.Minute
@@ -40,18 +38,13 @@ const (
 	crossDayAdjustmentConfidenceUncertain    = "uncertain"
 )
 
-type absLiveListeningSession struct {
+type absListeningSession struct {
 	SessionKey       string
-	ItemKey          string
-	PositionSeconds  float64
-	HasPosition      bool
 	ListeningSeconds float64
 	HasListeningTime bool
 	DateKey          string
 	StartedAt        time.Time
 	UpdatedAt        time.Time
-	IsPlaying        bool
-	HasPlayingState  bool
 
 	// Persisted cross-day metadata is populated only when loading an observed
 	// adjustment from SQLite. Bounded allocations contain mathematically
@@ -94,7 +87,7 @@ func interfaceSliceToMaps(raw interface{}) []map[string]interface{} {
 	return result
 }
 
-func parseAbsLiveListeningSession(raw map[string]interface{}, absUserID string) (absLiveListeningSession, bool) {
+func parseABSListeningSession(raw map[string]interface{}, absUserID string) (absListeningSession, bool) {
 	sessionKey := firstString(raw, "id", "sessionId", "sessionID", "session_id", "socketId", "socketID")
 	itemKey := firstString(raw, "libraryItemId", "libraryItemID", "library_item_id", "mediaItemId", "mediaItemID", "media_item_id", "bookId", "bookID", "episodeId", "episodeID", "chapterId", "chapterID")
 	if itemKey == "" {
@@ -108,22 +101,6 @@ func parseAbsLiveListeningSession(raw map[string]interface{}, absUserID string) 
 	updatedAt, hasUpdate := firstTime(raw, "updatedAt", "lastUpdate", "lastSeenAt", "lastActivityAt", "serverUpdatedAt")
 	listeningSeconds, hasListeningTime := firstFloat(raw, "timeListening", "time_listening")
 	dateKey := strings.TrimSpace(firstString(raw, "date"))
-	position, hasPosition := firstFloat(raw, "currentTime", "current_time", "position", "positionSeconds", "progress")
-	if !hasPosition {
-		position, hasPosition = nestedFirstFloat(raw, []string{"mediaProgress", "playback", "progress"}, "currentTime", "current_time", "position", "positionSeconds", "progress")
-	}
-	if !hasPosition && hasListeningTime {
-		position = listeningSeconds
-		hasPosition = true
-	}
-
-	isPlaying, hasPlaying := sessionPlayingState(raw)
-	// /api/users/{id}/listening-sessions is a historical session list. A missing
-	// playback state must never be interpreted as actively playing.
-	if !hasPlaying {
-		isPlaying = false
-	}
-
 	if sessionKey == "" {
 		baseTime := ""
 		if hasStart {
@@ -132,31 +109,26 @@ func parseAbsLiveListeningSession(raw map[string]interface{}, absUserID string) 
 		sessionKey = fmt.Sprintf("%s:%s:%s", strings.TrimSpace(absUserID), itemKey, baseTime)
 	}
 
-	if !hasPosition && !hasStart && !hasUpdate {
-		return absLiveListeningSession{}, false
+	if !hasListeningTime && !hasStart && !hasUpdate {
+		return absListeningSession{}, false
 	}
 
-	return absLiveListeningSession{
+	return absListeningSession{
 		SessionKey:       textfmt.FormatPlainValue(sessionKey),
-		ItemKey:          textfmt.FormatPlainValue(itemKey),
-		PositionSeconds:  position,
-		HasPosition:      hasPosition,
 		ListeningSeconds: listeningSeconds,
 		HasListeningTime: hasListeningTime,
 		DateKey:          dateKey,
 		StartedAt:        startedAt,
 		UpdatedAt:        updatedAt,
-		IsPlaying:        isPlaying,
-		HasPlayingState:  hasPlaying,
 	}, true
 }
 
-func fetchABSCrossDayListeningSessions(absUserID string) ([]absLiveListeningSession, error) {
+func fetchABSCrossDayListeningSessions(absUserID string) ([]absListeningSession, error) {
 	if abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" {
 		return nil, fmt.Errorf("ABS \u4f1a\u8bdd\u8bfb\u53d6\u53c2\u6570\u4e0d\u5b8c\u6574")
 	}
 
-	sessions := make([]absLiveListeningSession, 0, dailyListeningSessionPageSize)
+	sessions := make([]absListeningSession, 0, dailyListeningSessionPageSize)
 	seenSessionKeys := make(map[string]struct{}, dailyListeningSessionPageSize)
 	for page := 0; page < dailyListeningSessionMaxPages; page++ {
 		body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningSessionsPath(absUserID, page, dailyListeningSessionPageSize), nil)
@@ -174,7 +146,7 @@ func fetchABSCrossDayListeningSessions(absUserID string) ([]absLiveListeningSess
 			if !absSessionBelongsToUser(raw, absUserID) {
 				continue
 			}
-			session, ok := parseAbsLiveListeningSession(raw, absUserID)
+			session, ok := parseABSListeningSession(raw, absUserID)
 			if !ok {
 				continue
 			}
@@ -195,7 +167,7 @@ func fetchABSCrossDayListeningSessions(absUserID string) ([]absLiveListeningSess
 	return sessions, nil
 }
 
-func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[string]float64, sessions []absLiveListeningSession, observedAt time.Time) ([]absLiveListeningSession, error) {
+func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[string]float64, sessions []absListeningSession, observedAt time.Time) ([]absListeningSession, error) {
 	if storage.DB == nil {
 		return nil, fmt.Errorf("ABS_CROSS_DAY_DB_EMPTY")
 	}
@@ -238,7 +210,7 @@ func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[
 		return nil, fmt.Errorf("load ABS cross-day sessions: %w", err)
 	}
 
-	result := make([]absLiveListeningSession, 0, len(stored))
+	result := make([]absListeningSession, 0, len(stored))
 	for _, row := range stored {
 		allocation := make(map[string]float64)
 		if strings.TrimSpace(row.AllocationJSON) != "" {
@@ -247,7 +219,7 @@ func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[
 				continue
 			}
 		}
-		result = append(result, absLiveListeningSession{
+		result = append(result, absListeningSession{
 			SessionKey:       row.SessionKey,
 			DateKey:          row.SourceDay,
 			StartedAt:        row.StartedAt,
@@ -261,7 +233,7 @@ func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[
 	return result, nil
 }
 
-func buildABSCrossDaySessionObservations(userID int64, absUserID string, sessions []absLiveListeningSession, observedAt time.Time) ([]model.ABSCrossDaySessionAdjustment, map[string]int) {
+func buildABSCrossDaySessionObservations(userID int64, absUserID string, sessions []absListeningSession, observedAt time.Time) ([]model.ABSCrossDaySessionAdjustment, map[string]int) {
 	observations := make([]model.ABSCrossDaySessionAdjustment, 0, len(sessions))
 	diagnostics := make(map[string]int)
 	for _, session := range sessions {
@@ -312,7 +284,7 @@ func upsertABSCrossDaySessionObservations(tx *gorm.DB, observations []model.ABSC
 	}).CreateInBatches(&observations, 50).Error
 }
 
-func classifyABSCrossDaySession(session absLiveListeningSession) (status string, confidence string, reason string, tracked bool) {
+func classifyABSCrossDaySession(session absListeningSession) (status string, confidence string, reason string, tracked bool) {
 	if strings.TrimSpace(session.SessionKey) == "" || session.StartedAt.IsZero() || session.UpdatedAt.IsZero() || !session.UpdatedAt.After(session.StartedAt) {
 		return "", "", "", false
 	}
@@ -337,7 +309,7 @@ func classifyABSCrossDaySession(session absLiveListeningSession) (status string,
 	return crossDayAdjustmentStatusAccepted, crossDayAdjustmentConfidenceEstimated, "wall_clock_ratio", true
 }
 
-func crossDaySessionAllocationJSON(session absLiveListeningSession) string {
+func crossDaySessionAllocationJSON(session absListeningSession) string {
 	segments := splitDurationByBeijingDay(session.StartedAt, session.UpdatedAt)
 	total := 0.0
 	for _, seconds := range segments {
@@ -357,7 +329,7 @@ func crossDaySessionAllocationJSON(session absLiveListeningSession) string {
 	return string(body)
 }
 
-func crossDaySessionMinimumAllocationJSON(session absLiveListeningSession) string {
+func crossDaySessionMinimumAllocationJSON(session absListeningSession) string {
 	segments := splitDurationByBeijingDay(session.StartedAt, session.UpdatedAt)
 	wallSeconds := session.UpdatedAt.Sub(session.StartedAt).Seconds()
 	if wallSeconds <= 0 || session.ListeningSeconds <= 0 || session.ListeningSeconds > wallSeconds+dailyListeningCrossDayClockTolerance.Seconds() {
@@ -378,7 +350,7 @@ func crossDaySessionMinimumAllocationJSON(session absLiveListeningSession) strin
 	return string(body)
 }
 
-func rebalanceABSDaysForCrossDaySessions(days map[string]float64, sessions []absLiveListeningSession) (map[string]float64, map[string]bool) {
+func rebalanceABSDaysForCrossDaySessions(days map[string]float64, sessions []absListeningSession) (map[string]float64, map[string]bool) {
 	adjusted := make(map[string]float64, len(days))
 	remainingOfficialByDay := make(map[string]float64, len(days))
 	for dayKey, seconds := range days {
@@ -392,7 +364,7 @@ func rebalanceABSDaysForCrossDaySessions(days map[string]float64, sessions []abs
 	}
 
 	correctedDays := make(map[string]bool)
-	orderedSessions := append([]absLiveListeningSession(nil), sessions...)
+	orderedSessions := append([]absListeningSession(nil), sessions...)
 	sort.SliceStable(orderedSessions, func(i, j int) bool {
 		if orderedSessions[i].StartedAt.Equal(orderedSessions[j].StartedAt) {
 			return orderedSessions[i].SessionKey < orderedSessions[j].SessionKey
@@ -468,7 +440,7 @@ func rebalanceABSDaysForCrossDaySessions(days map[string]float64, sessions []abs
 	return adjusted, correctedDays
 }
 
-func crossDayListeningSessionCanRebalance(session absLiveListeningSession) bool {
+func crossDayListeningSessionCanRebalance(session absListeningSession) bool {
 	if !session.HasListeningTime || session.ListeningSeconds <= 0 ||
 		math.IsNaN(session.ListeningSeconds) || math.IsInf(session.ListeningSeconds, 0) ||
 		session.StartedAt.IsZero() || session.UpdatedAt.IsZero() || !session.UpdatedAt.After(session.StartedAt) ||
@@ -535,30 +507,6 @@ func splitDurationByBeijingDay(start time.Time, end time.Time) map[string]float6
 	return result
 }
 
-func sessionPlayingState(raw map[string]interface{}) (bool, bool) {
-	for _, key := range []string{"paused", "isPaused", "is_paused"} {
-		if v, ok := boolValue(raw[key]); ok {
-			return !v, true
-		}
-	}
-	for _, key := range []string{"playing", "isPlaying", "is_playing", "active", "isActive"} {
-		if v, ok := boolValue(raw[key]); ok {
-			return v, true
-		}
-	}
-	for _, key := range []string{"state", "status", "playbackStatus", "playback_state"} {
-		if s := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw[key]))); s != "" && s != "<nil>" {
-			if strings.Contains(s, "paused") || strings.Contains(s, "pause") || strings.Contains(s, "idle") || strings.Contains(s, "stop") {
-				return false, true
-			}
-			if strings.Contains(s, "play") || strings.Contains(s, "active") {
-				return true, true
-			}
-		}
-	}
-	return false, false
-}
-
 func firstString(raw map[string]interface{}, keys ...string) string {
 	for _, key := range keys {
 		if value := stringValue(raw[key]); value != "" {
@@ -583,17 +531,6 @@ func firstFloat(raw map[string]interface{}, keys ...string) (float64, bool) {
 	for _, key := range keys {
 		if value, ok := floatValue(raw[key]); ok {
 			return value, true
-		}
-	}
-	return 0, false
-}
-
-func nestedFirstFloat(raw map[string]interface{}, parents []string, keys ...string) (float64, bool) {
-	for _, parent := range parents {
-		if child, ok := raw[parent].(map[string]interface{}); ok {
-			if value, ok := firstFloat(child, keys...); ok {
-				return value, true
-			}
 		}
 	}
 	return 0, false
@@ -645,21 +582,6 @@ func floatValue(raw interface{}) (float64, bool) {
 		return f, err == nil
 	}
 	return 0, false
-}
-
-func boolValue(raw interface{}) (bool, bool) {
-	switch v := raw.(type) {
-	case bool:
-		return v, true
-	case string:
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "true", "1", "yes", "playing", "active":
-			return true, true
-		case "false", "0", "no", "paused", "idle", "stopped":
-			return false, true
-		}
-	}
-	return false, false
 }
 
 func timeValue(raw interface{}) (time.Time, bool) {

@@ -46,7 +46,7 @@ func startBackgroundJobs(bot *tgbotapi.BotAPI) {
 		}
 	}()
 
-	log.Println("✅ 后台任务调度器已启动：每日 03:00 后自动巡检、补跑备份与生命周期任务。")
+	log.Println("✅ 后台任务调度器已启动：播放异常风控每日北京时间 00:10 后执行；备份与生命周期任务每日 03:00 后执行。")
 }
 
 func runBackgroundSchedulerTickSafely(bot *tgbotapi.BotAPI) {
@@ -70,13 +70,15 @@ func runBackgroundSchedulerTickSafely(bot *tgbotapi.BotAPI) {
 	// （自带 5 分钟节流），不能放进每日 03:00 运营窗口。
 	account.RunReferralAutoClaimIfNeeded(bot, now)
 
+	// 风控自带北京时间 00:10 门槛与重试节流，不依赖 03:00 运营窗口。
+	game.RunListeningAbuseMonitorIfNeeded(bot, now)
+
 	if !isDailyOperationsWindowOpen(now) {
 		return
 	}
 
 	runDailyLifecycleIfNeeded(bot, now)
 	runDailyListeningRefreshIfNeeded(bot, now)
-	game.RunListeningAbuseMonitorIfNeeded(bot, now)
 	runSectWeeklyTaskAutoSettlementIfNeeded(bot, now)
 	runDailyFusionPoolCollectIfNeeded(bot, now)
 	runAutoBackupIfNeeded(bot, now)

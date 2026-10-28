@@ -23,6 +23,8 @@ import (
 
 var listeningAbuseMu sync.Mutex
 
+const listeningAbuseRetryInterval = 5 * time.Minute
+
 func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 	if !listeningAbuseMu.TryLock() {
 		return
@@ -56,6 +58,18 @@ func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 	if lastScanDay == targetDay {
 		return
 	}
+	lastAttempt, err := storage.GetSystemConfigTimeChecked(storage.ListeningAbuseLastAttemptAtKey)
+	if err != nil {
+		recordListeningAbuseStateReadFailure(bot, storage.ListeningAbuseLastAttemptAtKey, err)
+		return
+	}
+	if age := now.Sub(lastAttempt); !lastAttempt.IsZero() && age >= 0 && age < listeningAbuseRetryInterval {
+		return
+	}
+	if err := storage.SetSystemConfigStringChecked(storage.ListeningAbuseLastAttemptAtKey, now.Format(time.RFC3339)); err != nil {
+		recordListeningAbuseStateWriteFailure(bot, storage.ListeningAbuseLastAttemptAtKey, err)
+		return
+	}
 
 	warnings, freezes, skipped, err := scanListeningAbuseForDay(bot, targetDay, effectiveStartDay, now)
 	if err != nil {
@@ -82,6 +96,9 @@ func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 
 func listeningAbuseScanDayKey(now time.Time) string {
 	localNow := storage.DailyOperationsLocalTime(now)
+	if localNow.Hour() == 0 && localNow.Minute() < 10 {
+		return ""
+	}
 	return localNow.AddDate(0, 0, -1).Format("2006-01-02")
 }
 
@@ -166,37 +183,50 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, effectiveStar
 	warnings := 0
 	freezes := 0
 	skipped := 0
+	pending := 0
 	for _, u := range users {
 		if u.IsSuspended || storage.IsUserExpiredAt(u, now) {
 			skipped++
 			continue
 		}
 
-		rawHours, hasToday, err := dailyRawListeningHours(u.TelegramID, dayKey)
-		if err != nil {
-			log.Printf("listening abuse daily stat read failed: user=%d day=%s err=%s", u.TelegramID, textfmt.FormatPlainValue(dayKey), textfmt.FormatPlainError(err))
+		// A retry must not repeat successful warnings/freezes. These records
+		// survive restarts and are written atomically with their audits.
+		var processed int64
+		if err := storage.DB.Model(&model.ListeningAbuseRecord{}).
+			Where("user_id = ? AND day_key = ? AND action IN ?", u.TelegramID, dayKey,
+				[]string{storage.ListeningAbuseActionWarning, storage.ListeningAbuseActionFreeze}).
+			Count(&processed).Error; err != nil {
+			log.Printf("listening abuse processed record read failed: user=%d day=%s err=%s", u.TelegramID, textfmt.FormatPlainValue(dayKey), textfmt.FormatPlainError(err))
+			pending++
 			skipped++
 			continue
 		}
-		if !hasToday || !listeningAbuseShouldWarn(rawHours) {
+		if processed > 0 {
+			continue
+		}
+
+		// The normal five-minute cache contains only today's value. A scan
+		// needs fresh complete days for yesterday and the day before.
+		days, refreshed := refreshDailyListeningStatsFromABS(u.TelegramID, u.AbsUserID, true, dayKey, previousKey)
+		time.Sleep(storage.DailyListeningRefreshRequestDelay)
+		if !refreshed {
+			pending++
+			skipped++
+			continue
+		}
+		rawHours := abs.PositiveListeningSeconds(days[dayKey]) / 3600
+		if !listeningAbuseShouldWarn(rawHours) {
 			continue
 		}
 		previousRawHours := 0.0
 		if !listeningAbuseDayBefore(previousKey, effectiveStartDay) {
-			var hasPrevious bool
-			previousRawHours, hasPrevious, err = dailyRawListeningHours(u.TelegramID, previousKey)
-			if err != nil {
-				log.Printf("listening abuse previous daily stat read failed: user=%d day=%s previous_day=%s err=%s", u.TelegramID, textfmt.FormatPlainValue(dayKey), textfmt.FormatPlainValue(previousKey), textfmt.FormatPlainError(err))
-				skipped++
-				continue
-			}
-			if !hasPrevious {
-				previousRawHours = 0
-			}
+			previousRawHours = abs.PositiveListeningSeconds(days[previousKey]) / 3600
 		}
 		if listeningAbuseShouldFreeze(rawHours, previousRawHours) {
 			started, err := startListeningAbuseFreeze(bot, u, dayKey, previousKey, rawHours, previousRawHours, now)
 			if err != nil {
+				pending++
 				log.Printf("listening abuse freeze failed: user=%d day=%s err=%s", u.TelegramID, textfmt.FormatPlainValue(dayKey), textfmt.FormatPlainError(err))
 				writeListeningAbuseFailureAudit(bot, "LISTENING_ABUSE_FREEZE_FAILED", u.TelegramID, "播放异常自动冻结失败",
 					fmt.Sprintf("failed to freeze abnormal listening user; day=%s raw_hours=%.2f previous_day=%s previous_raw_hours=%.2f error=%s",
@@ -211,6 +241,7 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, effectiveStar
 
 		warned, err := createListeningAbuseWarning(bot, u, dayKey, rawHours, now)
 		if err != nil {
+			pending++
 			log.Printf("listening abuse warning failed: user=%d day=%s err=%s", u.TelegramID, textfmt.FormatPlainValue(dayKey), textfmt.FormatPlainError(err))
 			continue
 		}
@@ -219,36 +250,10 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, effectiveStar
 		}
 	}
 
+	if pending > 0 {
+		return warnings, freezes, skipped, fmt.Errorf("LISTENING_ABUSE_SCAN_PENDING: %d users require retry", pending)
+	}
 	return warnings, freezes, skipped, nil
-}
-
-func dailyRawListeningHours(userID int64, dayKey string) (float64, bool, error) {
-	var stat model.DailyListeningStat
-	if err := storage.DB.Where("user_id = ? AND day_key = ?", userID, dayKey).First(&stat).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, false, nil
-		}
-		return 0, false, err
-	}
-	rawHours, ok := listeningAbuseRawHoursFromStat(stat)
-	return rawHours, ok, nil
-}
-
-func listeningAbuseRawHoursFromStat(stat model.DailyListeningStat) (float64, bool) {
-	if stat.FetchStatus == dailyListeningLiveProvisionalStatus || stat.Source == dailyListeningLiveCheckpointSource {
-		return 0, false
-	}
-	if stat.FetchStatus == "mixed" || stat.Source == "mixed" ||
-		stat.FetchStatus == dailyListeningCrossDayStatus || stat.Source == dailyListeningCrossDaySource {
-		if stat.OfficialRawSeconds <= 0 {
-			return 0, false
-		}
-		return stat.OfficialRawSeconds / 3600, true
-	}
-	if stat.OfficialRawSeconds > 0 {
-		return stat.OfficialRawSeconds / 3600, true
-	}
-	return stat.RawSeconds / 3600, true
 }
 
 func createListeningAbuseRecordInTx(tx *gorm.DB, record *model.ListeningAbuseRecord) (bool, error) {
@@ -295,7 +300,7 @@ func createListeningAbuseWarning(bot *tgbotapi.BotAPI, u model.User, dayKey stri
 		return false, nil
 	}
 
-	text := fmt.Sprintf("⚠️ **播放时长异常提醒**\n\n系统检测到您在北京时间 `%s` 的 ABS 原始播放时长为 `%.2f` 小时，已超过 `%g` 小时。\n\n若连续两个自然日超过该阈值，系统将自动暂停听书账号 `24` 小时。请确认播放器、自动播放或多设备播放状态是否正常。",
+	text := fmt.Sprintf("⚠️ **播放时长异常提醒**\n\n系统检测到您在北京时间 `%s` 的 可证明的 ABS 播放时长至少为 `%.2f` 小时，已超过 `%g` 小时。\n\n若连续两个自然日超过该阈值，系统将自动暂停听书账号 `24` 小时。请确认播放器、自动播放或多设备播放状态是否正常。",
 		dayKey, rawHours, storage.ListeningAbuseDailyRawHoursThreshold)
 	noticeErr := sendListeningAbusePrivateNotice(bot, u.TelegramID, text)
 	if noticeErr != nil {
@@ -354,7 +359,7 @@ func startListeningAbuseFreeze(bot *tgbotapi.BotAPI, u model.User, dayKey string
 		return false, nil
 	}
 
-	privateText := fmt.Sprintf("⛔ **账号已临时暂停**\n\n系统检测到您连续两个北京时间自然日播放时长超过 `%g` 小时：\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n\n您的听书账号已暂停 `24` 小时，预计恢复时间：`%s`。\n\n本次仅暂停收听权限，不扣除积分、贡献或修为。请检查播放器自动播放、多设备播放或未关闭播放的问题。",
+	privateText := fmt.Sprintf("⛔ **账号已临时暂停**\n\n系统检测到您连续两个北京时间自然日可证明的播放时长均超过 `%g` 小时：\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n\n您的听书账号已暂停 `24` 小时，预计恢复时间：`%s`。\n\n本次仅暂停收听权限，不扣除积分、贡献或修为。请检查播放器自动播放、多设备播放或未关闭播放的问题。",
 		storage.ListeningAbuseDailyRawHoursThreshold, previousDayKey, previousRawHours, dayKey, rawHours, storage.DailyOperationsLocalTime(freezeEnd).Format("2006-01-02 15:04"))
 	noticeErr := sendListeningAbusePrivateNotice(bot, u.TelegramID, privateText)
 	groupErr := sendListeningAbuseGroupFreezeNotice(bot, u, dayKey, rawHours, previousDayKey, previousRawHours, freezeEnd)
@@ -569,7 +574,7 @@ func sendListeningAbuseGroupFreezeNotice(bot *tgbotapi.BotAPI, u model.User, day
 	if name == "" {
 		name = strconv.FormatInt(u.TelegramID, 10)
 	}
-	text := fmt.Sprintf("⚠️ **播放异常风控**\n\n道友 `%s` 因连续两天播放时长异常，听书账号已临时暂停 `24` 小时。\n\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n预计恢复：`%s`",
+	text := fmt.Sprintf("⚠️ **播放异常风控**\n\n道友 `%s` 因连续两天可证明的播放时长超限，听书账号已临时暂停 `24` 小时。\n\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n预计恢复：`%s`",
 		name, previousDayKey, previousRawHours, dayKey, rawHours, storage.DailyOperationsLocalTime(freezeEnd).Format("2006-01-02 15:04"))
 	msg := tgbotapi.NewMessage(config.AppConfig.NoticeGroupID, text)
 	msg.ParseMode = "Markdown"

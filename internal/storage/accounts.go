@@ -135,6 +135,7 @@ const (
 	ListeningAbuseEffectiveStartDayKey = "listening_abuse_effective_start_day"
 	ListeningAbuseLastScanDayKey       = "listening_abuse_last_scan_day"
 	ListeningAbuseLastScanAtKey        = "listening_abuse_last_scan_at"
+	ListeningAbuseLastAttemptAtKey     = "listening_abuse_last_attempt_at"
 	ListeningAbuseLastErrorKey         = "listening_abuse_last_error"
 )
 

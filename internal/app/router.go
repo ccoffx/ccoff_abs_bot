@@ -339,7 +339,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"线路", "报告", "我的信息", "安全", "删号", "注销",
 		"修改密码", "修改用户名", "红包", "解绑", "修改本地",
 		"监控", "操控", "生成", "授权", "白名单", "设置",
-		"模拟过期", "备份", "备份状态", "后台状态", "审计概览", "审计日志", "查审计", "价格", "盲盒", "清理遗孀", "财富榜", "积分榜",
+		"模拟过期", "备份", "备份状态", "后台状态", "审计概览", "审计日志", "查审计", "价格", "权益盲盒", "清理遗孀", "财富榜", "积分榜",
 		"查询", "封禁", "暂停", "删除用户", "查码", "抽奖", "积分抽奖",
 		"突破", "斗气榜", "斗气排行榜",
 		"查看斗气配置", "查看突破配置", "查看境界配置",
@@ -599,7 +599,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if strings.Contains(text, "盲盒") {
+		if text == "权益盲盒" {
 			u, _, walletErr := storage.EnsureUserWallet(msg.From)
 			if walletErr != nil {
 				log.Printf("❌ 创建幽灵钱包失败: user=%d err=%s", userID, textfmt.FormatPlainError(walletErr))
@@ -607,12 +607,12 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				return
 			}
 			if u.Points < activity.BlindBoxCost {
-				telegram.ReplyText(bot, chatID, fmt.Sprintf("🎁 开启盲盒需要 %d 积分，您当前余额为 %d 积分。\n\n💡 **新人指引**：赶紧去点击面板上的【📆 每日签到】白嫖第一桶金吧！", activity.BlindBoxCost, u.Points))
+				telegram.ReplyText(bot, chatID, fmt.Sprintf("🎁 开启权益盲盒需要 %d 积分，您当前余额为 %d 积分。\n\n💡 **新人指引**：赶紧去点击面板上的【📆 每日签到】白嫖第一桶金吧！", activity.BlindBoxCost, u.Points))
 				return
 			}
 
 			session.SetStep("WAITING_CONFIRM_BLIND_BOX")
-			telegram.ReplyText(bot, chatID, fmt.Sprintf("🎁 **积分盲盒确认**\n\n开启一次将扣除 `%d` 积分。\n当前余额：`%d` 积分\n扣除后余额：`%d` 积分\n\n确认开启请回复：`确认开启盲盒`\n取消请回复：`取消`。", activity.BlindBoxCost, u.Points, u.Points-activity.BlindBoxCost))
+			telegram.ReplyText(bot, chatID, fmt.Sprintf("🎁 **权益盲盒确认**\n\n个人抽取续期卡或邀请码，每次必有奖励，最低为 1 天续期卡。\n\n开启一次将扣除 `%d` 积分。\n当前余额：`%d` 积分\n扣除后余额：`%d` 积分\n\n确认开启请回复：`确认开启权益盲盒`\n取消请回复：`取消`。", activity.BlindBoxCost, u.Points, u.Points-activity.BlindBoxCost))
 			telegram.UserSessions.Store(userID, session)
 			return
 		}
@@ -1605,13 +1605,13 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		telegram.ClearSession(userID)
 
 	case "WAITING_CONFIRM_BLIND_BOX":
-		if text == "确认开启盲盒" {
+		if text == "确认开启权益盲盒" {
 			replyMsg, broadcastMsg, err := activity.ExecuteBlindBoxOpen(msg.From)
 			if err != nil {
 				if errors.Is(err, storage.ErrPointsNotEnough) {
 					telegram.ReplyText(bot, chatID, "❌ 您的积分储备余额不足，开盒失败。")
 				} else {
-					log.Printf("❌ 积分盲盒事务失败: user=%d cost=%d err=%s", userID, activity.BlindBoxCost, textfmt.FormatPlainError(err))
+					log.Printf("❌ 权益盲盒事务失败: user=%d cost=%d err=%s", userID, activity.BlindBoxCost, textfmt.FormatPlainError(err))
 					telegram.ReplyText(bot, chatID, "❌ 奖品生成触发底层碰撞保护，为您中止交易。\n💰 本次操作未扣除您的任何积分。")
 				}
 				telegram.ClearSession(userID)
@@ -1623,7 +1623,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, broadcastMsg)
 			}
 		} else {
-			telegram.ReplyText(bot, chatID, "🛑 已取消开启积分盲盒。")
+			telegram.ReplyText(bot, chatID, "🛑 已取消开启权益盲盒。")
 		}
 		telegram.ClearSession(userID)
 

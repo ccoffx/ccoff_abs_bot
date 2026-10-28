@@ -23,7 +23,7 @@ func ExecuteBlindBoxOpen(tgUser *tgbotapi.User) (string, string, error) {
 
 	userID := tgUser.ID
 	safeName := textfmt.EscapeMarkdown(tgUser.FirstName)
-	resultPrefix := fmt.Sprintf("📦 盲盒开启中...\n💰 已扣除 `%d` 积分。\n\n", BlindBoxCost)
+	resultPrefix := fmt.Sprintf("📦 权益盲盒开启中...\n💰 已扣除 `%d` 积分。\n\n", BlindBoxCost)
 
 	var txReplyMsg, txBroadcastMsg string
 	blindBoxRefID := fmt.Sprintf("blind_box:%d:%s", userID, security.GenerateRandomCode(8))
@@ -33,7 +33,7 @@ func ExecuteBlindBoxOpen(tgUser *tgbotapi.User) (string, string, error) {
 			userID,
 			-BlindBoxCost,
 			"blind_box_cost",
-			fmt.Sprintf("开启积分盲盒，消耗 %d 积分", BlindBoxCost),
+			fmt.Sprintf("开启权益盲盒，消耗 %d 积分", BlindBoxCost),
 			"blind_box",
 			blindBoxRefID,
 		); err != nil {
@@ -74,14 +74,14 @@ func ExecuteBlindBoxOpen(tgUser *tgbotapi.User) (string, string, error) {
 				return err
 			}
 			txReplyMsg = resultPrefix + fmt.Sprintf("🎊 运气爆棚！获得大奖：**【30天续期月卡】**！\n💳 专属卡密：`%s`", code)
-			txBroadcastMsg = fmt.Sprintf("🎰 **欧皇降临！**\n\n恭喜 @%s 在积分盲盒中单抽入魂，斩获大奖 **【💳 30天续期月卡】**！", safeName)
+			txBroadcastMsg = fmt.Sprintf("🎰 **欧皇降临！**\n\n恭喜 @%s 在权益盲盒中单抽入魂，斩获大奖 **【💳 30天续期月卡】**！", safeName)
 		case roll <= 999:
 			code := fmt.Sprintf("R%d-%s", 90, security.GenerateRandomCode(16))
 			if err := storage.CreateRenewCodeRecord(tx, code, 90); err != nil {
 				return err
 			}
 			txReplyMsg = resultPrefix + fmt.Sprintf("🌟 鸿运当头！获得珍稀大奖：**【90天续期季卡】**！\n💳 专属卡密：`%s`", code)
-			txBroadcastMsg = fmt.Sprintf("🌟 **鸿运降临！**\n\n恭喜 @%s 在积分盲盒中斩获珍稀大奖 **【💳 90天续期季卡】**！", safeName)
+			txBroadcastMsg = fmt.Sprintf("🌟 **鸿运降临！**\n\n恭喜 @%s 在权益盲盒中斩获珍稀大奖 **【💳 90天续期季卡】**！", safeName)
 		case roll <= 1000:
 			code := fmt.Sprintf("R%d-%s", 365, security.GenerateRandomCode(16))
 			if err := storage.CreateRenewCodeRecord(tx, code, 365); err != nil {

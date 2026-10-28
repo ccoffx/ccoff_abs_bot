@@ -140,10 +140,6 @@ type BreakthroughConfig struct {
 	RefundRate         float64 `gorm:"default:0.2"`
 	FailPenaltyPoints  int     `gorm:"default:50"`
 
-	SplashMinMajorRealm int `gorm:"default:0"` // Deprecated: random splash penalties are disabled.
-	SplashVictimCount   int `gorm:"default:0"`
-	SplashPenaltyPoints int `gorm:"default:0"`
-
 	Enabled bool `gorm:"default:true"`
 }
 

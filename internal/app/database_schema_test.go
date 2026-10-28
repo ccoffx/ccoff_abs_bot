@@ -16,7 +16,6 @@ import (
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/storage"
-	"ccoff-abs-bot/internal/textfmt"
 )
 
 func TestDatabaseFreshStartAndRestart(t *testing.T) {
@@ -197,12 +196,5 @@ func TestMarketplaceUsesRecordedOrderAmounts(t *testing.T) {
 	}
 	if !market.MarketplaceListingExpired(model.MarketplaceListing{}, time.Now()) {
 		t.Fatal("missing expiry permits trading")
-	}
-}
-
-func TestSplashVictimLabelsUseCurrentProfile(t *testing.T) {
-	labels := game.ResolveSplashVictimLabels([]string{"name_with_markdown", "ghost_tg_2", ""}, []string{"", "显示名", ""}, []int64{1, 2, 3})
-	if labels[0] != textfmt.EscapeMarkdown("name_with_markdown") || labels[1] != "显示名" || labels[2] != "3" {
-		t.Fatalf("invalid announcement labels: %v", labels)
 	}
 }

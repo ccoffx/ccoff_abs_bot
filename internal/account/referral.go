@@ -975,7 +975,7 @@ func HandleReferralCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 
 	if !msg.Chat.IsPrivate() {
 		switch text {
-		case "我的邀请", "邀请链接", "拉新链接", "邀请统计", "新人任务", "检查新人任务":
+		case "我的邀请", "邀请链接", "拉新链接", "邀请统计":
 			telegram.SendPlainText(bot, msg.Chat.ID, "邀请链接和邀请统计请私聊 Bot 执行。")
 			return true
 		default:
@@ -986,10 +986,6 @@ func HandleReferralCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 	switch text {
 	case "我的邀请", "邀请链接", "拉新链接":
 		showMyReferral(bot, msg)
-		return true
-	case "新人任务", "检查新人任务":
-		// 新人任务已改为自动结算：无需手动领取，达标的延期和奖励会自动到账并私信提醒。
-		telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 新人任务已支持自动完成，无需手动领取。\n\n体验期内累计听书满 `%.0f` 小时，系统会自动为新人延长 `%d` 天体验，并为邀请者发放积分奖励。\n\n如需查询邀请进度，请发送 `邀请统计`。", storage.ReferralTaskHours, storage.ReferralTrialDays))
 		return true
 	case "邀请统计":
 		showReferralStats(bot, msg)

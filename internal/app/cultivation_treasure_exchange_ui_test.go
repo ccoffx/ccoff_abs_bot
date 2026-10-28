@@ -16,7 +16,7 @@ import (
 	"ccoff-abs-bot/internal/storage"
 )
 
-func TestCultivationTreasureTelegramFlowAndRetiredCallbacks(t *testing.T) {
+func TestCultivationTreasureTelegramFlowAndDonation(t *testing.T) {
 	setupCultivationTreasureTestDB(t)
 	var mu sync.Mutex
 	var text, keyboard string
@@ -90,7 +90,7 @@ func TestCultivationTreasureTelegramFlowAndRetiredCallbacks(t *testing.T) {
 	if exchangeTestQuantity(t, game.SectSecretRealmTokenItemName) != 2 || exchangeTestQuantity(t, "地心熔岩髓") != 1 || treasureTestBalance(t, 1) != 100 {
 		t.Fatal("old callbacks or double-click changed assets")
 	}
-	// 旧贡献卦象不再放大捐献奖励，捐献积分与贡献维持 1:1。
+	// 捐献积分与贡献维持 1:1。
 	if err := storage.DB.AutoMigrate(&model.SectContributionLog{}); err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +101,9 @@ func TestCultivationTreasureTelegramFlowAndRetiredCallbacks(t *testing.T) {
 	if err := storage.DB.Create(&model.SectMember{SectID: int64(sect.ID), UserID: 1, Role: "member"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	seedUnusedSectTables(t, int64(sect.ID), "contribution")
 	game.HandleDonateSect(bot, &tgbotapi.Message{MessageID: 123, Chat: cb.Message.Chat, From: cb.From}, "20")
 	var member model.SectMember
 	if err := storage.DB.First(&member, "user_id = ?", 1).Error; err != nil || member.Contribution != 20 || member.WeeklyContribution != 20 || treasureTestBalance(t, 1) != 80 {
-		t.Fatalf("donation retained a removed bonus: %+v, %v", member, err)
+		t.Fatalf("unexpected donation balance: %+v, %v", member, err)
 	}
 }

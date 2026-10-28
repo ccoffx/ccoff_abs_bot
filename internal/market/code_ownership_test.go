@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -53,7 +52,7 @@ func setupCodeOwnershipTest(t *testing.T) {
 	}
 }
 
-func TestCodeOwnershipExchangeAndLegacyScope(t *testing.T) {
+func TestCodeOwnershipExchangeAndBearerCodes(t *testing.T) {
 	for _, kind := range []string{"invite", "renew"} {
 		t.Run(kind, func(t *testing.T) {
 			setupCodeOwnershipTest(t)
@@ -89,20 +88,20 @@ func TestCodeOwnershipExchangeAndLegacyScope(t *testing.T) {
 			if _, err := ExecuteCodeCashout(1, quote); err != nil {
 				t.Fatal(err)
 			}
-			legacy := "legacy-secret-123456"
+			bearer := "bearer-secret-123456"
 			if kind == "invite" {
-				err = storage.CreateInviteCodeRecord(storage.DB, legacy)
+				err = storage.CreateInviteCodeRecord(storage.DB, bearer)
 			} else {
-				err = storage.CreateRenewCodeRecord(storage.DB, legacy, 30)
+				err = storage.CreateRenewCodeRecord(storage.DB, bearer, 30)
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			legacyQuote, err := InspectCodeCashout(legacy, 2)
+			bearerQuote, err := InspectCodeCashout(bearer, 2)
 			if err != nil {
-				t.Fatal("untraded legacy code restricted", err)
+				t.Fatal("untraded bearer code restricted", err)
 			}
-			if _, err := ExecuteCodeCashout(2, legacyQuote); err != nil {
+			if _, err := ExecuteCodeCashout(2, bearerQuote); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -172,39 +171,5 @@ func TestMarketplaceTransfersOwnershipAndAllowsResale(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestHistoricalTradeOwnershipMigration(t *testing.T) {
-	setupCodeOwnershipTest(t)
-	const raw = "historical-secret-123"
-	if err := storage.CreateInviteCodeRecord(storage.DB, raw); err != nil {
-		t.Fatal(err)
-	}
-	hash := security.HashSensitiveToken(raw)
-	for buyer := int64(2); buyer <= 3; buyer++ {
-		soldAt := time.Now().Add(time.Duration(buyer) * time.Minute)
-		if err := storage.DB.Create(&model.MarketplaceSecret{CodeHash: hash, BuyerID: buyer, Status: "sold", SoldAt: &soldAt}).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := storage.MigrateTradedCodeOwnership(storage.DB); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := InspectCodeCashout(raw, 2); !errors.Is(err, storage.ErrCodeOwnerMismatch) {
-		t.Fatalf("historical seller retained rights: %v", err)
-	}
-	if _, err := InspectCodeCashout(raw, 3); err != nil {
-		t.Fatal(err)
-	}
-	// A repeat startup must not overwrite a newer owner.
-	if err := storage.DB.Model(&model.InviteCode{}).Where("code_hash = ?", hash).Update("owner_user_id", 1).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.MigrateTradedCodeOwnership(storage.DB); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := InspectCodeCashout(raw, 1); err != nil {
-		t.Fatal("migration reran on restart", err)
 	}
 }

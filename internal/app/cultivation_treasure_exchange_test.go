@@ -223,7 +223,7 @@ func TestCurrentCultivationIntegration(t *testing.T) {
 			}
 		}
 	}
-	// 既有神兽与卦象记录不得影响当前 Boss 伤害或每日净修为。
+	// 宗门科技影响 Boss 伤害，听书使用当日统计。
 	if err := storage.DB.AutoMigrate(&model.DailyListeningStat{}, &model.SectCaveRetreat{}); err != nil {
 		t.Fatal(err)
 	}
@@ -236,22 +236,12 @@ func TestCurrentCultivationIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seedUnusedSectTables(t, 1, "world_boss")
 	damage, multiplier, err := game.ApplyWorldBossDamageBonusesChecked(1, 30)
 	if err != nil || damage != 36.9 || multiplier < 1.22999 || multiplier > 1.23001 {
-		t.Fatalf("world boss retained a removed bonus: %f, %f, %v", damage, multiplier, err)
-	}
-	if err := storage.DB.Exec("UPDATE sect_fortunes SET buff_type = ? WHERE sect_id = ?", "net_cultivation", 1).Error; err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected world boss technology bonus: %f, %f, %v", damage, multiplier, err)
 	}
 	if hours, ok := game.GetTodaySectListeningHoursFromCache(1, time.Now()); !ok || hours != 2 {
-		t.Fatalf("today's listening retained a removed bonus: %f, %t", hours, ok)
-	}
-	if err := storage.DB.Migrator().DropTable("sect_beasts", "sect_fortunes"); err != nil {
-		t.Fatal(err)
-	}
-	if got, _, err := game.ApplyWorldBossDamageBonusesChecked(1, 30); err != nil || got != damage {
-		t.Fatalf("world boss still queries removed tables: %f, %v", got, err)
+		t.Fatalf("unexpected daily listening hours: %f, %t", hours, ok)
 	}
 	_, menu := renderFeatureMenu("sect", 1)
 	for _, row := range menu.InlineKeyboard {
@@ -260,24 +250,5 @@ func TestCurrentCultivationIntegration(t *testing.T) {
 				t.Fatal("retired feature in sect menu")
 			}
 		}
-	}
-}
-
-// 仅供升级回归测试模拟旧数据库，应用代码无需声明或注册这些模型。
-func seedUnusedSectTables(t *testing.T, sectID int64, buff string) {
-	t.Helper()
-	for _, sql := range []string{
-		"CREATE TABLE sect_fortunes (sect_id INTEGER, day_key TEXT, buff_type TEXT)",
-		"CREATE TABLE sect_beasts (sect_id INTEGER, stage INTEGER, level INTEGER)",
-	} {
-		if err := storage.DB.Exec(sql).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := storage.DB.Exec("INSERT INTO sect_fortunes VALUES (?, ?, ?)", sectID, game.SectDayKey(time.Now()), buff).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.DB.Exec("INSERT INTO sect_beasts VALUES (?, 3, 60)", sectID).Error; err != nil {
-		t.Fatal(err)
 	}
 }

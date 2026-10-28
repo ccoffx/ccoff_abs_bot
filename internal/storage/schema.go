@@ -166,9 +166,6 @@ var DatabaseIndexes = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_listening_stats_user_day_unique
   ON daily_listening_stats(user_id, day_key)
   WHERE deleted_at IS NULL;`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_abs_live_listening_checkpoints_unique
-  ON abs_live_listening_checkpoints(user_id, session_key, item_key)
-  WHERE deleted_at IS NULL;`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_marketplace_disputes_open_purchase_buyer_unique
   ON marketplace_disputes(purchase_id, buyer_id)
   WHERE status = 'open' AND deleted_at IS NULL;`,

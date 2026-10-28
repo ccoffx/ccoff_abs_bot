@@ -32,25 +32,6 @@ func (ABSCrossDaySessionScanCursor) TableName() string {
 	return "abs_cross_day_session_scan_cursors"
 }
 
-type AbsLiveListeningCheckpoint struct {
-	gorm.Model
-
-	UserID    int64  `gorm:"index;not null"`
-	AbsUserID string `gorm:"index;not null"`
-
-	SessionKey string `gorm:"index;not null"`
-	ItemKey    string `gorm:"index;not null"`
-
-	LastObservedAt      time.Time `gorm:"index"`
-	LastPositionSeconds float64
-	LastIsPlaying       bool
-	LastServerUpdatedAt time.Time
-}
-
-func (AbsLiveListeningCheckpoint) TableName() string {
-	return "abs_live_listening_checkpoints"
-}
-
 type ABSCrossDaySessionAdjustment struct {
 	ID        uint `gorm:"primaryKey"`
 	CreatedAt time.Time
@@ -110,18 +91,13 @@ type DailyListeningStat struct {
 	AbsUserID string `gorm:"index"`
 	DayKey    string `gorm:"index;not null"` // 北京时间日期 YYYY-MM-DD
 
-	RawSeconds            float64
-	CappedSeconds         float64
-	EffectiveHours        float64
-	LastFetchedAt         time.Time `gorm:"index"`
-	OfficialRawSeconds    float64
-	LiveRawSeconds        float64
-	LastOfficialFetchedAt time.Time `gorm:"index"`
-	LastLiveFetchedAt     time.Time `gorm:"index"`
-	Source                string
-	FetchStatus           string
-	FetchError            string
-	RefreshReason         string
+	RawSeconds     float64
+	CappedSeconds  float64
+	EffectiveHours float64
+	LastFetchedAt  time.Time `gorm:"index"`
+	Source         string
+	FetchStatus    string
+	RefreshReason  string
 }
 
 func (DailyListeningStat) TableName() string {

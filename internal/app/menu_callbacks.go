@@ -54,7 +54,7 @@ func handleMenuEntry(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) b
 		key = "activity"
 	case "📚 求书中心":
 		key = "book"
-	case "🧾 资产流水", "🧾 资产交易":
+	case "🧾 资产交易":
 		key = "assets"
 	case "⚙️ 账号服务":
 		key = "account"
@@ -123,7 +123,7 @@ func handleMenuCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 		telegram.AnswerCallback(bot, cb.ID, "请前往群内操作")
 		tip := "请前往官方群内发送对应指令。"
 		if parts[2] == "treasure" {
-			tip = "🗺 寻宝需在群内进行，请发送 发起寻宝。每箱消耗 3 积分，每人每局限开一次。"
+			tip = "🗺 群内寻宝是限时积分小游戏。请在群内发送 发起寻宝，再点击原藏宝图下方的宝箱按钮参与。每箱消耗 3 积分，随机获得 0、2、5 或 10 积分，每人每局限开一次。"
 		}
 		telegram.SendPlainText(bot, cb.Message.Chat.ID, tip)
 	default:
@@ -269,7 +269,7 @@ func renderFeatureMenu(key string, userID int64) (string, tgbotapi.InlineKeyboar
 			menuCmdRow("⚔️ 参加Boss", "join_boss"),
 			menuCmdRow("🏆 Boss排行", "boss_rank"),
 			menuCmdRow("🎲 积分抽奖", "lottery"),
-			menuTipRow("🗺 群内寻宝", "treasure"),
+			menuTipRow("🗺 群内寻宝（积分小游戏）", "treasure"),
 			menuBackRow(),
 		)
 	case "book":
@@ -294,7 +294,7 @@ func renderFeatureMenu(key string, userID int64) (string, tgbotapi.InlineKeyboar
 			menuCmdRow("🏷 上架商品", "market_sell"),
 			menuCmdRow("♻️ 卡密回收", "code_cashout"),
 			menuCmdRow("🪙 积分兑换", "exchange"),
-			menuCmdRow("🎁 积分盲盒", "blind_box"),
+			menuCmdRow("🎁 权益盲盒（续期卡/邀请码）", "blind_box"),
 			menuCmdRow("🧧 制作积分红包", "red_packet"),
 			menuBackRow(),
 		)
@@ -587,7 +587,7 @@ func menuCommandText(key string) (string, bool) {
 		"market_help":           "交易行帮助",
 		"market_sell":           "上架商品",
 		"code_cashout":          "卡密回收",
-		"blind_box":             "积分盲盒",
+		"blind_box":             "权益盲盒",
 		"red_packet":            "制作积分红包",
 		"register":              "注册",
 		"bind":                  "绑定",

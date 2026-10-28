@@ -371,13 +371,13 @@ func TestTreasureRoundLimitsAndPanelPrivacy(t *testing.T) {
 	}
 }
 
-func TestTreasureFreshDatabaseMigration(t *testing.T) {
-	// InitDB 的迁移失败会 log.Fatal，放在子进程中校验完整启动迁移。
-	if os.Getenv("TREASURE_MIGRATION_TEST_CHILD") != "1" {
-		command := exec.Command(os.Args[0], "-test.run=^TestTreasureFreshDatabaseMigration$")
-		command.Env = append(os.Environ(), "TREASURE_MIGRATION_TEST_CHILD=1")
+func TestTreasureFreshDatabaseInitialization(t *testing.T) {
+	// InitDB 的建库失败会 log.Fatal，放在子进程中校验完整首次启动。
+	if os.Getenv("TREASURE_INITIALIZATION_TEST_CHILD") != "1" {
+		command := exec.Command(os.Args[0], "-test.run=^TestTreasureFreshDatabaseInitialization$")
+		command.Env = append(os.Environ(), "TREASURE_INITIALIZATION_TEST_CHILD=1")
 		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("fresh database migration failed: %v\n%s", err, output)
+			t.Fatalf("fresh database initialization failed: %v\n%s", err, output)
 		}
 		return
 	}
@@ -388,7 +388,7 @@ func TestTreasureFreshDatabaseMigration(t *testing.T) {
 			t.Fatalf("missing table %s", table)
 		}
 	}
-	if err := storage.DB.Create(&modelpkg.User{TelegramID: 1, Username: "migration_player", Points: 100}).Error; err != nil {
+	if err := storage.DB.Create(&modelpkg.User{TelegramID: 1, Username: "fresh_player", Points: 100}).Error; err != nil {
 		t.Fatal(err)
 	}
 	round := newTreasureTestRound(t, -100)

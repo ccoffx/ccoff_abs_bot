@@ -156,6 +156,9 @@ type SectCaveRetreat struct {
 	EndAt   time.Time `gorm:"index;not null"`
 
 	BaseRawSeconds float64
+	// Durable session observations used to prove playback inside the retreat.
+	// Late playback outside StartAt/EndAt never contributes to the bonus.
+	ListeningEvidenceJSON string
 
 	PersonalPrestigeCost int `gorm:"default:0"`
 	SectPrestigeCost     int `gorm:"default:0"`

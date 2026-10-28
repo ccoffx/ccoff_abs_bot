@@ -124,11 +124,30 @@ func syncCultivationFromDailyListeningStatsAt(userID int64, now time.Time) (floa
 }
 
 func totalCultivationEffectiveHoursFromDailyStats(userID int64, now time.Time) (float64, bool) {
-	total, ok := sumDailyListeningEffectiveHours(userID)
-	if !ok {
+	if storage.DB == nil || userID == 0 {
 		return 0, false
 	}
-	return total + ActiveSectCaveRetreatBonusHours(userID, now), true
+	var stats []model.DailyListeningStat
+	if err := storage.DB.Where("user_id = ?", userID).Find(&stats).Error; err != nil {
+		log.Printf("累计净修为读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
+		return 0, false
+	}
+	var retreats []model.SectCaveRetreat
+	if err := storage.DB.Where("user_id = ? AND start_at <= ?", userID, now).Find(&retreats).Error; err != nil {
+		log.Printf("累计闭关加成读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
+		return 0, false
+	}
+	for _, retreat := range retreats {
+		if _, err := decodeSectRetreatEvidence(retreat); err != nil {
+			log.Printf("累计闭关凭据读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
+			return 0, false
+		}
+	}
+	total := 0.0
+	for _, stat := range stats {
+		total += stat.EffectiveHours + dailySectCaveRetreatBonusHours(stat, retreats)
+	}
+	return total, true
 }
 
 func handleRefreshMyDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -227,7 +246,11 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 		refreshReason = stat.Source
 	}
 
-	retreatBonus := ActiveSectCaveRetreatBonusHours(stat.UserID, time.Now())
+	retreatBonus := 0.0
+	now := time.Now()
+	if stat.DayKey == SectDayKey(now) {
+		retreatBonus = ActiveSectCaveRetreatBonusHours(stat.UserID, now)
+	}
 	retreatLine := ""
 	if retreatBonus > 0 {
 		retreatLine = fmt.Sprintf("\n洞府闭关加成：`+%.2f` 小时", retreatBonus)
@@ -239,7 +262,7 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 		stat.DayKey,
 		stat.RawSeconds/3600.0,
 		stat.CappedSeconds/3600.0,
-		stat.EffectiveHours,
+		stat.EffectiveHours+retreatBonus,
 		retreatLine,
 		totalEffective,
 		stat.LastFetchedAt.Format("2006-01-02 15:04:05"),

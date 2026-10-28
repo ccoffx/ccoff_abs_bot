@@ -1395,7 +1395,11 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 			}
 		}
 
-		updateCultivationAudioHours(p.UserID, finalSnapshot.EffectiveHours)
+		// A zero-increment settlement fallback is not a current cultivation
+		// snapshot. Preserve the profile when ABS/evidence reads failed.
+		if err == nil {
+			updateCultivationAudioHours(p.UserID, finalSnapshot.EffectiveHours)
+		}
 		p.MajorRealm, p.MinorRealm = sectSecretRealmCultivationSnapshot(p.UserID)
 		p.FinalHours = finalSnapshot.EffectiveHours
 		p.FinalRawSeconds = finalSnapshot.RawSeconds
@@ -2175,14 +2179,14 @@ func freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID string) (sectSecr
 	}
 	var stat model.DailyListeningStat
 	if err := storage.DB.Where("user_id = ?", u.TelegramID).
-		Order("last_official_fetched_at DESC").
+		Order("last_fetched_at DESC").
 		First(&stat).Error; err != nil {
 		return sectSecretRealmListeningSnapshot{}, false
 	}
-	if stat.LastOfficialFetchedAt.IsZero() || time.Since(stat.LastOfficialFetchedAt) >= dailyListeningABSFetchMinInterval {
+	if stat.LastFetchedAt.IsZero() || time.Since(stat.LastFetchedAt) >= dailyListeningABSFetchMinInterval {
 		return sectSecretRealmListeningSnapshot{}, false
 	}
-	effectiveHours, okHours := sumDailyListeningEffectiveHours(u.TelegramID)
+	effectiveHours, okHours := totalCultivationEffectiveHoursFromDailyStats(u.TelegramID, time.Now())
 	rawSeconds, okRaw := sumDailyListeningRawSeconds(u.TelegramID)
 	if !okHours || !okRaw {
 		return sectSecretRealmListeningSnapshot{}, false
@@ -2208,6 +2212,9 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 	if err := json.Unmarshal(body, &stats); err != nil {
 		return sectSecretRealmListeningSnapshot{}, err
 	}
+	if stats.Days == nil {
+		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
+	}
 
 	effectiveHours := calculateEffectiveCultivationHoursFromABSDays(stats.Days)
 	rawSeconds := sumSectSecretRealmRawListeningSeconds(stats.Days)
@@ -2217,22 +2224,20 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		if readErr == nil {
 			if err := recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, stats.Days, time.Now()); err == nil {
 				// 秘境基线使用落库的累计净修为。
-				if syncedEffectiveHours, ok := sumDailyListeningEffectiveHours(u.TelegramID); ok {
-					effectiveHours = syncedEffectiveHours
+				syncedEffectiveHours, ok := totalCultivationEffectiveHoursFromDailyStats(u.TelegramID, time.Now())
+				if !ok {
+					return sectSecretRealmListeningSnapshot{}, storage.ErrDailyListeningStatsReadFailed
 				}
+				effectiveHours = syncedEffectiveHours
 			} else {
-				log.Printf("⚠️ 宗门秘境每日统计写入失败，使用本次 ABS 数据降级计算: user=%d abs=%s err=%s",
-					u.TelegramID, textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
+				return sectSecretRealmListeningSnapshot{}, fmt.Errorf("record secret realm listening stats: %w", err)
 			}
 			return sectSecretRealmListeningSnapshot{
 				EffectiveHours: effectiveHours,
 				RawSeconds:     rawSeconds,
 			}, nil
 		}
-		if !errors.Is(readErr, gorm.ErrRecordNotFound) {
-			log.Printf("⚠️ 宗门秘境本地用户读取失败，使用本次 ABS 数据降级计算: abs=%s err=%s",
-				textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(readErr))
-		}
+		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("read secret realm user: %w", readErr)
 	}
 
 	return sectSecretRealmListeningSnapshot{

@@ -41,7 +41,6 @@ type Config struct {
 	DatabaseMaxIdleConns  int
 	DatabaseBusyTimeoutMS int
 	StartupNotifyAdmins   bool
-	// 🗑️ 已彻底删除 ServerLines 属性
 }
 
 var AppConfig *Config

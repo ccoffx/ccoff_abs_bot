@@ -160,7 +160,7 @@ func pointTransactionTypeText(txType string) string {
 	case "sign_streak_bonus":
 		return "连签奖励"
 	case "blind_box_cost":
-		return "盲盒消费"
+		return "权益盲盒消费"
 	case "code_cashout":
 		return "本服卡密回收"
 	case "exchange_invite":
@@ -187,8 +187,6 @@ func pointTransactionTypeText(txType string) string {
 		return "突破返还"
 	case "breakthrough_fail_penalty":
 		return "突破失败惩罚"
-	case "breakthrough_splash_penalty":
-		return "雷劫外溢惩罚"
 	case "breakthrough_treasure_fee":
 		return "至宝突破渡劫费"
 	case "sect_create":
@@ -197,8 +195,6 @@ func pointTransactionTypeText(txType string) string {
 		return "加入宗门"
 	case "sect_donate":
 		return "宗门捐献"
-	case "sect_shop_points":
-		return "宗门商店"
 	case "sect_secret_realm_reward":
 		return "宗门秘境"
 	case "sect_horn":

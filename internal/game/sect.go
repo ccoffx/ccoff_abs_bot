@@ -300,8 +300,6 @@ func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string)
 	case strings.HasPrefix(text, "捐献宗门 "):
 		amount := strings.TrimSpace(strings.TrimPrefix(text, "捐献宗门 "))
 		run = func() { HandleDonateSect(bot, msg, amount) }
-	case strings.HasPrefix(text, "贡献换积分 "):
-		run = func() { handleDisabledSectContributionForPoints(bot, msg) }
 	case strings.HasPrefix(text, "贡献换声望 "):
 		amount := strings.TrimSpace(strings.TrimPrefix(text, "贡献换声望 "))
 		run = func() { handleExchangeSectContributionForPrestige(bot, msg, amount) }
@@ -2006,10 +2004,6 @@ func sectShopMemberTotalContributionTx(tx *gorm.DB, member model.SectMember) (in
 	return member.Contribution + int(spent), nil
 }
 
-func handleDisabledSectContributionForPoints(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	telegram.ReplyText(bot, msg.Chat.ID, "贡献换积分已关闭。当前可使用 `贡献换声望 数量`，每 3 点贡献兑换 1 点宗门声望。")
-}
-
 // exchangeSectContributionForPrestige 贡献→声望兑换核心事务：
 // 消耗 rewardPrestige*sectContributionToPrestigeCost 贡献，宗门声望与个人声望各 +rewardPrestige
 // （含 SectContributionLog 流水与 SectShopPurchase 记录）。
@@ -2652,7 +2646,7 @@ func handleStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 	}
 	if !confirmed {
 		telegram.ReplyText(bot, chatID, fmt.Sprintf(
-			"个人闭关将消耗 `%d` 个人声望，持续 `%d` 小时。\n当前个人声望：`%d`\n确认无误请发送：`确认闭关`",
+			"个人闭关将消耗 `%d` 个人声望，持续 `%d` 小时。\n当前个人声望：`%d`\n仅计入可由 ABS 会话确认发生在闭关内的听书，无法确定的时段不补算。\n确认无误请发送：`确认闭关`",
 			sectCavePersonalRetreatCost,
 			sectCavePersonalRetreatHours,
 			member.PersonalPrestige,
@@ -3026,6 +3020,11 @@ const (
 	sectWeeklyExcessPrestigeRate = 0.3
 
 	sectMaxRawListeningSecondsPerDay = 24 * 3600
+	// Both ordinary and whitelisted users reach 8 base hours at 15h and 8.5
+	// at 18h. Retreats can reach the same daily limit earlier, never exceed it.
+	sectMidListeningHourRate    = 1.6 / 7.0
+	sectLateListeningHourRate   = 0.5 / 3.0
+	sectDailyCultivationHourCap = 8.5
 )
 
 type sectWeeklyTaskStats struct {
@@ -3074,10 +3073,14 @@ func calculateSectEffectiveHoursFromSeconds(seconds float64) float64 {
 	}
 
 	if dailyHours <= 8.0 {
-		return 4.0 + (dailyHours-4.0)*0.30
+		return 4.0 + (dailyHours-4.0)*sectEffectiveHourRate(4, false)
 	}
 
-	return 5.2 + (dailyHours-8.0)*0.05
+	if dailyHours <= 15.0 {
+		return 6.4 + (dailyHours-8.0)*sectEffectiveHourRate(8, false)
+	}
+
+	return 8.0 + (math.Min(dailyHours, 18.0)-15.0)*sectLateListeningHourRate
 }
 
 func calculateSectEffectiveHoursFromSecondsWithRetreat(seconds float64, retreatSeconds float64) float64 {
@@ -3115,7 +3118,7 @@ func calculateSectEffectiveHoursFromSecondsWithRetreat(seconds float64, retreatS
 		total += retreatHours*retreatRate + (segmentHours-retreatHours)*normalRate
 	}
 
-	return total
+	return math.Min(total, sectDailyCultivationHourCap)
 }
 
 func sectEffectiveHourRate(hourStart float64, retreat bool) float64 {
@@ -3124,14 +3127,20 @@ func sectEffectiveHourRate(hourStart float64, retreat bool) float64 {
 	}
 	if hourStart < 8.0 {
 		if retreat {
-			return 0.60
+			return 0.80
 		}
-		return 0.30
+		return 0.60
 	}
-	if retreat {
-		return 0.15
+	if hourStart < 15.0 {
+		if retreat {
+			return 0.30
+		}
+		return sectMidListeningHourRate
 	}
-	return 0.05
+	if hourStart < 18.0 {
+		return sectLateListeningHourRate
+	}
+	return 0
 }
 
 func calculateEffectiveCultivationHoursFromABSDays(days map[string]float64) float64 {
@@ -3168,12 +3177,45 @@ func calculateSectRetreatBonusHoursForRecord(rawSeconds float64, baseRawSeconds 
 	return calculateSectRetreatBonusHours(rawForRetreat, baseRawSeconds)
 }
 
+// dailySectCaveRetreatBonusHours derives each day's bonus from durable retreat
+// session evidence and the latest daily statistics. Historical bonuses therefore survive
+// midnight, restarts, and subsequent ABS cross-day corrections.
+func dailySectCaveRetreatBonusHours(stat model.DailyListeningStat, retreats []model.SectCaveRetreat) float64 {
+	day, err := time.ParseInLocation("2006-01-02", stat.DayKey, storage.DailyOperationsLocation)
+	if err != nil {
+		return 0
+	}
+	endOfDay := day.AddDate(0, 0, 1)
+	total := 0.0
+	for _, retreat := range retreats {
+		start, end := retreat.StartAt, retreat.EndAt
+		if start.Before(day) {
+			start = day
+		}
+		if end.After(endOfDay) {
+			end = endOfDay
+		}
+		if !end.After(start) {
+			continue
+		}
+		base := 0.0
+		if SectDayKey(retreat.StartAt) == stat.DayKey {
+			base = retreat.BaseRawSeconds
+		}
+		provenSeconds, err := provenSectRetreatSecondsForDay(retreat, day)
+		if err != nil {
+			log.Printf("闭关听书凭据读取失败: %s", textfmt.FormatPlainError(err))
+			continue
+		}
+		raw := math.Min(stat.CappedSeconds, base+provenSeconds)
+		total += calculateSectRetreatBonusHoursForRecord(raw, base, end.Sub(start).Seconds())
+	}
+	return math.Min(total, math.Max(0, sectDailyCultivationHourCap-stat.EffectiveHours))
+}
+
 func ActiveSectCaveRetreatBonusHours(userID int64, now time.Time) float64 {
 	if storage.DB == nil || userID == 0 {
 		return 0
-	}
-	if err := closeExpiredSectCaveRetreatsForUser(userID, now); err != nil {
-		log.Printf("宗门洞府闭关过期关闭失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 	}
 	stat, ok := getTodayDailyListeningStat(userID, now)
 	if !ok {
@@ -3181,18 +3223,12 @@ func ActiveSectCaveRetreatBonusHours(userID int64, now time.Time) float64 {
 	}
 	startOfDay, endOfDay := sectDayRange(now)
 	var retreats []model.SectCaveRetreat
-	if err := storage.DB.Where("user_id = ? AND start_at >= ? AND start_at < ?", userID, startOfDay, endOfDay).
-		Order("start_at ASC").
+	if err := storage.DB.Where("user_id = ? AND start_at < ? AND end_at > ?", userID, endOfDay, startOfDay).
 		Find(&retreats).Error; err != nil {
 		log.Printf("宗门洞府闭关记录读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return 0
 	}
-
-	total := 0.0
-	for _, retreat := range retreats {
-		total += calculateSectRetreatBonusHoursForRecord(stat.CappedSeconds, retreat.BaseRawSeconds, retreat.EndAt.Sub(retreat.StartAt).Seconds())
-	}
-	return total
+	return dailySectCaveRetreatBonusHours(stat, retreats)
 }
 
 func cappedListeningSeconds(seconds float64) float64 {
@@ -3211,20 +3247,33 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 }
 
 func prepareDailyListeningDaysForRecord(userID int64, absUserID string, days map[string]float64) (map[string]float64, map[string]bool) {
-	if days == nil || abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" {
+	adjusted, corrected, _, err := prepareDailyListeningDaysChecked(userID, absUserID, days)
+	if err != nil {
+		log.Printf("每日听书跨日修正失败，保留官方 days: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return days, nil
+	}
+	return adjusted, corrected
+}
+
+// Punitive scans must retry when correction data cannot be read or persisted;
+// ordinary listening views may still display the official ABS totals.
+func prepareDailyListeningDaysChecked(userID int64, absUserID string, days map[string]float64) (map[string]float64, map[string]bool, []absListeningSession, error) {
+	if days == nil || abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" {
+		return nil, nil, nil, fmt.Errorf("ABS_CROSS_DAY_NOT_READY")
 	}
 	sessions, err := fetchABSCrossDayListeningSessions(absUserID)
 	if err != nil {
-		log.Printf("每日听书 ABS 跨日会话读取失败，保留官方 days: user=%d abs=%s err=%s", userID, textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
-		return days, nil
+		return nil, nil, nil, err
 	}
 	persistedSessions, err := persistAndLoadABSCrossDaySessions(userID, absUserID, days, sessions, time.Now())
 	if err != nil {
-		log.Printf("ABS cross-day session persistence failed; keeping official days: user=%d abs=%s err=%s", userID, textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
-		return days, nil
+		return nil, nil, nil, err
 	}
-	return rebalanceABSDaysForCrossDaySessions(days, persistedSessions)
+	adjusted, corrected := rebalanceABSDaysForCrossDaySessions(days, persistedSessions)
+	if err := recordSectRetreatListeningSessions(userID, absUserID, sessions); err != nil {
+		return nil, nil, nil, err
+	}
+	return adjusted, corrected, sessions, nil
 }
 
 func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time) error {
@@ -3285,8 +3334,7 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 	}
 
 	// A successful payload with a present days object is authoritative for today
-	// even when today's key is absent. Persisting zero here repairs any previously
-	// inflated provisional/live value instead of leaving stale 24-hour data cached.
+	// even when today's key is absent. Persist zero so cached totals match ABS.
 	if days != nil {
 		todayKey := SectDayKey(fetchedAt)
 		if _, ok := rawOfficialByDay[todayKey]; !ok {
@@ -3300,20 +3348,16 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 		rawSeconds := rawOfficialByDay[dayKey]
 		cappedSeconds := cappedListeningSeconds(rawSeconds)
 		records = append(records, model.DailyListeningStat{
-			UserID:                userID,
-			AbsUserID:             strings.TrimSpace(absUserID),
-			DayKey:                dayKey,
-			RawSeconds:            rawSeconds,
-			CappedSeconds:         cappedSeconds,
-			EffectiveHours:        calculateSectEffectiveHoursFromSeconds(rawSeconds),
-			LastFetchedAt:         fetchedAt,
-			OfficialRawSeconds:    rawSeconds,
-			LiveRawSeconds:        0,
-			LastOfficialFetchedAt: fetchedAt,
-			Source:                "abs_days",
-			FetchStatus:           "ok",
-			FetchError:            "",
-			RefreshReason:         "abs_refresh",
+			UserID:         userID,
+			AbsUserID:      strings.TrimSpace(absUserID),
+			DayKey:         dayKey,
+			RawSeconds:     rawSeconds,
+			CappedSeconds:  cappedSeconds,
+			EffectiveHours: calculateSectEffectiveHoursFromSeconds(rawSeconds),
+			LastFetchedAt:  fetchedAt,
+			Source:         "abs_days",
+			FetchStatus:    "ok",
+			RefreshReason:  "abs_refresh",
 		})
 	}
 	return records
@@ -3331,21 +3375,16 @@ func dailyListeningStatOnConflict(now time.Time) clause.OnConflict {
 			clause.Eq{Column: clause.Column{Name: "deleted_at"}, Value: nil},
 		}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"raw_seconds":              gorm.Expr("excluded.raw_seconds"),
-			"capped_seconds":           gorm.Expr("excluded.capped_seconds"),
-			"effective_hours":          gorm.Expr("excluded.effective_hours"),
-			"abs_user_id":              gorm.Expr("excluded.abs_user_id"),
-			"last_fetched_at":          gorm.Expr("excluded.last_fetched_at"),
-			"official_raw_seconds":     gorm.Expr("excluded.official_raw_seconds"),
-			"live_raw_seconds":         gorm.Expr("excluded.live_raw_seconds"),
-			"last_official_fetched_at": gorm.Expr("excluded.last_official_fetched_at"),
-			"last_live_fetched_at":     gorm.Expr("excluded.last_live_fetched_at"),
-			"source":                   gorm.Expr("excluded.source"),
-			"fetch_status":             gorm.Expr("excluded.fetch_status"),
-			"fetch_error":              gorm.Expr("excluded.fetch_error"),
-			"refresh_reason":           gorm.Expr("excluded.refresh_reason"),
-			"updated_at":               now,
-			"deleted_at":               nil,
+			"raw_seconds":     gorm.Expr("excluded.raw_seconds"),
+			"capped_seconds":  gorm.Expr("excluded.capped_seconds"),
+			"effective_hours": gorm.Expr("excluded.effective_hours"),
+			"abs_user_id":     gorm.Expr("excluded.abs_user_id"),
+			"last_fetched_at": gorm.Expr("excluded.last_fetched_at"),
+			"source":          gorm.Expr("excluded.source"),
+			"fetch_status":    gorm.Expr("excluded.fetch_status"),
+			"refresh_reason":  gorm.Expr("excluded.refresh_reason"),
+			"updated_at":      now,
+			"deleted_at":      nil,
 		}),
 	}
 }
@@ -3384,24 +3423,6 @@ func GetTodaySectListeningHoursFromCache(userID int64, now time.Time) (float64, 
 	return stat.EffectiveHours + ActiveSectCaveRetreatBonusHours(userID, now), true
 }
 
-// sumDailyListeningEffectiveHours 汇总累计净修为（跨日总和）。
-// 该值桥接累计斗气时长同步与秘境基线，按落库的净修为直接汇总。
-func sumDailyListeningEffectiveHours(userID int64) (float64, bool) {
-	if storage.DB == nil || userID == 0 {
-		return 0, false
-	}
-
-	var total float64
-	if err := storage.DB.Model(&model.DailyListeningStat{}).
-		Where("user_id = ?", userID).
-		Select("COALESCE(SUM(effective_hours), 0)").
-		Scan(&total).Error; err != nil {
-		log.Printf("每日听书有效时长汇总失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return 0, false
-	}
-	return total, true
-}
-
 func sumDailyListeningRawSeconds(userID int64) (float64, bool) {
 	if storage.DB == nil || userID == 0 {
 		return 0, false
@@ -3437,19 +3458,26 @@ func cachedDailyListeningDaysWithinTTL(userID int64, now time.Time) (map[string]
 	if err := storage.DB.Where("user_id = ? AND day_key = ?", userID, SectDayKey(now)).First(&stat).Error; err != nil {
 		return nil, false
 	}
-	if stat.LastOfficialFetchedAt.IsZero() || now.Sub(stat.LastOfficialFetchedAt) >= dailyListeningABSFetchMinInterval {
+	if stat.LastFetchedAt.IsZero() || now.Sub(stat.LastFetchedAt) >= dailyListeningABSFetchMinInterval {
 		return nil, false
 	}
-	return map[string]float64{SectDayKey(now): stat.OfficialRawSeconds}, true
+	return map[string]float64{SectDayKey(now): stat.RawSeconds}, true
 }
 
 func RefreshDailyListeningStatsFromABS(userID int64, absUserID string) (map[string]float64, bool) {
+	return refreshDailyListeningStatsFromABS(userID, absUserID, false)
+}
+
+func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force bool, abuseDays ...string) (map[string]float64, bool) {
+	forAbuse := len(abuseDays) > 0
 	if storage.DB == nil || abs.DefaultClient == nil || userID == 0 || strings.TrimSpace(absUserID) == "" {
 		return nil, false
 	}
 
-	if days, ok := cachedDailyListeningDaysWithinTTL(userID, time.Now()); ok {
-		return days, true
+	if !force && !forAbuse {
+		if days, ok := cachedDailyListeningDaysWithinTTL(userID, time.Now()); ok {
+			return days, true
+		}
 	}
 
 	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
@@ -3465,11 +3493,25 @@ func RefreshDailyListeningStatsFromABS(userID int64, absUserID string) (map[stri
 		log.Printf("每日听书 ABS 统计解析失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return nil, false
 	}
+	if stats.Days == nil {
+		log.Printf("每日听书 ABS 统计缺少 days 明细: user=%d", userID)
+		return nil, false
+	}
 
 	fetchedAt := time.Now()
-	adjustedDays, correctedDays := prepareDailyListeningDaysForRecord(userID, absUserID, stats.Days)
+	adjustedDays, correctedDays, sessions, correctionErr := prepareDailyListeningDaysChecked(userID, absUserID, stats.Days)
+	if correctionErr != nil {
+		log.Printf("每日听书跨日修正失败: user=%d err=%s", userID, textfmt.FormatPlainError(correctionErr))
+		if forAbuse {
+			return nil, false
+		}
+		adjustedDays, correctedDays = stats.Days, nil
+	}
 	if err := recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt); err != nil {
 		return nil, false
+	}
+	if forAbuse {
+		return listeningAbuseProvenDays(sessions, abuseDays), true
 	}
 	return adjustedDays, true
 }

@@ -233,10 +233,6 @@ type BreakthroughSetting struct {
 	GuaranteeFailCount int
 	RefundRate         float64
 	FailPenaltyPoints  int
-
-	SplashMinMajorRealm int
-	SplashVictimCount   int
-	SplashPenaltyPoints int
 }
 
 func getBreakthroughSettingFromRules(fromMajor int) (BreakthroughSetting, bool) {
@@ -251,19 +247,16 @@ func getBreakthroughSettingFromRules(fromMajor int) (BreakthroughSetting, bool) 
 	}
 
 	return BreakthroughSetting{
-		FromMajorRealm:      cfg.FromMajorRealm,
-		ToMajorRealm:        cfg.ToMajorRealm,
-		PillName:            cfg.PillName,
-		PointsCost:          cfg.PointsCost,
-		MinHours:            cfg.MinTotalHours,
-		SuccessRate:         cfg.SuccessRate,
-		Cooldown:            time.Duration(cfg.CooldownHours) * time.Hour,
-		GuaranteeFailCount:  cfg.GuaranteeFailCount,
-		RefundRate:          cfg.RefundRate,
-		FailPenaltyPoints:   cfg.FailPenaltyPoints,
-		SplashMinMajorRealm: cfg.SplashMinMajorRealm,
-		SplashVictimCount:   cfg.SplashVictimCount,
-		SplashPenaltyPoints: cfg.SplashPenaltyPoints,
+		FromMajorRealm:     cfg.FromMajorRealm,
+		ToMajorRealm:       cfg.ToMajorRealm,
+		PillName:           cfg.PillName,
+		PointsCost:         cfg.PointsCost,
+		MinHours:           cfg.MinTotalHours,
+		SuccessRate:        cfg.SuccessRate,
+		Cooldown:           time.Duration(cfg.CooldownHours) * time.Hour,
+		GuaranteeFailCount: cfg.GuaranteeFailCount,
+		RefundRate:         cfg.RefundRate,
+		FailPenaltyPoints:  cfg.FailPenaltyPoints,
 	}, true
 }
 
@@ -424,22 +417,6 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		// 没钱没药，无情驳回
 		telegram.ReplyTextToMessage(bot, msg, fmt.Sprintf("❌ 突破失败。您既无**【%s】**，也缺少积分在聚宝斋购买（当前仅有 `%d` 积分，需要 `%d` 积分）。请努力积攒灵石！", textfmt.InventoryItemMarkdownName(req.PillName), u.Points, req.PointsCost))
 	}
-}
-
-// resolveSplashVictimLabels 使用本地 ABS 用户名展示雷劫公告，未绑定钱包使用显示名或编号。
-func ResolveSplashVictimLabels(localNames, displayNames []string, telegramIDs []int64) []string {
-	labels := make([]string, len(localNames))
-	for i, name := range localNames {
-		name = strings.TrimSpace(name)
-		if name == "" || strings.HasPrefix(name, storage.GhostWalletUsernamePrefix) {
-			name = strings.TrimSpace(displayNames[i])
-		}
-		if name == "" {
-			name = fmt.Sprintf("%d", telegramIDs[i])
-		}
-		labels[i] = textfmt.EscapeMarkdown(name)
-	}
-	return labels
 }
 
 type BreakthroughOutcome struct {
