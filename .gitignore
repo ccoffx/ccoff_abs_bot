@@ -1,0 +1,58 @@
+# Environment secrets
+.env
+.env.*
+!.env.example
+!.env.test.example
+
+# Runtime data
+data/
+data-test/
+deploy-state/
+.release.env
+dist/
+backups/
+logs/
+tmp/
+reports/
+.tools/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Encrypted backups
+*.enc
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build / binaries (including local test builds)
+ccoff-abs-bot
+ccoff_abs_bot
+abs_bot
+abs-bot
+abs-bot.exe
+bot
+bot.exe
+*.exe
+*.out
+*.test
+coverage.out
+coverage.html
+
+# Agent / maintenance tooling (not application code)
+docs/agent/
+AGENTS.md
+.workbuddy-ai/
+
+# Local notes
+*.local.md
+

@@ -1,0 +1,87 @@
+name: Promote tested candidate
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full 40-character main-branch candidate SHA tested on Mac
+        required: true
+        type: string
+      version:
+        description: New immutable release version, e.g. v1.0.0
+        required: true
+        type: string
+      private_chat_tested:
+        description: I verified this exact candidate with the independent test Bot
+        required: true
+        default: false
+        type: boolean
+      database_compatible:
+        description: Changes preserve schema compatibility 1 and passed upgrade regression tests
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: write
+  packages: write
+  actions: read
+concurrency:
+  group: release-promotion
+  cancel-in-progress: false
+jobs:
+  promote:
+    if: inputs.private_chat_tested && inputs.database_compatible && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SHA: ${{ inputs.commit }}
+      VERSION: ${{ inputs.version }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Validate release and successful candidate build
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[a-f0-9]{40}$ && "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if gh api "repos/$REPO/git/ref/tags/$VERSION" >/dev/null 2>&1; then echo 'Version tag already exists'; exit 1; fi
+          run_id=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" --branch main --event push --status success --json databaseId --jq '.[0].databaseId // empty')
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+          gh run download "$run_id" --repo "$REPO" --name "deployment-$SHA" --dir dist
+          test "$(jq -r .commit dist/candidate.json)" = "$SHA"
+          test "$(jq -r .schemaCompatibility dist/candidate.json)" = 1
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag the tested manifest without rebuilding
+        env:
+          IMAGE: ${{ steps.candidate.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin=$(jq -r .image dist/candidate.json)
+          [[ "$pin" == "$IMAGE@sha256:"* ]]
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then echo 'Image version already exists'; exit 1; fi
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$pin"
+          promoted=$(docker buildx imagetools inspect "$IMAGE:$VERSION" | awk '/^Digest:/ {print $2; exit}')
+          test "$pin" = "$IMAGE@$promoted"
+          jq --arg version "$VERSION" '. + {version:$version}' dist/candidate.json > dist/release.json
+      - name: Publish deployment files and verification boundaries
+        shell: bash
+        run: |
+          cat > dist/notes.md <<EOF
+          Candidate commit: $SHA
+          Immutable image: $(jq -r .image dist/release.json)
+          Database compatibility: 1 (additive, backward compatible changes only).
+
+          Automated unit, transaction, concurrency, migration and mock Telegram/ABS tests passed. The operator confirmed private-chat acceptance on the exact candidate.
+
+          Verification boundary: mock ABS does not establish real ABS API compatibility. Simulated group tests do not establish real Telegram group permissions or rendering. First production deployment still needs basic real-service checks.
+
+          Download deployment.tar.gz and its checksum; no application source or Go compiler is needed on the deployment device. See docs/deployment.md inside the archive.
+          EOF
+          gh release create "$VERSION" --repo "$REPO" --target "$SHA" --title "$VERSION" --notes-file dist/notes.md dist/deployment.tar.gz dist/deployment.tar.gz.sha256 dist/release.json

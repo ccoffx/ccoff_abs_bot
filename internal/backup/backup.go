@@ -1,0 +1,314 @@
+package backup
+
+import (
+	"bytes"
+	"compress/gzip"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/argon2"
+
+	"ccoff-abs-bot/internal/config"
+	"ccoff-abs-bot/internal/storage"
+	"ccoff-abs-bot/internal/textfmt"
+)
+
+const (
+	// ABSBACKUPv3: AES-GCM(gzip(SQLite bytes))，压缩后再加密，便于控制 Telegram 50MB 上限。
+	backupMagicHeaderV3 = "ABSBACKUPv3"
+	// Telegram Bot 上传文件上限约 50MB，留余量避免边界失败。
+	TelegramBotUploadMaxBytes = 48 * 1024 * 1024
+)
+
+func CreateEncryptedDBBackup() (string, func(), error) {
+	if config.AppConfig == nil {
+		return "", nil, fmt.Errorf("系统配置尚未初始化，无法创建数据库备份")
+	}
+
+	backupKey := strings.TrimSpace(config.AppConfig.BackupEncryptKey)
+	if backupKey == "" {
+		return "", nil, fmt.Errorf("未配置 BACKUP_ENCRYPT_KEY，禁止发送明文数据库备份")
+	}
+
+	if storage.DB == nil {
+		return "", nil, fmt.Errorf("数据库尚未初始化，无法创建备份")
+	}
+
+	backupDir := "data/backups"
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
+		return "", nil, fmt.Errorf("创建备份目录失败: %w", err)
+	}
+
+	randomSuffix, err := generateBackupRandomSuffix(8)
+	if err != nil {
+		return "", nil, fmt.Errorf("生成备份随机文件名失败: %w", err)
+	}
+
+	ts := time.Now().Format("20060102_150405")
+	plainPath := filepath.Join(backupDir, fmt.Sprintf("bot_data_%s_%s.db", ts, randomSuffix))
+	encPath := plainPath + ".enc"
+
+	cleanupPlain := func() {
+		_ = os.Remove(plainPath)
+	}
+
+	cleanupAll := func() {
+		_ = os.Remove(plainPath)
+		_ = os.Remove(encPath)
+	}
+
+	// SQLite 正确备份方式：用 VACUUM INTO 导出一个一致性的数据库快照。
+	// 注意：这里会短暂产生一个明文临时数据库文件，所以后面必须确保删除。
+	if err := storage.DB.Exec("VACUUM INTO ?", plainPath).Error; err != nil {
+		cleanupPlain()
+		return "", nil, fmt.Errorf("导出 SQLite 备份失败: %w", err)
+	}
+	defer cleanupPlain()
+
+	plainData, err := os.ReadFile(plainPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("读取临时备份失败: %w", err)
+	}
+	defer zeroBytes(plainData)
+
+	// 先 gzip 再加密，显著降低超大库触达 Telegram 50MB 上限的概率。
+	compressedData, err := GzipCompressBytes(plainData)
+	if err != nil {
+		return "", nil, fmt.Errorf("压缩备份失败: %w", err)
+	}
+	defer zeroBytes(compressedData)
+
+	encryptedData, err := EncryptBackupData(compressedData, backupKey)
+	if err != nil {
+		return "", nil, err
+	}
+	defer zeroBytes(encryptedData)
+
+	// 写出前先用当前密钥做一次解密自校验，避免发送不可恢复的坏备份。
+	verifyPlainData, err := DecryptBackupData(encryptedData, backupKey)
+	if err != nil {
+		return "", nil, fmt.Errorf("加密备份自校验失败: %w", err)
+	}
+	if len(verifyPlainData) != len(plainData) || string(verifyPlainData[:textfmt.MinInt(16, len(verifyPlainData))]) != string(plainData[:textfmt.MinInt(16, len(plainData))]) {
+		zeroBytes(verifyPlainData)
+		return "", nil, fmt.Errorf("加密备份自校验失败: 解密内容与原始备份不一致")
+	}
+	zeroBytes(verifyPlainData)
+
+	if err := os.WriteFile(encPath, encryptedData, 0600); err != nil {
+		_ = os.Remove(encPath)
+		return "", nil, fmt.Errorf("写入加密备份失败: %w", err)
+	}
+
+	// 返回给调用方。
+	// 调用方发送 Telegram 文件完成后，应执行 cleanup 删除加密临时文件。
+	return encPath, cleanupAll, nil
+}
+
+func GzipCompressBytes(plainData []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(plainData); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func gzipDecompressBytes(compressed []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func EncryptBackupData(payload []byte, backupKey string) ([]byte, error) {
+	const magicHeader = backupMagicHeaderV3
+
+	salt := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, fmt.Errorf("生成随机 salt 失败: %w", err)
+	}
+
+	key := argon2.IDKey([]byte(backupKey), salt, 3, 64*1024, 4, 32)
+	defer zeroBytes(key)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 AES 失败: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 AES-GCM 失败: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("生成随机 nonce 失败: %w", err)
+	}
+
+	cipherText := gcm.Seal(nil, nonce, payload, nil)
+
+	output := make([]byte, 0, len(magicHeader)+len(salt)+len(nonce)+len(cipherText))
+	output = append(output, []byte(magicHeader)...)
+	output = append(output, salt...)
+	output = append(output, nonce...)
+	output = append(output, cipherText...)
+
+	return output, nil
+}
+
+func DecryptBackupData(encryptedData []byte, backupKey string) ([]byte, error) {
+	_, payloadOffset, err := parseBackupMagicHeader(encryptedData)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(encryptedData) < payloadOffset+16 {
+		return nil, fmt.Errorf("备份文件过短或格式错误")
+	}
+
+	offset := payloadOffset
+
+	salt := encryptedData[offset : offset+16]
+	offset += 16
+
+	key := argon2.IDKey([]byte(backupKey), salt, 3, 64*1024, 4, 32)
+	defer zeroBytes(key)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 AES 失败: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 AES-GCM 失败: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(encryptedData) < offset+nonceSize {
+		return nil, fmt.Errorf("备份文件 nonce 缺失")
+	}
+
+	nonce := encryptedData[offset : offset+nonceSize]
+	offset += nonceSize
+
+	cipherText := encryptedData[offset:]
+
+	plainOrCompressed, err := gcm.Open(nil, nonce, cipherText, nil)
+	if err != nil {
+		return nil, fmt.Errorf("备份解密失败: %w", err)
+	}
+
+	plainData, err := gzipDecompressBytes(plainOrCompressed)
+	zeroBytes(plainOrCompressed)
+	if err != nil {
+		return nil, fmt.Errorf("备份解压失败: %w", err)
+	}
+	return plainData, nil
+}
+
+func parseBackupMagicHeader(encryptedData []byte) (string, int, error) {
+	if len(encryptedData) < len(backupMagicHeaderV3) {
+		return "", 0, fmt.Errorf("备份文件过短或格式错误")
+	}
+	if string(encryptedData[:len(backupMagicHeaderV3)]) != backupMagicHeaderV3 {
+		return "", 0, fmt.Errorf("备份文件头不匹配")
+	}
+	return backupMagicHeaderV3, len(backupMagicHeaderV3), nil
+}
+
+func SplitBackupFileParts(filePath string, maxPartBytes int) ([]string, func(), error) {
+	if maxPartBytes <= 0 {
+		maxPartBytes = TelegramBotUploadMaxBytes
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("读取备份文件信息失败: %w", err)
+	}
+	if info.Size() <= int64(maxPartBytes) {
+		return []string{filePath}, func() {}, nil
+	}
+
+	src, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("打开备份文件失败: %w", err)
+	}
+	defer src.Close()
+
+	totalParts := int((info.Size() + int64(maxPartBytes) - 1) / int64(maxPartBytes))
+	partPaths := make([]string, 0, totalParts)
+	cleanup := func() {
+		for _, p := range partPaths {
+			_ = os.Remove(p)
+		}
+	}
+
+	buf := make([]byte, maxPartBytes)
+	for part := 1; part <= totalParts; part++ {
+		n, readErr := io.ReadFull(src, buf)
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			cleanup()
+			return nil, nil, fmt.Errorf("读取备份分片失败: %w", readErr)
+		}
+		if n <= 0 {
+			break
+		}
+		partPath := fmt.Sprintf("%s.part%02dof%02d", filePath, part, totalParts)
+		if err := os.WriteFile(partPath, buf[:n], 0600); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("写入备份分片失败: %w", err)
+		}
+		partPaths = append(partPaths, partPath)
+		if readErr == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+
+	if len(partPaths) == 0 {
+		cleanup()
+		return nil, nil, fmt.Errorf("备份分片结果为空")
+	}
+	return partPaths, cleanup, nil
+}
+
+func generateBackupRandomSuffix(byteLen int) (string, error) {
+	if byteLen <= 0 {
+		byteLen = 8
+	}
+
+	buf := make([]byte, byteLen)
+	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(buf), nil
+}
+
+func zeroBytes(data []byte) {
+	for i := range data {
+		data[i] = 0
+	}
+}

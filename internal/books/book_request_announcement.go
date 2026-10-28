@@ -1,0 +1,1227 @@
+package books
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"gorm.io/gorm"
+
+	"ccoff-abs-bot/internal/abs"
+	"ccoff-abs-bot/internal/config"
+	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/security"
+	"ccoff-abs-bot/internal/storage"
+	"ccoff-abs-bot/internal/telegram"
+	"ccoff-abs-bot/internal/textfmt"
+)
+
+const (
+	bookRequestAnnouncementWindow        = 20 * time.Minute
+	bookRequestAnnouncementQueryLimit    = 20
+	bookRequestAnnouncementDisplayLimit  = 10
+	bookRequestAnnouncementMaxQueryPages = 10
+	bookRequestAnnouncementPreviewTTL    = 24 * time.Hour
+	bookRequestAnnouncementMaxCoverBytes = 2 * 1024 * 1024
+)
+
+var bookRequestAnnouncementLocks sync.Map
+
+var bookRequestAnnouncementPreviewItems sync.Map
+
+var bookRequestAnnouncementCandidateSnapshots sync.Map
+
+type bookAnnouncementPreviewEntry struct {
+	ReqID     uint
+	ItemID    string
+	Candidate BookAnnouncementCandidate
+	ExpiresAt time.Time
+}
+
+type bookAnnouncementCandidateSnapshot struct {
+	ReqID      uint
+	Candidates []BookAnnouncementCandidate
+	ExpiresAt  time.Time
+}
+
+type absFlexibleTime struct {
+	time.Time
+}
+
+func (t *absFlexibleTime) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "" || raw == "null" {
+		return nil
+	}
+
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			t.Time = absUnixTime(n)
+			return nil
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			t.Time = absUnixTime(int64(f))
+			return nil
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			t.Time = parsed
+			return nil
+		}
+		if parsed, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+			t.Time = parsed
+			return nil
+		}
+		return nil
+	}
+
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err == nil {
+		t.Time = absUnixTime(n)
+		return nil
+	}
+	if f, err := strconv.ParseFloat(raw, 64); err == nil {
+		t.Time = absUnixTime(int64(f))
+	}
+	return nil
+}
+
+func absUnixTime(n int64) time.Time {
+	if n <= 0 {
+		return time.Time{}
+	}
+	if n > 1_000_000_000_000 {
+		return time.UnixMilli(n)
+	}
+	return time.Unix(n, 0)
+}
+
+type absLibrarySummary struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type absLibraryItem struct {
+	ID        string          `json:"id"`
+	LibraryID string          `json:"libraryId"`
+	AddedAt   absFlexibleTime `json:"addedAt"`
+	CreatedAt absFlexibleTime `json:"createdAt"`
+	UpdatedAt absFlexibleTime `json:"updatedAt"`
+	Media     struct {
+		Metadata absBookMetadata `json:"metadata"`
+	} `json:"media"`
+	MediaMetadata absBookMetadata `json:"mediaMetadata"`
+}
+
+type absBookMetadata struct {
+	Title        string   `json:"title"`
+	Subtitle     string   `json:"subtitle"`
+	Narrators    []string `json:"narrators"`
+	NarratorName string   `json:"narratorName"`
+	Narrator     string   `json:"narrator"`
+}
+
+type BookAnnouncementCandidate struct {
+	ItemID      string
+	LibraryID   string
+	LibraryName string
+	Title       string
+	Narrators   string
+	RecentAt    time.Time
+}
+
+func GetRecentBookAnnouncementCandidates(c *abs.AbsClient, window time.Duration, now time.Time) ([]BookAnnouncementCandidate, error) {
+	if window <= 0 {
+		window = bookRequestAnnouncementWindow
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	libraries, err := getAbsLibraries(c)
+	if err != nil {
+		return nil, err
+	}
+	if len(libraries) == 0 {
+		return nil, nil
+	}
+
+	libraryNames := make(map[string]string, len(libraries))
+	candidatesByItemID := make(map[string]BookAnnouncementCandidate)
+	successfulLibraries := 0
+	libraryScanFailed := false
+
+	for _, library := range libraries {
+		library.ID = strings.TrimSpace(library.ID)
+		if library.ID == "" {
+			continue
+		}
+		libraryNames[library.ID] = strings.TrimSpace(library.Name)
+
+		libraryReadSucceeded := false
+		libraryReadFailed := false
+		for page := 0; page < bookRequestAnnouncementMaxQueryPages; page++ {
+			items, err := getRecentAbsLibraryItemsPage(c, library.ID, bookRequestAnnouncementQueryLimit, page)
+			if err != nil {
+				log.Printf("ABS recent library page read failed: library=%s page=%d err=%s", textfmt.FormatPlainValue(library.ID), page, textfmt.FormatPlainError(err))
+				libraryReadFailed = true
+				break
+			}
+			libraryReadSucceeded = true
+			pageReachedWindowEnd := false
+			for _, item := range items {
+				candidate := bookAnnouncementCandidateFromItem(item, libraryNames)
+				if candidate.ItemID == "" || candidate.RecentAt.IsZero() || candidate.RecentAt.After(now.Add(2*time.Minute)) {
+					continue
+				}
+				if candidate.RecentAt.Before(now.Add(-window)) {
+					pageReachedWindowEnd = true
+					continue
+				}
+				if existing, ok := candidatesByItemID[candidate.ItemID]; !ok || candidate.RecentAt.After(existing.RecentAt) {
+					candidatesByItemID[candidate.ItemID] = candidate
+				}
+			}
+			if len(items) < bookRequestAnnouncementQueryLimit || pageReachedWindowEnd {
+				break
+			}
+		}
+		if libraryReadSucceeded {
+			successfulLibraries++
+		}
+		if libraryReadFailed {
+			libraryScanFailed = true
+		}
+	}
+
+	// 候选列表要求全量媒体库扫描成功：某个媒体库读取失败可能只是该库暂时不可用，
+	// 但也可能意味着该库正好包含本次求书对应的新书，因此宁可让管理员稍后重试，
+	// 也不要生成一个可能漏掉目标书籍的候选列表。
+	if successfulLibraries == 0 || libraryScanFailed {
+		// 实时扫描失败时，先尝试立即采集一次，再回退到本地事件表。
+		if scanErr := scanAndPersistBookLibraryEvents(now); scanErr != nil {
+			log.Printf("求书入库事件即时采集失败: err=%s", textfmt.FormatPlainError(scanErr))
+		}
+		events, eventErr := loadRecentBookLibraryEvents(bookRequestAnnouncementDisplayLimit)
+		if eventErr == nil {
+			candidates := bookLibraryEventsAsCandidates(events)
+			if len(candidates) > 0 {
+				return candidates, nil
+			}
+		} else {
+			log.Printf("求书入库事件本地回退读取失败: err=%s", textfmt.FormatPlainError(eventErr))
+		}
+		return nil, fmt.Errorf("部分或全部 ABS 媒体库最近入库读取失败，请稍后重试")
+	}
+
+	candidates := make([]BookAnnouncementCandidate, 0, len(candidatesByItemID))
+	for _, candidate := range candidatesByItemID {
+		candidates = append(candidates, candidate)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].RecentAt.Equal(candidates[j].RecentAt) {
+			return candidates[i].ItemID < candidates[j].ItemID
+		}
+		return candidates[i].RecentAt.After(candidates[j].RecentAt)
+	})
+	if len(candidates) == 0 {
+		// 实时扫描窗口内没有结果时，回退到本地持久化的近期入库事件，
+		// 避免管理员标记已上传稍晚后因 20 分钟窗口已过而找不到候选。
+		events, eventErr := loadRecentBookLibraryEvents(bookRequestAnnouncementDisplayLimit)
+		if eventErr != nil {
+			log.Printf("求书入库事件本地回退读取失败: err=%s", textfmt.FormatPlainError(eventErr))
+		} else {
+			candidates = bookLibraryEventsAsCandidates(events)
+		}
+	}
+	return candidates, nil
+}
+
+func GetBookAnnouncementCandidateByItemID(c *abs.AbsClient, itemID string) (*BookAnnouncementCandidate, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return nil, fmt.Errorf("ABS item ID 为空")
+	}
+
+	libraries, err := getAbsLibraries(c)
+	if err != nil {
+		return nil, err
+	}
+	libraryNames := make(map[string]string, len(libraries))
+	for _, library := range libraries {
+		libraryNames[strings.TrimSpace(library.ID)] = strings.TrimSpace(library.Name)
+	}
+
+	item, err := getAbsLibraryItem(c, itemID)
+	if err != nil {
+		return nil, err
+	}
+	candidate := bookAnnouncementCandidateFromItem(item, libraryNames)
+	if candidate.ItemID == "" {
+		return nil, fmt.Errorf("ABS item 缺少 ID")
+	}
+	return &candidate, nil
+}
+
+func getAbsLibraries(c *abs.AbsClient) ([]absLibrarySummary, error) {
+	body, code, err := c.SendRequest("GET", "/api/libraries", nil)
+	if err != nil {
+		return nil, fmt.Errorf("读取 ABS 媒体库失败: %w", err)
+	}
+	if code != 200 {
+		return nil, &abs.AbsAPIError{Operation: "读取 ABS 媒体库失败", StatusCode: code, Message: "响应: " + abs.AbsResponseSnippet(body)}
+	}
+
+	var wrapped struct {
+		Libraries []absLibrarySummary `json:"libraries"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && len(wrapped.Libraries) > 0 {
+		return wrapped.Libraries, nil
+	}
+
+	var direct []absLibrarySummary
+	if err := json.Unmarshal(body, &direct); err == nil {
+		return direct, nil
+	}
+
+	return nil, fmt.Errorf("解析 ABS 媒体库失败")
+}
+
+func getRecentAbsLibraryItemsPage(c *abs.AbsClient, libraryID string, limit int, page int) ([]absLibraryItem, error) {
+	if limit <= 0 {
+		limit = bookRequestAnnouncementQueryLimit
+	}
+	if page < 0 {
+		page = 0
+	}
+	path := fmt.Sprintf(
+		"/api/libraries/%s/items?limit=%d&page=%d&sort=addedAt&desc=1&collapseseries=0",
+		url.PathEscape(libraryID),
+		limit,
+		page,
+	)
+	body, code, err := c.SendRequest("GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("读取 ABS 媒体库条目失败: %w", err)
+	}
+	if code != 200 {
+		return nil, &abs.AbsAPIError{Operation: "读取 ABS 媒体库条目失败", StatusCode: code, Message: "响应: " + abs.AbsResponseSnippet(body)}
+	}
+
+	items, err := parseAbsLibraryItems(body)
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func getAbsLibraryItem(c *abs.AbsClient, itemID string) (absLibraryItem, error) {
+	var zero absLibraryItem
+	body, code, err := c.SendRequest("GET", "/api/items/"+url.PathEscape(itemID), nil)
+	if err != nil {
+		return zero, fmt.Errorf("读取 ABS 书籍条目失败: %w", err)
+	}
+	if code != 200 {
+		return zero, &abs.AbsAPIError{Operation: "读取 ABS 书籍条目失败", StatusCode: code, Message: "响应: " + abs.AbsResponseSnippet(body)}
+	}
+
+	var wrapped struct {
+		LibraryItem absLibraryItem `json:"libraryItem"`
+		Item        absLibraryItem `json:"item"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil {
+		if strings.TrimSpace(wrapped.LibraryItem.ID) != "" {
+			return wrapped.LibraryItem, nil
+		}
+		if strings.TrimSpace(wrapped.Item.ID) != "" {
+			return wrapped.Item, nil
+		}
+	}
+
+	var item absLibraryItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return zero, fmt.Errorf("解析 ABS 书籍条目失败: %w", err)
+	}
+	return item, nil
+}
+
+func parseAbsLibraryItems(body []byte) ([]absLibraryItem, error) {
+	var wrapped struct {
+		Results      []absLibraryItem `json:"results"`
+		Items        []absLibraryItem `json:"items"`
+		LibraryItems []absLibraryItem `json:"libraryItems"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil {
+		switch {
+		case len(wrapped.Results) > 0:
+			return wrapped.Results, nil
+		case len(wrapped.Items) > 0:
+			return wrapped.Items, nil
+		case len(wrapped.LibraryItems) > 0:
+			return wrapped.LibraryItems, nil
+		}
+	}
+
+	var direct []absLibraryItem
+	if err := json.Unmarshal(body, &direct); err == nil {
+		return direct, nil
+	}
+
+	return nil, nil
+}
+
+func bookAnnouncementCandidateFromItem(item absLibraryItem, libraryNames map[string]string) BookAnnouncementCandidate {
+	metadata := item.Media.Metadata
+	if strings.TrimSpace(metadata.Title) == "" {
+		metadata = item.MediaMetadata
+	}
+
+	libraryID := strings.TrimSpace(item.LibraryID)
+	libraryName := strings.TrimSpace(libraryNames[libraryID])
+	if libraryName == "" {
+		libraryName = "未知媒体库"
+	}
+
+	return BookAnnouncementCandidate{
+		ItemID:      strings.TrimSpace(item.ID),
+		LibraryID:   libraryID,
+		LibraryName: libraryName,
+		Title:       displayBookAnnouncementText(metadata.Title, "未命名书籍"),
+		Narrators:   displayBookAnnouncementNarrators(metadata),
+		RecentAt:    itemRecentTime(item),
+	}
+}
+
+func itemRecentTime(item absLibraryItem) time.Time {
+	if !item.AddedAt.IsZero() {
+		return item.AddedAt.Time
+	}
+	if item.CreatedAt.After(item.UpdatedAt.Time) {
+		return item.CreatedAt.Time
+	}
+	return item.UpdatedAt.Time
+}
+
+func displayBookAnnouncementNarrators(metadata absBookMetadata) string {
+	var parts []string
+	for _, narrator := range metadata.Narrators {
+		narrator = strings.TrimSpace(narrator)
+		if narrator != "" {
+			parts = append(parts, narrator)
+		}
+	}
+	for _, narrator := range []string{metadata.NarratorName, metadata.Narrator} {
+		narrator = strings.TrimSpace(narrator)
+		if narrator != "" {
+			parts = append(parts, narrator)
+		}
+	}
+	if len(parts) == 0 {
+		return "未标注"
+	}
+	return displayBookAnnouncementText(strings.Join(parts, "、"), "未标注")
+}
+
+func displayBookAnnouncementText(text string, fallback string) string {
+	text = strings.TrimSpace(textfmt.FormatDiagnosticTextForDisplay(text))
+	if text == "" {
+		return fallback
+	}
+	return textfmt.TruncateRunes(text, 80)
+}
+
+func formatBookAnnouncementDeliveryKey(reqID uint) string {
+	return fmt.Sprintf("BR-%d", reqID)
+}
+
+func formatBookAnnouncementCaption(candidate BookAnnouncementCandidate) string {
+	return fmt.Sprintf(
+		"📚 新书已入库\n\n媒体库：%s\n书名：%s\n演播：%s\n\n前往 ABS 搜索即可收听。",
+		displayBookAnnouncementText(candidate.LibraryName, "未知媒体库"),
+		displayBookAnnouncementText(candidate.Title, "未命名书籍"),
+		displayBookAnnouncementText(candidate.Narrators, "未标注"),
+	)
+}
+
+func DownloadBookAnnouncementCover(c *abs.AbsClient, itemID string) ([]byte, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return nil, fmt.Errorf("ABS item ID 为空")
+	}
+
+	body, code, err := c.SendRequest("GET", "/api/items/"+url.PathEscape(itemID)+"/cover?width=512", nil)
+	if err != nil {
+		return nil, fmt.Errorf("下载 ABS 封面失败: %w", err)
+	}
+	if code != 200 {
+		return nil, &abs.AbsAPIError{Operation: "下载 ABS 封面失败", StatusCode: code}
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("ABS 封面为空")
+	}
+	if len(body) > bookRequestAnnouncementMaxCoverBytes {
+		return nil, fmt.Errorf("ABS 封面过大")
+	}
+	return body, nil
+}
+
+func maybePromptBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, adminID int64, req model.BookRequest) string {
+	if bot == nil || abs.DefaultClient == nil || config.AppConfig == nil || config.AppConfig.NoticeGroupID == 0 {
+		return "已处理，未配置大群公告"
+	}
+	if !isBookRequestUploadedStatus(req.Status) {
+		return "已处理"
+	}
+
+	if err := sendBookAnnouncementCandidatePrompt(bot, adminID, req.ID); err != nil {
+		log.Printf("⚠️ 求书已上传后生成入库公告候选失败: req=%d admin=%d err=%s", req.ID, adminID, textfmt.FormatPlainError(err))
+		if retryErr := sendBookAnnouncementRetryPrompt(bot, adminID, req.ID); retryErr != nil {
+			log.Printf("⚠️ 求书公告重试提示发送失败: req=%d admin=%d err=%s", req.ID, adminID, textfmt.FormatTelegramSendError(retryErr))
+		}
+		return "已处理，公告候选生成失败"
+	}
+	return "已处理，请选择并确认群公告"
+}
+
+func sendBookAnnouncementRetryPrompt(bot *tgbotapi.BotAPI, adminID int64, reqID uint) error {
+	msg := tgbotapi.NewMessage(adminID, fmt.Sprintf("✅ 求书工单 #%d 已处理。\n\n⚠️ 新书公告候选读取失败。工单状态不受影响，可稍后点击‘重新读取候选’重试。", reqID))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 重新读取候选", fmt.Sprintf("br_ann_refresh_%d", reqID)),
+			tgbotapi.NewInlineKeyboardButtonData("跳过公告", fmt.Sprintf("br_ann_skip_%d", reqID)),
+		),
+	)
+	_, err := telegram.SendNoAutoDelete(bot, msg)
+	return err
+}
+
+func sendBookAnnouncementCandidatePrompt(bot *tgbotapi.BotAPI, adminID int64, reqID uint) error {
+	if bot == nil || abs.DefaultClient == nil {
+		return fmt.Errorf("公告服务未初始化")
+	}
+	candidates, err := GetRecentBookAnnouncementCandidates(abs.DefaultClient, bookRequestAnnouncementWindow, time.Now())
+	if err != nil {
+		return err
+	}
+	if len(candidates) > 0 {
+		if req, found, loadErr := LoadBookRequestByID(storage.DB, reqID, "announcement hint ranking"); loadErr == nil && found {
+			hint := extractXmlyTitleHint(req.XmlyLink)
+			if hint != "" {
+				sortBookAnnouncementCandidatesByRequestHint(candidates, hint)
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		msg := tgbotapi.NewMessage(adminID, fmt.Sprintf("✅ 求书工单 #%d 已处理。\n\n近 20 分钟内未找到可公告的新书，本地近期入库事件也暂无可匹配书籍。若 ABS 扫描刚完成，可稍后点击‘重新读取候选’。", reqID))
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🔄 重新读取候选", fmt.Sprintf("br_ann_refresh_%d", reqID)),
+				tgbotapi.NewInlineKeyboardButtonData("跳过公告", fmt.Sprintf("br_ann_skip_%d", reqID)),
+			),
+		)
+		_, err = telegram.SendNoAutoDelete(bot, msg)
+		return err
+	}
+	if len(candidates) == 1 {
+		return sendBookAnnouncementPreview(bot, adminID, reqID, candidates[0])
+	}
+	return sendBookAnnouncementCandidateSelection(bot, adminID, reqID, candidates)
+}
+
+func sendBookAnnouncementCandidateSelection(bot *tgbotapi.BotAPI, adminID int64, reqID uint, candidates []BookAnnouncementCandidate) error {
+	snapshotToken := storeBookAnnouncementCandidateSnapshot(reqID, candidates)
+	if snapshotToken == "" {
+		return fmt.Errorf("BOOK_ANNOUNCEMENT_CANDIDATE_SNAPSHOT_PERSIST_FAILED")
+	}
+	text, markup, _, ok := buildBookAnnouncementCandidatePage(reqID, snapshotToken, candidates, 0)
+	if !ok {
+		return fmt.Errorf("BOOK_ANNOUNCEMENT_CANDIDATE_PAGE_EMPTY")
+	}
+
+	msg := tgbotapi.NewMessage(adminID, text)
+	msg.ReplyMarkup = markup
+	_, err := telegram.SendNoAutoDelete(bot, msg)
+	return err
+}
+
+func buildBookAnnouncementCandidatePage(reqID uint, snapshotToken string, candidates []BookAnnouncementCandidate, page int) (string, tgbotapi.InlineKeyboardMarkup, int, bool) {
+	return buildBookAnnouncementCandidatePageWithTokenStore(reqID, snapshotToken, candidates, page, storeBookAnnouncementPreviewCandidate)
+}
+
+func buildBookAnnouncementCandidatePageWithTokenStore(reqID uint, snapshotToken string, candidates []BookAnnouncementCandidate, page int, tokenStore func(uint, BookAnnouncementCandidate) string) (string, tgbotapi.InlineKeyboardMarkup, int, bool) {
+	var empty tgbotapi.InlineKeyboardMarkup
+	if reqID == 0 || strings.TrimSpace(snapshotToken) == "" || len(candidates) == 0 || tokenStore == nil {
+		return "", empty, 0, false
+	}
+	totalPages := (len(candidates) + bookRequestAnnouncementDisplayLimit - 1) / bookRequestAnnouncementDisplayLimit
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+	start := page * bookRequestAnnouncementDisplayLimit
+	end := start + bookRequestAnnouncementDisplayLimit
+	if end > len(candidates) {
+		end = len(candidates)
+	}
+
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, end-start+2)
+	for index := start; index < end; index++ {
+		candidate := candidates[index]
+		token := tokenStore(reqID, candidate)
+		if token == "" {
+			return "", empty, 0, false
+		}
+		label := textfmt.TruncateRunes(fmt.Sprintf("%d. %s", index+1, displayBookAnnouncementText(candidate.Title, "\u672a\u547d\u540d\u4e66\u7c4d")), 48)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("br_ann_sel_%d_%s", reqID, token)),
+		))
+	}
+	if totalPages > 1 {
+		navigation := make([]tgbotapi.InlineKeyboardButton, 0, 2)
+		if page > 0 {
+			navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData("\u2b05\ufe0f \u4e0a\u4e00\u9875", formatBookAnnouncementPageCallback(reqID, page-1, snapshotToken)))
+		}
+		if page+1 < totalPages {
+			navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData("\u4e0b\u4e00\u9875 \u27a1\ufe0f", formatBookAnnouncementPageCallback(reqID, page+1, snapshotToken)))
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(navigation...))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("\U0001f504 \u91cd\u65b0\u8bfb\u53d6\u5019\u9009", fmt.Sprintf("br_ann_refresh_%d", reqID)),
+		tgbotapi.NewInlineKeyboardButtonData("\u8df3\u8fc7\u516c\u544a", fmt.Sprintf("br_ann_skip_%d", reqID)),
+	))
+
+	text := fmt.Sprintf("\u2705 \u6c42\u4e66\u5de5\u5355 #%d \u5df2\u5904\u7406\u3002\n\n\u8fd1 20 \u5206\u949f\u5171\u627e\u5230 %d \u672c\u65b0\u4e66\uff0c\u5f53\u524d\u7b2c %d/%d \u9875\u3002\u8bf7\u9009\u62e9\u672c\u5de5\u5355\u5bf9\u5e94\u4e66\u7c4d\u540e\u518d\u9884\u89c8\u53d1\u5e03\u3002", reqID, len(candidates), page+1, totalPages)
+	return text, tgbotapi.NewInlineKeyboardMarkup(rows...), page, true
+}
+
+func storeBookAnnouncementCandidateSnapshot(reqID uint, candidates []BookAnnouncementCandidate) string {
+	if storage.DB == nil || reqID == 0 || len(candidates) == 0 {
+		return ""
+	}
+	now := time.Now()
+	cleanupExpiredBookAnnouncementCandidateSnapshots(now)
+	body, err := json.Marshal(candidates)
+	if err != nil {
+		log.Printf("book announcement candidate snapshot encode failed: req=%d err=%s", reqID, textfmt.FormatPlainError(err))
+		return ""
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		token := security.GenerateRandomCode(12)
+		snapshot := bookAnnouncementCandidateSnapshot{
+			ReqID:      reqID,
+			Candidates: append([]BookAnnouncementCandidate(nil), candidates...),
+			ExpiresAt:  now.Add(bookRequestAnnouncementPreviewTTL),
+		}
+		row := model.BookRequestAnnouncementCandidateSnapshot{
+			Token: token, RequestID: reqID, CandidateJSON: string(body), ExpiresAt: snapshot.ExpiresAt,
+		}
+		if err := storage.DB.Create(&row).Error; err != nil {
+			log.Printf("book announcement candidate snapshot persist failed: req=%d attempt=%d err=%s", reqID, attempt+1, textfmt.FormatPlainError(err))
+			continue
+		}
+		bookRequestAnnouncementCandidateSnapshots.Store(token, snapshot)
+		return token
+	}
+	return ""
+}
+
+func resolveBookAnnouncementCandidateSnapshot(reqID uint, token string, now time.Time) ([]BookAnnouncementCandidate, bool) {
+	token = strings.TrimSpace(token)
+	if reqID == 0 || token == "" {
+		return nil, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if value, ok := bookRequestAnnouncementCandidateSnapshots.Load(token); ok {
+		snapshot, valid := value.(bookAnnouncementCandidateSnapshot)
+		if valid && snapshot.ReqID == reqID && len(snapshot.Candidates) > 0 && (snapshot.ExpiresAt.IsZero() || !now.After(snapshot.ExpiresAt)) {
+			return append([]BookAnnouncementCandidate(nil), snapshot.Candidates...), true
+		}
+		bookRequestAnnouncementCandidateSnapshots.Delete(token)
+	}
+	if storage.DB == nil {
+		return nil, false
+	}
+	var row model.BookRequestAnnouncementCandidateSnapshot
+	if err := storage.DB.Where("token = ? AND request_id = ?", token, reqID).First(&row).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("book announcement candidate snapshot lookup failed: req=%d err=%s", reqID, textfmt.FormatPlainError(err))
+		}
+		return nil, false
+	}
+	if now.After(row.ExpiresAt) {
+		_ = storage.DB.Delete(&row).Error
+		return nil, false
+	}
+	var candidates []BookAnnouncementCandidate
+	if err := json.Unmarshal([]byte(row.CandidateJSON), &candidates); err != nil || len(candidates) == 0 {
+		log.Printf("book announcement candidate snapshot decode failed: req=%d err=%s", reqID, textfmt.FormatPlainError(err))
+		return nil, false
+	}
+	bookRequestAnnouncementCandidateSnapshots.Store(token, bookAnnouncementCandidateSnapshot{ReqID: reqID, Candidates: candidates, ExpiresAt: row.ExpiresAt})
+	return append([]BookAnnouncementCandidate(nil), candidates...), true
+}
+
+func cleanupExpiredBookAnnouncementCandidateSnapshots(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	bookRequestAnnouncementCandidateSnapshots.Range(func(key, value any) bool {
+		snapshot, ok := value.(bookAnnouncementCandidateSnapshot)
+		if !ok || (!snapshot.ExpiresAt.IsZero() && now.After(snapshot.ExpiresAt)) {
+			bookRequestAnnouncementCandidateSnapshots.Delete(key)
+		}
+		return true
+	})
+	if storage.DB != nil {
+		if err := storage.DB.Where("expires_at < ?", now).Delete(&model.BookRequestAnnouncementCandidateSnapshot{}).Error; err != nil {
+			log.Printf("book announcement expired candidate snapshot cleanup failed: %s", textfmt.FormatPlainError(err))
+		}
+	}
+}
+
+func formatBookAnnouncementPageCallback(reqID uint, page int, token string) string {
+	return fmt.Sprintf("br_ann_page_%d_%d_%s", reqID, page, token)
+}
+
+func parseBookAnnouncementPageCallback(data string) (uint, int, string, bool) {
+	if !strings.HasPrefix(data, "br_ann_page_") {
+		return 0, 0, "", false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(data, "br_ann_page_"), "_", 3)
+	if len(parts) != 3 {
+		return 0, 0, "", false
+	}
+	reqID64, reqErr := strconv.ParseUint(parts[0], 10, 64)
+	page64, pageErr := strconv.ParseUint(parts[1], 10, 31)
+	token := strings.TrimSpace(parts[2])
+	if reqErr != nil || pageErr != nil || reqID64 == 0 || token == "" {
+		return 0, 0, "", false
+	}
+	return uint(reqID64), int(page64), token, true
+}
+
+func enrichBookAnnouncementCandidate(candidate BookAnnouncementCandidate) (BookAnnouncementCandidate, error) {
+	itemID := strings.TrimSpace(candidate.ItemID)
+	if itemID == "" {
+		return candidate, nil
+	}
+	if strings.TrimSpace(candidate.Title) != "" && strings.TrimSpace(candidate.LibraryName) != "" && !candidate.RecentAt.IsZero() {
+		return candidate, nil
+	}
+	if abs.DefaultClient == nil {
+		return candidate, nil
+	}
+	full, err := GetBookAnnouncementCandidateByItemID(abs.DefaultClient, itemID)
+	if err != nil {
+		return candidate, err
+	}
+	if full == nil {
+		return candidate, nil
+	}
+	if strings.TrimSpace(full.ItemID) == "" {
+		full.ItemID = itemID
+	}
+	return *full, nil
+}
+
+func sendBookAnnouncementPreview(bot *tgbotapi.BotAPI, adminID int64, reqID uint, candidate BookAnnouncementCandidate) error {
+	var err error
+	candidate, err = enrichBookAnnouncementCandidate(candidate)
+	if err != nil {
+		return err
+	}
+	caption := "请确认是否发布到大群：\n\n" + formatBookAnnouncementCaption(candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(reqID)
+	token := storeBookAnnouncementPreviewCandidate(reqID, candidate)
+	if token == "" {
+		return fmt.Errorf("BOOK_ANNOUNCEMENT_PREVIEW_TOKEN_PERSIST_FAILED")
+	}
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📣 确认发布", fmt.Sprintf("br_ann_pub_%d_%s", reqID, token)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("↩️ 重新选择", fmt.Sprintf("br_ann_refresh_%d", reqID)),
+			tgbotapi.NewInlineKeyboardButtonData("跳过公告", fmt.Sprintf("br_ann_skip_%d", reqID)),
+		),
+	)
+
+	if cover, err := DownloadBookAnnouncementCover(abs.DefaultClient, candidate.ItemID); err == nil {
+		photo := tgbotapi.NewPhoto(adminID, tgbotapi.FileBytes{Name: "cover.jpg", Bytes: cover})
+		photo.Caption = caption
+		photo.ReplyMarkup = keyboard
+		if _, sendErr := telegram.SendNoAutoDelete(bot, photo); sendErr == nil {
+			return nil
+		} else {
+			log.Printf("⚠️ 求书入库公告预览封面发送失败，降级为纯文本: req=%d item=%s err=%s", reqID, textfmt.FormatPlainValue(candidate.ItemID), textfmt.FormatTelegramSendError(sendErr))
+		}
+	} else {
+		log.Printf("⚠️ 求书入库公告预览封面读取失败: req=%d item=%s err=%s", reqID, textfmt.FormatPlainValue(candidate.ItemID), textfmt.FormatPlainError(err))
+	}
+
+	msg := tgbotapi.NewMessage(adminID, caption)
+	msg.ReplyMarkup = keyboard
+	_, sendErr := telegram.SendNoAutoDelete(bot, msg)
+	return sendErr
+}
+
+func storeBookAnnouncementPreviewCandidate(reqID uint, candidate BookAnnouncementCandidate) string {
+	candidate.ItemID = strings.TrimSpace(candidate.ItemID)
+	if storage.DB == nil || reqID == 0 || candidate.ItemID == "" {
+		return ""
+	}
+	body, err := json.Marshal(candidate)
+	if err != nil {
+		log.Printf("book announcement preview candidate encode failed: req=%d item=%s err=%s", reqID, textfmt.FormatPlainValue(candidate.ItemID), textfmt.FormatPlainError(err))
+		return ""
+	}
+	now := time.Now()
+	cleanupExpiredBookAnnouncementPreviewCandidates(now)
+	for attempt := 0; attempt < 3; attempt++ {
+		token := security.GenerateRandomCode(16)
+		entry := bookAnnouncementPreviewEntry{ReqID: reqID, ItemID: candidate.ItemID, Candidate: candidate, ExpiresAt: now.Add(bookRequestAnnouncementPreviewTTL)}
+		row := model.BookRequestAnnouncementPreviewCandidate{Token: token, RequestID: reqID, ItemID: candidate.ItemID, CandidateJSON: string(body), ExpiresAt: entry.ExpiresAt}
+		if err := storage.DB.Create(&row).Error; err != nil {
+			log.Printf("book announcement preview candidate persist failed: req=%d attempt=%d err=%s", reqID, attempt+1, textfmt.FormatPlainError(err))
+			continue
+		}
+		bookRequestAnnouncementPreviewItems.Store(token, entry)
+		return token
+	}
+	return ""
+}
+
+func resolveBookAnnouncementPreviewCandidate(reqID uint, token string, now time.Time) (BookAnnouncementCandidate, bool) {
+	token = strings.TrimSpace(token)
+	if reqID == 0 || token == "" {
+		return BookAnnouncementCandidate{}, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if value, ok := bookRequestAnnouncementPreviewItems.Load(token); ok {
+		entry, valid := value.(bookAnnouncementPreviewEntry)
+		if valid && entry.ReqID == reqID && strings.TrimSpace(entry.ItemID) != "" && (entry.ExpiresAt.IsZero() || !now.After(entry.ExpiresAt)) {
+			candidate := entry.Candidate
+			if strings.TrimSpace(candidate.ItemID) == "" {
+				candidate.ItemID = entry.ItemID
+			}
+			return candidate, true
+		}
+		deleteBookAnnouncementPreviewCandidateToken(token)
+	}
+	if storage.DB == nil {
+		return BookAnnouncementCandidate{}, false
+	}
+	var row model.BookRequestAnnouncementPreviewCandidate
+	if err := storage.DB.Where("token = ? AND request_id = ?", token, reqID).First(&row).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("book announcement preview candidate lookup failed: req=%d err=%s", reqID, textfmt.FormatPlainError(err))
+		}
+		return BookAnnouncementCandidate{}, false
+	}
+	if now.After(row.ExpiresAt) || strings.TrimSpace(row.ItemID) == "" {
+		_ = storage.DB.Delete(&row).Error
+		return BookAnnouncementCandidate{}, false
+	}
+	candidate := BookAnnouncementCandidate{ItemID: row.ItemID}
+	if strings.TrimSpace(row.CandidateJSON) != "" {
+		if err := json.Unmarshal([]byte(row.CandidateJSON), &candidate); err != nil {
+			log.Printf("book announcement preview candidate decode failed: req=%d err=%s", reqID, textfmt.FormatPlainError(err))
+			candidate = BookAnnouncementCandidate{ItemID: row.ItemID}
+		}
+	}
+	if strings.TrimSpace(candidate.ItemID) == "" {
+		candidate.ItemID = row.ItemID
+	}
+	bookRequestAnnouncementPreviewItems.Store(token, bookAnnouncementPreviewEntry{ReqID: reqID, ItemID: row.ItemID, Candidate: candidate, ExpiresAt: row.ExpiresAt})
+	return candidate, true
+}
+
+func deleteBookAnnouncementPreviewCandidateToken(token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	bookRequestAnnouncementPreviewItems.Delete(token)
+	if storage.DB != nil {
+		if err := storage.DB.Where("token = ?", token).Delete(&model.BookRequestAnnouncementPreviewCandidate{}).Error; err != nil {
+			log.Printf("book announcement preview candidate delete failed: err=%s", textfmt.FormatPlainError(err))
+		}
+	}
+}
+
+func cleanupExpiredBookAnnouncementPreviewCandidates(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	bookRequestAnnouncementPreviewItems.Range(func(key, value any) bool {
+		entry, ok := value.(bookAnnouncementPreviewEntry)
+		if !ok || (!entry.ExpiresAt.IsZero() && now.After(entry.ExpiresAt)) {
+			bookRequestAnnouncementPreviewItems.Delete(key)
+		}
+		return true
+	})
+	if storage.DB != nil {
+		if err := storage.DB.Where("expires_at < ?", now).Delete(&model.BookRequestAnnouncementPreviewCandidate{}).Error; err != nil {
+			log.Printf("book announcement expired preview candidate cleanup failed: %s", textfmt.FormatPlainError(err))
+		}
+	}
+}
+
+func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
+	if cb == nil || cb.From == nil {
+		return false
+	}
+
+	data := cb.Data
+	if reqID, ok := parseBookRequestCallbackID(data, "br_ann_skip_"); ok {
+		removeBookAnnouncementPreviewButtons(bot, cb)
+		telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("已跳过求书 #%d 的大群公告", reqID))
+		return true
+	}
+
+	if reqID, ok := parseBookRequestCallbackID(data, "br_ann_refresh_"); ok {
+		req, allowed := loadOperableBookRequestAnnouncement(bot, cb, reqID, "callback announcement refresh")
+		if !allowed {
+			return true
+		}
+		if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+			log.Printf("⚠️ 求书公告候选重新读取失败: req=%d admin=%d err=%s", reqID, cb.From.ID, textfmt.FormatPlainError(err))
+			telegram.AnswerCallback(bot, cb.ID, "候选读取失败，请稍后重试")
+			return true
+		}
+		removeBookAnnouncementPreviewButtons(bot, cb)
+		telegram.AnswerCallback(bot, cb.ID, "已重新读取公告候选")
+		return true
+	}
+
+	if reqID, page, snapshotToken, ok := parseBookAnnouncementPageCallback(data); ok {
+		req, allowed := loadOperableBookRequestAnnouncement(bot, cb, reqID, "callback announcement page")
+		if !allowed {
+			return true
+		}
+		candidates, resolved := resolveBookAnnouncementCandidateSnapshot(req.ID, snapshotToken, time.Now())
+		if !resolved {
+			if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+				telegram.AnswerCallback(bot, cb.ID, "\u5019\u9009\u5df2\u5931\u6548\u4e14\u91cd\u65b0\u8bfb\u53d6\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5")
+				return true
+			}
+			removeBookAnnouncementPreviewButtons(bot, cb)
+			telegram.AnswerCallback(bot, cb.ID, "\u5019\u9009\u5df2\u5931\u6548\uff0c\u5df2\u91cd\u65b0\u8bfb\u53d6")
+			return true
+		}
+		text, markup, actualPage, built := buildBookAnnouncementCandidatePage(req.ID, snapshotToken, candidates, page)
+		if !built || cb.Message == nil {
+			telegram.AnswerCallback(bot, cb.ID, "\u5019\u9009\u5206\u9875\u4e0d\u53ef\u7528")
+			return true
+		}
+		edit := tgbotapi.NewEditMessageText(cb.Message.Chat.ID, cb.Message.MessageID, text)
+		edit.ReplyMarkup = &markup
+		if _, err := bot.Send(edit); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
+			log.Printf("book announcement candidate page edit failed: req=%d page=%d err=%s", req.ID, actualPage, textfmt.FormatTelegramSendError(err))
+			telegram.AnswerCallback(bot, cb.ID, "\u7ffb\u9875\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5")
+			return true
+		}
+		telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("\u5df2\u5207\u6362\u5230\u7b2c %d \u9875", actualPage+1))
+		return true
+	}
+
+	if reqID, token, ok := parseBookAnnouncementTokenCallback(data, "br_ann_sel_"); ok {
+		if abs.DefaultClient == nil {
+			telegram.AnswerCallback(bot, cb.ID, "ABS 客户端未初始化，无法读取书籍详情")
+			return true
+		}
+		req, allowed := loadOperableBookRequestAnnouncement(bot, cb, reqID, "callback announcement select")
+		if !allowed {
+			return true
+		}
+		candidate, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
+		if !resolved {
+			if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+				telegram.AnswerCallback(bot, cb.ID, "候选已失效且重新读取失败，请稍后重试")
+				return true
+			}
+			removeBookAnnouncementPreviewButtons(bot, cb)
+			telegram.AnswerCallback(bot, cb.ID, "候选已失效，已重新读取")
+			return true
+		}
+		if err := sendBookAnnouncementPreview(bot, cb.From.ID, req.ID, candidate); err != nil {
+			log.Printf("⚠️ 求书入库公告预览发送失败: req=%d admin=%d item=%s err=%s", req.ID, cb.From.ID, textfmt.FormatPlainValue(candidate.ItemID), textfmt.FormatTelegramSendError(err))
+			telegram.AnswerCallback(bot, cb.ID, "公告预览发送失败，请稍后重试")
+			return true
+		}
+		deleteBookAnnouncementPreviewCandidateToken(token)
+		removeBookAnnouncementPreviewButtons(bot, cb)
+		telegram.AnswerCallback(bot, cb.ID, "已生成所选书籍的公告预览")
+		return true
+	}
+
+	reqID, token, ok := parseBookAnnouncementPublishCallback(data)
+	if !ok {
+		return false
+	}
+	if config.AppConfig == nil || config.AppConfig.NoticeGroupID == 0 {
+		telegram.AnswerCallback(bot, cb.ID, "未配置通知群，无法发布")
+		return true
+	}
+	if abs.DefaultClient == nil {
+		telegram.AnswerCallback(bot, cb.ID, "ABS 客户端未初始化，无法发布")
+		return true
+	}
+
+	req, allowed := loadOperableBookRequestAnnouncement(bot, cb, reqID, "callback announcement publish")
+	if !allowed {
+		return true
+	}
+	candidate, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
+	if !resolved {
+		if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+			telegram.AnswerCallback(bot, cb.ID, "公告预览已失效，重新读取候选失败，请稍后重试")
+			return true
+		}
+		removeBookAnnouncementPreviewButtons(bot, cb)
+		telegram.AnswerCallback(bot, cb.ID, "公告预览已失效，已重新读取候选")
+		return true
+	}
+
+	lockKey := reqID
+	if _, loaded := bookRequestAnnouncementLocks.LoadOrStore(lockKey, time.Now()); loaded {
+		telegram.AnswerCallback(bot, cb.ID, "\u8be5\u5de5\u5355\u516c\u544a\u6b63\u5728\u5904\u7406\uff0c\u8bf7\u52ff\u91cd\u590d\u70b9\u51fb")
+		return true
+	}
+	defer bookRequestAnnouncementLocks.Delete(lockKey)
+
+	published, lookupErr := bookRequestGroupAnnouncementAlreadyPublished(reqID)
+	if lookupErr != nil {
+		log.Printf("book announcement delivery lookup failed: req=%d err=%s", reqID, textfmt.FormatPlainError(lookupErr))
+		telegram.AnswerCallback(bot, cb.ID, "\u516c\u544a\u72b6\u6001\u67e5\u8be2\u5931\u8d25\uff0c\u4e3a\u907f\u514d\u91cd\u590d\u53d1\u9001\u5df2\u62d2\u7edd\u672c\u6b21\u64cd\u4f5c")
+		return true
+	}
+	if published {
+		removeBookAnnouncementPreviewButtons(bot, cb)
+		telegram.AnswerCallback(bot, cb.ID, "\u8be5\u5de5\u5355\u7684\u65b0\u4e66\u516c\u544a\u5df2\u7ecf\u53d1\u5e03")
+		return true
+	}
+	_, claimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, config.AppConfig.NoticeGroupID, cb.From.ID, time.Now())
+	if claimErr != nil {
+		switch {
+		case errors.Is(claimErr, errBookAnnouncementAlreadySent):
+			removeBookAnnouncementPreviewButtons(bot, cb)
+			telegram.AnswerCallback(bot, cb.ID, "\u8be5\u5de5\u5355\u7684\u65b0\u4e66\u516c\u544a\u5df2\u7ecf\u53d1\u5e03")
+		case errors.Is(claimErr, errBookAnnouncementUncertain):
+			removeBookAnnouncementPreviewButtons(bot, cb)
+			telegram.AnswerCallback(bot, cb.ID, "\u4e0a\u6b21\u53d1\u9001\u7ed3\u679c\u4e0d\u786e\u5b9a\uff0c\u8bf7\u5148\u4eba\u5de5\u68c0\u67e5\u901a\u77e5\u7fa4\uff1bBot \u4e0d\u4f1a\u81ea\u52a8\u91cd\u53d1")
+		case errors.Is(claimErr, errBookAnnouncementInProgress):
+			telegram.AnswerCallback(bot, cb.ID, "\u8be5\u5de5\u5355\u516c\u544a\u6b63\u5728\u53d1\u9001\uff0c\u8bf7\u52ff\u91cd\u590d\u64cd\u4f5c")
+		default:
+			log.Printf("book announcement delivery claim failed: req=%d err=%s", reqID, textfmt.FormatPlainError(claimErr))
+			telegram.AnswerCallback(bot, cb.ID, "\u516c\u544a\u72b6\u6001\u5199\u5165\u5931\u8d25\uff0c\u4e3a\u907f\u514d\u91cd\u590d\u53d1\u9001\u5df2\u62d2\u7edd\u672c\u6b21\u64cd\u4f5c")
+		}
+		return true
+	}
+
+	const maxPublishAttempts = 3
+	for attempt := 1; attempt <= maxPublishAttempts; attempt++ {
+		sentMessage, publishErr := publishBookRequestGroupAnnouncement(bot, req, candidate)
+		if publishErr == nil {
+			// success path below
+			if err := finalizeBookRequestAnnouncementDelivery(req, cb.From.ID, textfmt.GetTelegramDisplayName(cb.From), sentMessage.MessageID, time.Now()); err != nil {
+				log.Printf("book announcement sent but finalization failed: req=%d message=%d err=%s", reqID, sentMessage.MessageID, textfmt.FormatPlainError(err))
+				if markErr := markBookRequestAnnouncementDelivery(reqID, bookAnnouncementDeliveryUncertain, "telegram_sent_finalize_failed", sentMessage.MessageID); markErr != nil {
+					log.Printf("book announcement finalization fallback state write failed: req=%d message=%d err=%s", reqID, sentMessage.MessageID, textfmt.FormatPlainError(markErr))
+				}
+				removeBookAnnouncementPreviewButtons(bot, cb)
+				telegram.AnswerCallback(bot, cb.ID, "公告已发出，但状态登记失败；为避免重复请勿再次发布，并联系超管检查")
+				return true
+			}
+			deleteBookAnnouncementPreviewCandidateToken(token)
+			removeBookAnnouncementPreviewButtons(bot, cb)
+			telegram.AnswerCallback(bot, cb.ID, "已发布到大群")
+			return true
+		}
+
+		status := bookAnnouncementDeliveryFailed
+		errorCode := "pre_send_or_rejected"
+		if publishErr.DeliveryMayHaveSucceeded {
+			status = bookAnnouncementDeliveryUncertain
+			errorCode = "telegram_result_uncertain"
+		}
+		if markErr := markBookRequestAnnouncementDelivery(reqID, status, errorCode); markErr != nil {
+			log.Printf("book announcement delivery failure state write failed: req=%d err=%s", reqID, textfmt.FormatPlainError(markErr))
+			telegram.AnswerCallback(bot, cb.ID, "发送或状态登记失败，结果按不确定处理；请先检查通知群，勿重复点击")
+			return true
+		}
+		log.Printf("book announcement publish failed: req=%d item=%s admin=%d attempt=%d uncertain=%t err=%s", reqID, textfmt.FormatPlainValue(candidate.ItemID), cb.From.ID, attempt, publishErr.DeliveryMayHaveSucceeded, textfmt.FormatPlainError(publishErr.Err))
+		if publishErr.DeliveryMayHaveSucceeded {
+			removeBookAnnouncementPreviewButtons(bot, cb)
+			telegram.AnswerCallback(bot, cb.ID, "发送结果不确定，已停止自动重发；请人工检查通知群")
+			return true
+		}
+		// 明确失败（未被标记为 uncertain）时最多重试 3 次。
+		if attempt < maxPublishAttempts {
+			// 失败后状态已写为 failed，允许再次 claim 后重试。
+			if _, retryClaimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, config.AppConfig.NoticeGroupID, cb.From.ID, time.Now()); retryClaimErr != nil {
+				log.Printf("book announcement retry claim failed: req=%d attempt=%d err=%s", reqID, attempt+1, textfmt.FormatPlainError(retryClaimErr))
+				break
+			}
+			continue
+		}
+		removeBookAnnouncementPreviewButtons(bot, cb)
+		telegram.AnswerCallback(bot, cb.ID, "公告未发出，已安全标记失败，可稍后重试")
+		return true
+	}
+
+	removeBookAnnouncementPreviewButtons(bot, cb)
+	telegram.AnswerCallback(bot, cb.ID, "重试已被中断，请稍后重新点击发布")
+	return true
+}
+
+func loadOperableBookRequestAnnouncement(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery, reqID uint, context string) (model.BookRequest, bool) {
+	req, found, err := LoadBookRequestByID(storage.DB, reqID, context)
+	if err != nil {
+		telegram.AnswerCallback(bot, cb.ID, "查询工单失败，请稍后重试")
+		return model.BookRequest{}, false
+	}
+	if !found {
+		telegram.AnswerCallback(bot, cb.ID, "工单不存在")
+		return model.BookRequest{}, false
+	}
+	if !isBookRequestUploadedStatus(req.Status) {
+		telegram.AnswerCallback(bot, cb.ID, "该工单尚未标记已上传")
+		return model.BookRequest{}, false
+	}
+	if !CanOperateBookRequest(req, cb.From.ID) {
+		telegram.AnswerCallback(bot, cb.ID, "只有接单人或超级管理员可以操作公告")
+		return model.BookRequest{}, false
+	}
+	return req, true
+}
+
+func parseBookAnnouncementPublishCallback(data string) (uint, string, bool) {
+	return parseBookAnnouncementTokenCallback(data, "br_ann_pub_")
+}
+
+func parseBookAnnouncementTokenCallback(data string, prefix string) (uint, string, bool) {
+	if !strings.HasPrefix(data, prefix) {
+		return 0, "", false
+	}
+	rest := strings.TrimPrefix(data, prefix)
+	reqPart, tokenPart, ok := strings.Cut(rest, "_")
+	if !ok {
+		return 0, "", false
+	}
+	reqID64, err := strconv.ParseUint(reqPart, 10, 64)
+	token := strings.TrimSpace(tokenPart)
+	if err != nil || reqID64 == 0 || token == "" {
+		return 0, "", false
+	}
+	return uint(reqID64), token, true
+}
+
+type bookAnnouncementPublishError struct {
+	Err                      error
+	DeliveryMayHaveSucceeded bool
+}
+
+func (e *bookAnnouncementPublishError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func definiteTelegramRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	var tgErr *tgbotapi.Error
+	if errors.As(err, &tgErr) && tgErr.Code >= 400 && tgErr.Code < 500 && tgErr.Code != 429 {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "chat not found") ||
+		strings.Contains(text, "bot was kicked") ||
+		strings.Contains(text, "kicked from") ||
+		strings.Contains(text, "not enough rights") ||
+		strings.Contains(text, "forbidden") ||
+		strings.Contains(text, "bad request: chat") ||
+		strings.Contains(text, "can't send")
+}
+
+func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req model.BookRequest, candidate BookAnnouncementCandidate) (tgbotapi.Message, *bookAnnouncementPublishError) {
+	var zero tgbotapi.Message
+	if bot == nil {
+		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("Telegram Bot \u672a\u521d\u59cb\u5316")}
+	}
+	if abs.DefaultClient == nil {
+		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("ABS \u5ba2\u6237\u7aef\u672a\u521d\u59cb\u5316")}
+	}
+	if config.AppConfig == nil || config.AppConfig.NoticeGroupID == 0 {
+		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("\u901a\u77e5\u7fa4\u672a\u914d\u7f6e")}
+	}
+	candidate.ItemID = strings.TrimSpace(candidate.ItemID)
+	if candidate.ItemID == "" {
+		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("ABS item ID 为空")}
+	}
+	var enrichErr error
+	candidate, enrichErr = enrichBookAnnouncementCandidate(candidate)
+	if enrichErr != nil {
+		return zero, &bookAnnouncementPublishError{Err: enrichErr}
+	}
+	caption := formatBookAnnouncementCaption(candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(req.ID)
+
+	if cover, coverErr := DownloadBookAnnouncementCover(abs.DefaultClient, candidate.ItemID); coverErr == nil {
+		photo := tgbotapi.NewPhoto(config.AppConfig.NoticeGroupID, tgbotapi.FileBytes{Name: "cover.jpg", Bytes: cover})
+		photo.Caption = caption
+		if sent, sendErr := telegram.SendNoAutoDelete(bot, photo); sendErr == nil {
+			return sent, nil
+		} else if !definiteTelegramRejection(sendErr) {
+			return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("send group announcement photo: %w", sendErr), DeliveryMayHaveSucceeded: true}
+		} else {
+			log.Printf("book announcement photo definitely rejected; falling back to text: req=%d item=%s err=%s", req.ID, textfmt.FormatPlainValue(candidate.ItemID), textfmt.FormatTelegramSendError(sendErr))
+		}
+	} else {
+		log.Printf("book announcement cover unavailable; falling back to text: req=%d item=%s err=%s", req.ID, textfmt.FormatPlainValue(candidate.ItemID), textfmt.FormatPlainError(coverErr))
+	}
+
+	msg := tgbotapi.NewMessage(config.AppConfig.NoticeGroupID, caption)
+	sent, err := telegram.SendNoAutoDelete(bot, msg)
+	if err != nil {
+		return zero, &bookAnnouncementPublishError{
+			Err:                      fmt.Errorf("send group announcement text: %w", err),
+			DeliveryMayHaveSucceeded: !definiteTelegramRejection(err),
+		}
+	}
+	return sent, nil
+}
+
+func removeBookAnnouncementPreviewButtons(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) {
+	if bot == nil || cb == nil || cb.Message == nil {
+		return
+	}
+	emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
+	edit := tgbotapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID, emptyMarkup)
+	if _, err := bot.Request(edit); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
+		log.Printf("⚠️ 移除求书公告预览按钮失败: chat=%d msg=%d err=%s", cb.Message.Chat.ID, cb.Message.MessageID, textfmt.FormatTelegramSendError(err))
+	}
+}
