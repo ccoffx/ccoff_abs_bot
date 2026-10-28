@@ -60,7 +60,7 @@ func InitDB() {
 		&model.User{},
 		&model.InviteCode{},
 		&model.RenewCode{},
-		&model.GithubBenefitClaim{},
+		&model.WhitelistCode{},
 		&model.ReferralCode{},
 		&model.ReferralActivation{},
 		&model.ReferralDailyActivationQuota{},

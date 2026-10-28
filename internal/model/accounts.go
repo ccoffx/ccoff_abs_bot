@@ -70,31 +70,6 @@ type RenewCode struct {
 	CashoutPoints int
 }
 
-type GithubBenefitClaim struct {
-	gorm.Model
-
-	TelegramID  int64  `gorm:"index;not null"`
-	GithubID    int64  `gorm:"index"`
-	GithubLogin string `gorm:"index"`
-
-	GithubCreatedAt *time.Time
-	VerifyCode      string    `gorm:"index;not null"`
-	Status          string    `gorm:"index;not null;default:'pending'"`
-	ExpiresAt       time.Time `gorm:"index;not null"`
-	ClaimedAt       *time.Time
-
-	InviteCodeID      uint
-	InviteCodePreview string
-	RenewCodeID       uint
-	RenewCodePreview  string
-	RewardType        string `gorm:"index"`
-	RewardDays        int
-}
-
-func (GithubBenefitClaim) TableName() string {
-	return "github_benefit_claims"
-}
-
 type ReferralCode struct {
 	gorm.Model
 
@@ -164,4 +139,16 @@ type ReferralMonthlyRewardQuota struct {
 
 func (ReferralMonthlyRewardQuota) TableName() string {
 	return "referral_monthly_reward_quotas"
+}
+
+// WhitelistCode grants the existing permanent whitelist privilege once.
+// Raw codes are only returned to the generating administrator.
+type WhitelistCode struct {
+	gorm.Model
+	CodeHash    string `gorm:"uniqueIndex;not null"`
+	CodePreview string
+	CreatedByID int64
+	IsUsed      bool `gorm:"default:false;not null"`
+	UsedByID    int64
+	UsedAt      *time.Time
 }

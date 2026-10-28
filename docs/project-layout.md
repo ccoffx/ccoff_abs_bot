@@ -11,7 +11,7 @@
 | 定时调度、账号到期处理 | `internal/app/scheduler.go` |
 | 开放注册、用户补偿和管理操作 | `internal/app/admin_*.go` |
 | 注册、绑定和账号状态 | `internal/account/` |
-| 邀请拉新、GitHub 福利、签到、财富榜 | `internal/account/` |
+| 邀请拉新、签到、财富榜 | `internal/account/` |
 | 求书工单、入库事件和公告投递 | `internal/books/` |
 | 斗气配置、突破和材料兑换 | `internal/game/cultivation*.go` |
 | 药园和背包 | `internal/game/garden.go` |

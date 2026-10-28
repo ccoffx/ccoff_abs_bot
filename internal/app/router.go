@@ -128,10 +128,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	if account.HandleGithubBenefitCommand(bot, msg, text, nil) {
-		return
-	}
-
 	if game.HandleWorldBossCommand(bot, msg, text) {
 		return
 	}
@@ -331,6 +327,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			telegram.SendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("⚠️ @%s 为了保持群内整洁，请**私聊我**执行各项操作指令哦！", safeName))
 			telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
 		}
+		return
+	}
+
+	if handleWhitelistCardMessage(bot, msg, text, session) {
 		return
 	}
 

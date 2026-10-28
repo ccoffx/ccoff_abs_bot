@@ -41,7 +41,6 @@ type Config struct {
 	DatabaseMaxIdleConns  int
 	DatabaseBusyTimeoutMS int
 	StartupNotifyAdmins   bool
-	GithubAPIToken        string
 	// 🗑️ 已彻底删除 ServerLines 属性
 }
 
@@ -99,7 +98,6 @@ func loadConfig(lookup func(string) (string, bool)) {
 		DatabaseMaxIdleConns:  getEnvAsInt("DATABASE_MAX_IDLE_CONNS", 10),
 		DatabaseBusyTimeoutMS: getEnvAsInt("DATABASE_BUSY_TIMEOUT_MS", 10000),
 		StartupNotifyAdmins:   getEnvAsBool("BOT_STARTUP_NOTIFY_ADMINS", false),
-		GithubAPIToken:        strings.TrimSpace(getEnv("GITHUB_API_TOKEN", "")),
 	}
 	if err := AppConfig.ValidateEnvironment(); err != nil {
 		log.Fatal(err)

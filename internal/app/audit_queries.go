@@ -372,6 +372,8 @@ var highRiskAuditActionSet = map[string]struct{}{
 	"ADJUST_POINTS":                          {},
 	"PROMOTE_ADMIN":                          {},
 	"SET_WHITELIST":                          {},
+	"GENERATE_WHITELIST_CODES":               {},
+	"REDEEM_WHITELIST_CODE":                  {},
 	"SET_SERVER_LINES":                       {},
 	"SET_INVITE_PRICE":                       {},
 	"SET_RENEW_PRICE":                        {},
@@ -421,10 +423,6 @@ var highRiskAuditActionSet = map[string]struct{}{
 	"UPDATE_REALM_THRESHOLD":                 {},
 	"UPDATE_MINOR_REALM_THRESHOLD":           {},
 	"UPDATE_SECT_SECRET_REALM_CONFIG":        {},
-	"CLAIM_GITHUB_BENEFIT_INVITE":            {},
-	"CLAIM_GITHUB_BENEFIT_RENEW":             {},
-	"SET_GITHUB_BENEFIT_ENABLED":             {},
-	"SET_GITHUB_BENEFIT_QUOTA":               {},
 }
 
 func isHighRiskAuditAction(action string) bool {

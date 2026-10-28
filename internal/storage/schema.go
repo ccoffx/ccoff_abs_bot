@@ -85,12 +85,6 @@ var DatabaseIndexes = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_activations_invitee_unique
   ON referral_activations(invitee_id)
   WHERE deleted_at IS NULL;`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_github_benefit_claims_tg_claimed_unique
-  ON github_benefit_claims(telegram_id)
-  WHERE status = 'claimed' AND deleted_at IS NULL;`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_github_benefit_claims_github_claimed_unique
-  ON github_benefit_claims(github_id)
-  WHERE github_id > 0 AND status = 'claimed' AND deleted_at IS NULL;`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_daily_task_claims_user_day_unique
   ON sect_daily_task_claims(user_id, day_key)
   WHERE deleted_at IS NULL;`,

@@ -180,6 +180,7 @@ func renderSuperAdminMenu(key string) (string, tgbotapi.InlineKeyboardMarkup) {
 		return "🎫 **【卡密续期】**", menuMarkup(
 			adminCmdRow("🔑 生成邀请码", "gen_invite"),
 			adminCmdRow("💳 生成续期卡", "gen_renew"),
+			adminCmdRow("🏳️ 生成白名单卡", "gen_whitelist"),
 			adminCmdRow("🔎 卡密查码", "query_code"),
 			adminCmdRow("邀请码价格", "invite_price"),
 			adminCmdRow("续期卡价格", "renew_price"),
@@ -190,10 +191,6 @@ func renderSuperAdminMenu(key string) (string, tgbotapi.InlineKeyboardMarkup) {
 			adminCmdRow("🎲 积分抽奖", "lottery"),
 			adminCmdRow("创建积分抽奖", "lottery_create"),
 			adminCmdRow("抽奖详情", "lottery_detail"),
-			adminCmdRow("🎁 查看GitHub福利", "github_benefit_view"),
-			adminCmdRow("设置GitHub福利名额", "github_benefit_quota"),
-			adminCmdRow("开启GitHub福利", "github_benefit_enable"),
-			adminCmdRow("关闭GitHub福利", "github_benefit_disable"),
 			adminBackRow(),
 		)
 	case "books":
@@ -270,13 +267,10 @@ func adminMenuCommandText(key string) (command string, superOnly bool, ok bool) 
 		"renew_price":            {"续期卡价格", true},
 		"gen_invite":             {"生成邀请码", true},
 		"gen_renew":              {"生成续期卡", true},
+		"gen_whitelist":          {"生成白名单卡", true},
 		"lottery":                {"积分抽奖", true},
 		"lottery_create":         {"创建积分抽奖", true},
 		"lottery_detail":         {"抽奖详情", true},
-		"github_benefit_view":    {"查看github福利", true},
-		"github_benefit_quota":   {"设置github福利名额", true},
-		"github_benefit_enable":  {"开启github福利", true},
-		"github_benefit_disable": {"关闭github福利", true},
 		"cult_view":              {"查看斗气配置", true},
 		"realm_view":             {"查看境界配置", true},
 		"break_view":             {"查看突破配置", true},

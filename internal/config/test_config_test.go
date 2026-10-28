@@ -13,7 +13,7 @@ func TestNativeConfigIsolatedFromProductionEnvironment(t *testing.T) {
 	for key, value := range map[string]string{
 		"APP_ENV": "production", "ABS_MODE": "real", "TELEGRAM_BOT_TOKEN": "production-token",
 		"ABS_API_URL": "https://real.example", "ABS_API_KEY": "real-key", "ABS_TEMPLATE_USER_ID": "real-template",
-		"DATABASE_URL": "data/bot_data.db", "NOTICE_GROUP_ID": "-100", "BACKUP_GROUP_ID": "-200", "GITHUB_API_TOKEN": "real-github-token",
+		"DATABASE_URL": "data/bot_data.db", "NOTICE_GROUP_ID": "-100", "BACKUP_GROUP_ID": "-200",
 	} {
 		t.Setenv(key, value)
 	}
@@ -26,7 +26,7 @@ func TestNativeConfigIsolatedFromProductionEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := AppConfig
-	if !c.IsTest() || c.ABSMode != "mock" || c.TgToken != "123:test" || c.AbsURL != "https://abs.mock.invalid" || c.AbsKey != "mock" || c.AbsTemplateID != "mock-template" || c.DbURL != "data-test/bot_data.db" || c.NoticeGroupID != 0 || c.BackupGroupID != 0 || c.GithubAPIToken != "" || c.InviteRequired || c.WorkerCount != 4 || !c.AdminIDs[42] {
+	if !c.IsTest() || c.ABSMode != "mock" || c.TgToken != "123:test" || c.AbsURL != "https://abs.mock.invalid" || c.AbsKey != "mock" || c.AbsTemplateID != "mock-template" || c.DbURL != "data-test/bot_data.db" || c.NoticeGroupID != 0 || c.BackupGroupID != 0 || c.InviteRequired || c.WorkerCount != 4 || !c.AdminIDs[42] {
 		t.Fatal("native test config inherited production values or lost test settings")
 	}
 	if os.Getenv("TELEGRAM_BOT_TOKEN") != "production-token" {
