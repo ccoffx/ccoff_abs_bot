@@ -110,6 +110,63 @@ class PromotionTests(unittest.TestCase):
         self.assertIsNone(release)
 
 
+class CandidateMergeTests(unittest.TestCase):
+    def run_merge(self, *, arm64=OTHER, **state):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = workflow.split("      - name: Merge native images into the immutable candidate\n", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("  smoke:\n", 1)[0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "image-digests").mkdir()
+            (root / "image-digests/amd64.txt").write_text(DIGEST)
+            if arm64 is not None:
+                (root / "image-digests/arm64.txt").write_text(arm64)
+            state["calls"] = []
+            (root / "registry.json").write_text(json.dumps(state))
+            docker = root / "docker"
+            docker.write_text("#!/bin/sh\nexec " + shlex.join([
+                sys.executable, str(Path(__file__).resolve()), "--fake-docker"
+            ]) + ' "$@"\n')
+            docker.chmod(0o755)
+            output = root / "output"
+            env = dict(os.environ, REPO="example/bot", GITHUB_SHA="c" * 40,
+                       GITHUB_OUTPUT=str(output))
+            env["PATH"] = str(root) + os.pathsep + env["PATH"]
+            result = subprocess.run(["bash", "-c", script], cwd=root, env=env,
+                                    capture_output=True, text=True, timeout=15)
+            state = json.loads((root / "registry.json").read_text())
+            outputs = output.read_text() if output.exists() else ""
+        return result, state["calls"], outputs
+
+    def test_merge_uses_both_native_digests(self):
+        result, calls, outputs = self.run_merge()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = next(call for call in calls if call[2] == "create")
+        self.assertEqual(create[-2:], [IMAGE + "@" + DIGEST, IMAGE + "@" + OTHER])
+        self.assertIn("digest=" + DIGEST, outputs)
+        self.assertIn("image=" + IMAGE, outputs)
+
+    def test_retry_does_not_rewrite_existing_candidate(self):
+        result, calls, _ = self.run_merge(digest=DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], "inspect")
+
+    def test_incomplete_or_invalid_architecture_blocks_merge(self):
+        for arm64 in (None, "invalid-digest"):
+            with self.subTest(arm64=arm64):
+                result, calls, outputs = self.run_merge(arm64=arm64)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+                self.assertEqual(outputs, "")
+
+    def test_registry_failure_blocks_merge(self):
+        result, calls, outputs = self.run_merge(error="unauthorized")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(outputs, "")
+
+
 if __name__ == "__main__":
     if sys.argv[1:] and sys.argv[1] == "--fake-docker":
         sys.exit(fake_docker())
