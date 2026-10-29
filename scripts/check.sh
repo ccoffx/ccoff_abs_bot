@@ -13,3 +13,4 @@ else
   docker run --rm -v "$PWD:/src" -w /src -e CGO_ENABLED -e GOFLAGS golang:1.26.10 sh -ec 'go test ./...; go test -race ./...; go vet ./...'
 fi
 python3 scripts/test_deploy.py
+python3 scripts/test_release.py

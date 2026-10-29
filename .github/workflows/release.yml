@@ -51,8 +51,8 @@ jobs:
           gh run download "$run_id" --repo "$REPO" --name "deployment-$SHA" --dir dist
           test "$(jq -r .commit dist/candidate.json)" = "$SHA"
           test "$(jq -r .schemaCompatibility dist/candidate.json)" = 1
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -64,11 +64,31 @@ jobs:
         run: |
           set -euo pipefail
           pin=$(jq -r .image dist/candidate.json)
-          [[ "$pin" == "$IMAGE@sha256:"* ]]
-          if docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then echo 'Image version already exists'; exit 1; fi
-          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$pin"
-          promoted=$(docker buildx imagetools inspect "$IMAGE:$VERSION" | awk '/^Digest:/ {print $2; exit}')
-          test "$pin" = "$IMAGE@$promoted"
+          [[ "$pin" == "$IMAGE@sha256:"* && "${pin#*@sha256:}" =~ ^[a-f0-9]{64}$ ]]
+          manifest=$(mktemp)
+          registry_error=$(mktemp)
+          trap 'rm -f "$manifest" "$registry_error"' EXIT
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > "$manifest" 2> "$registry_error"; then
+            existing=$(awk '/^Digest:/ {print $2; exit}' "$manifest")
+            if [[ "$pin" != "$IMAGE@$existing" ]]; then
+              echo 'Image version already exists with a different digest; refusing to overwrite' >&2
+              exit 1
+            fi
+            echo 'Resuming promotion of the same immutable image'
+          elif grep -Eqi 'manifest unknown|MANIFEST_UNKNOWN|: not found$' "$registry_error"; then
+            docker buildx imagetools create --tag "$IMAGE:$VERSION" "$pin"
+          else
+            cat "$registry_error" >&2
+            exit 1
+          fi
+          # Consume the complete output before parsing: awk exiting early in a
+          # pipe can make buildx fail with a broken pipe under pipefail.
+          docker buildx imagetools inspect "$IMAGE:$VERSION" > "$manifest"
+          promoted=$(awk '/^Digest:/ {print $2; exit}' "$manifest")
+          if [[ "$pin" != "$IMAGE@$promoted" ]]; then
+            echo 'Promoted image digest does not match the tested candidate' >&2
+            exit 1
+          fi
           jq --arg version "$VERSION" '. + {version:$version}' dist/candidate.json > dist/release.json
       - name: Publish deployment files and verification boundaries
         shell: bash
