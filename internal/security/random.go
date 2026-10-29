@@ -29,7 +29,7 @@ func GenerateRandomCode(length int) string {
 	}
 
 	bytes := make([]byte, (length+1)/2)
-	// 熵源故障必须 fail-closed：本函数的产物包含邀请码/续期卡/卡密/领奖暗号等安全令牌，
+	// 熵源故障必须 fail-closed：本函数的产物包含邀请码/续期卡/卡密等安全令牌，
 	// 绝不能静默退化为时间戳等可预测值；重试后仍失败则中止本次生成（由各调用点的 recover 兜底）。
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {

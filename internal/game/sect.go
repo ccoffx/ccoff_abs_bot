@@ -1065,7 +1065,7 @@ func HandleSectMemberPageCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQue
 	edit := tgbotapi.NewEditMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSectMemberListPage(sect, members, totalMembers, actualPage))
 	edit.ParseMode = "Markdown"
 	edit.ReplyMarkup = &markup
-	if _, err := bot.Send(edit); err != nil {
+	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil {
 		log.Printf("⚠️ 宗门成员列表分页消息编辑失败: chat=%d message=%d user=%d page=%d err=%s", cb.Message.Chat.ID, cb.Message.MessageID, cb.From.ID, actualPage, textfmt.FormatTelegramSendError(err))
 		telegram.AnswerCallback(bot, cb.ID, "分页刷新失败")
 		return true
@@ -1318,7 +1318,7 @@ func handleAppointSectRole(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawTarge
 
 	targetID, err := parseSectTargetUserID(rawTargetID)
 	if err != nil {
-		telegram.ReplyText(bot, chatID, "目标用户 ID 格式不正确。\n示例：任命长老 123456789")
+		telegram.ReplyText(bot, chatID, "目标用户 ID 格式不正确。\n示例："+textfmt.Copyable("任命长老 123456789"))
 		return
 	}
 

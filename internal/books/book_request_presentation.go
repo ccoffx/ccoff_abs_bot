@@ -236,7 +236,7 @@ func HandleBookRequestStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session
 			planText+"\n\n"+
 			"请发送喜马拉雅链接。\n\n"+
 			"要求："+BookRequestLinkRequirementText+"。\n\n"+
-			"发送“取消”可退出。",
+			("发送“"+textfmt.Copyable("取消")+"”可退出。"),
 	)
 }
 

@@ -136,7 +136,7 @@ func handleSectHornStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, scope stri
 	}
 
 	if !msg.Chat.IsPrivate() {
-		telegram.SendPlainText(bot, msg.Chat.ID, "📣 喇叭需要私聊我发送，避免正文提前公开。\n\n用法：宗门喇叭 内容\n或：世界喇叭 内容")
+		telegram.SendPlainText(bot, msg.Chat.ID, "📣 喇叭需要私聊我发送，避免正文提前公开。\n\n用法："+textfmt.Copyable("宗门喇叭 内容")+"\n或：世界喇叭 内容")
 		return
 	}
 
@@ -175,7 +175,7 @@ func HandleSectHornSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session 
 	content := session.GetTemp("sect_horn_content")
 	wantConfirm := sectHornConfirmText(scope)
 	if text != wantConfirm {
-		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("请回复：%s\n发送“取消”可退出。", wantConfirm))
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("请回复："+textfmt.Copyable("%s")+"\n发送“"+textfmt.Copyable("取消")+"”可退出。", wantConfirm))
 		return
 	}
 
@@ -698,14 +698,14 @@ func sectHornConfirmText(scope string) string {
 
 func sectHornUsageText(scope string) string {
 	if scope == sectHornScopeWorld {
-		return fmt.Sprintf("用法：世界喇叭 内容\n消耗：%d 积分\n限制：宗主或长老可用，正文 %d-%d 字，暂不支持链接。", worldHornCost, sectHornContentMinRunes, sectHornContentMaxRunes)
+		return fmt.Sprintf("用法："+textfmt.Copyable("世界喇叭 内容")+"\n消耗：%d 积分\n限制：宗主或长老可用，正文 %d-%d 字，暂不支持链接。", worldHornCost, sectHornContentMinRunes, sectHornContentMaxRunes)
 	}
-	return fmt.Sprintf("用法：宗门喇叭 内容\n消耗：%d 积分\n限制：宗主或长老可用，正文 %d-%d 字，暂不支持链接。", sectHornCost, sectHornContentMinRunes, sectHornContentMaxRunes)
+	return fmt.Sprintf("用法："+textfmt.Copyable("宗门喇叭 内容")+"\n消耗：%d 积分\n限制：宗主或长老可用，正文 %d-%d 字，暂不支持链接。", sectHornCost, sectHornContentMinRunes, sectHornContentMaxRunes)
 }
 
 func formatSectHornPreview(preview sectHornPreview) string {
 	return fmt.Sprintf(
-		"📣 %s预览\n\n宗门：%s\n职位：%s\n预计接收：%d 人\n消耗积分：%d\n\n正文：\n%s\n\n确认发送请回复：%s\n取消请回复：取消",
+		"📣 %s预览\n\n宗门：%s\n职位：%s\n预计接收：%d 人\n消耗积分：%d\n\n正文：\n%s\n\n确认发送请回复："+textfmt.Copyable("%s")+"\n取消请回复："+textfmt.Copyable("取消"),
 		sectHornTitle(preview.Scope),
 		preview.SectName,
 		getSectRoleText(preview.SenderRole),

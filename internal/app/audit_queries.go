@@ -120,7 +120,7 @@ func handlePointTransactionQuery(bot *tgbotapi.BotAPI, chatID int64, requesterID
 
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
-		telegram.ReplyText(bot, chatID, "用法：查流水 用户ID [天数]\n例如：查流水 123456789 7")
+		telegram.ReplyText(bot, chatID, ("用法："+textfmt.Copyable("查流水 用户ID [天数]")+"\n例如：")+textfmt.Copyable("查流水 123456789 7"))
 		return
 	}
 
@@ -135,7 +135,7 @@ func handlePointTransactionQuery(bot *tgbotapi.BotAPI, chatID int64, requesterID
 		rawDays := strings.TrimSuffix(parts[2], "天")
 		parsedDays, err := strconv.Atoi(rawDays)
 		if err != nil || parsedDays <= 0 {
-			telegram.ReplyText(bot, chatID, "❌ 天数格式错误，例如：查流水 123456789 7")
+			telegram.ReplyText(bot, chatID, "❌ 天数格式错误，例如："+textfmt.Copyable("查流水 123456789 7"))
 			return
 		}
 		days = parsedDays

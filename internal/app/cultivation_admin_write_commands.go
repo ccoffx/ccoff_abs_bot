@@ -66,7 +66,7 @@ func HandleCultivationAdminWriteCommand(bot *tgbotapi.BotAPI, message *tgbotapi.
 		bot,
 		message.Chat.ID,
 		fmt.Sprintf(
-			"高危操作：该指令会修改全服斗气配置。\n\n待执行指令：\n%s\n\n请输入本次变更原因，"+storage.AdminReasonRequirementText+"：",
+			("高危操作：该指令会修改全服斗气配置。\n\n待执行指令：\n"+textfmt.Copyable("%s")+"\n\n请输入本次变更原因，")+storage.AdminReasonRequirementText+"：",
 			textfmt.FormatPlainValue(normalizedText),
 		),
 	)
@@ -103,7 +103,7 @@ func handleCultivationAdminWriteSession(bot *tgbotapi.BotAPI, message *tgbotapi.
 			bot,
 			message.Chat.ID,
 			fmt.Sprintf(
-				"高危操作二次确认：该指令会修改全服斗气配置。\n\n待执行指令：\n%s\n\n原因：%s\n\n确认执行请回复：确认执行斗气配置\n取消请回复：取消",
+				"高危操作二次确认：该指令会修改全服斗气配置。\n\n待执行指令：\n"+textfmt.Copyable("%s")+"\n\n原因：%s\n\n确认执行请回复："+textfmt.Copyable("确认执行斗气配置")+"\n取消请回复："+textfmt.Copyable("取消"),
 				textfmt.FormatPlainValue(pendingCommand),
 				textfmt.FormatPlainValue(reason),
 			),
@@ -183,7 +183,7 @@ func executeCultivationAdminWriteCommand(actorID int64, text string, reason stri
 	switch parts[0] {
 	case "设置突破成功率":
 		if len(parts) != 3 {
-			return "", fmt.Errorf("用法：设置突破成功率 大境界 成功率百分比\n例如：设置突破成功率 1 80")
+			return "", fmt.Errorf(("用法：" + "`设置突破成功率 大境界 成功率百分比`" + "\n例如：") + "`设置突破成功率 1 80`")
 		}
 
 		fromMajor, err := textfmt.ParseNonNegativeInt(parts[1], "大境界")
@@ -212,7 +212,7 @@ func executeCultivationAdminWriteCommand(actorID int64, text string, reason stri
 
 	case "设置突破消耗":
 		if len(parts) != 3 {
-			return "", fmt.Errorf("用法：设置突破消耗 大境界 积分\n例如：设置突破消耗 1 100")
+			return "", fmt.Errorf(("用法：" + "`设置突破消耗 大境界 积分`" + "\n例如：") + "`设置突破消耗 1 100`")
 		}
 
 		fromMajor, err := textfmt.ParseNonNegativeInt(parts[1], "大境界")
@@ -239,7 +239,7 @@ func executeCultivationAdminWriteCommand(actorID int64, text string, reason stri
 
 	case "设置突破冷却":
 		if len(parts) != 3 {
-			return "", fmt.Errorf("用法：设置突破冷却 大境界 小时\n例如：设置突破冷却 1 24")
+			return "", fmt.Errorf(("用法：" + "`设置突破冷却 大境界 小时`" + "\n例如：") + "`设置突破冷却 1 24`")
 		}
 
 		fromMajor, err := textfmt.ParseNonNegativeInt(parts[1], "大境界")
@@ -266,7 +266,7 @@ func executeCultivationAdminWriteCommand(actorID int64, text string, reason stri
 
 	case "设置突破最低修为":
 		if len(parts) != 3 {
-			return "", fmt.Errorf("用法：设置突破最低修为 大境界 小时\n例如：设置突破最低修为 1 50")
+			return "", fmt.Errorf(("用法：" + "`设置突破最低修为 大境界 小时`" + "\n例如：") + "`设置突破最低修为 1 50`")
 		}
 
 		fromMajor, err := textfmt.ParseNonNegativeInt(parts[1], "大境界")
@@ -293,7 +293,7 @@ func executeCultivationAdminWriteCommand(actorID int64, text string, reason stri
 
 	case "设置境界门槛":
 		if len(parts) != 4 {
-			return "", fmt.Errorf("用法：设置境界门槛 大境界 最低小时 最高小时\n最高小时填 0 表示无上限\n例如：设置境界门槛 1 10 50")
+			return "", fmt.Errorf(("用法：" + "`设置境界门槛 大境界 最低小时 最高小时`" + "\n最高小时填 0 表示无上限\n例如：") + "`设置境界门槛 1 10 50`")
 		}
 
 		major, err := textfmt.ParseNonNegativeInt(parts[1], "大境界")
@@ -315,7 +315,7 @@ func executeCultivationAdminWriteCommand(actorID int64, text string, reason stri
 
 	case "设置小境界门槛":
 		if len(parts) != 4 {
-			return "", fmt.Errorf("用法：设置小境界门槛 大境界 小境界 所需小时\n例如：设置小境界门槛 1 2 20")
+			return "", fmt.Errorf(("用法：" + "`设置小境界门槛 大境界 小境界 所需小时`" + "\n例如：") + "`设置小境界门槛 1 2 20`")
 		}
 
 		major, err := textfmt.ParseNonNegativeInt(parts[1], "大境界")

@@ -58,7 +58,7 @@ func RegisterIncomingGroupCommandForAutoDelete(msg *tgbotapi.Message) {
 }
 
 func SendAutoDelete(bot *tgbotapi.BotAPI, chattable tgbotapi.Chattable) (tgbotapi.Message, error) {
-	sentMsg, err := bot.Send(chattable)
+	sentMsg, err := bot.Send(PrepareCopyable(chattable))
 	if err == nil && sentMsg.Chat.ID < 0 {
 		registerAutoDeleteMessage(sentMsg.Chat.ID, sentMsg.MessageID)
 	}
@@ -66,7 +66,7 @@ func SendAutoDelete(bot *tgbotapi.BotAPI, chattable tgbotapi.Chattable) (tgbotap
 }
 
 func SendNoAutoDelete(bot *tgbotapi.BotAPI, chattable tgbotapi.Chattable) (tgbotapi.Message, error) {
-	return bot.Send(chattable)
+	return bot.Send(PrepareCopyable(chattable))
 }
 
 func EnqueueAutoDelete(bot *tgbotapi.BotAPI, chattable tgbotapi.Chattable, kind string, priority telegramAsyncPriority, dedupeKey string) bool {

@@ -36,6 +36,7 @@ type LotteryActivity struct {
 	gorm.Model
 
 	Title          string `gorm:"index;not null"`
+	JoinKeyword    string `gorm:"index"`
 	Mode           string `gorm:"index;not null"`
 	Status         string `gorm:"index;not null;default:'active'"`
 	CreatedByID    int64  `gorm:"index;not null"`
@@ -57,11 +58,7 @@ type LotteryActivity struct {
 	DrawAt           *time.Time `gorm:"index"`
 	DrawnAt          *time.Time `gorm:"index"`
 
-	ClaimCodeHash      string `gorm:"index;not null"`
-	ClaimCodeEncrypted string
-	ClaimCodePreview   string
-	ClaimHours         int
-	ClaimDeadlineAt    *time.Time `gorm:"index"`
+	ClaimDeadlineAt *time.Time `gorm:"index"`
 
 	WinnersCount int
 	ResultNote   string
@@ -110,12 +107,14 @@ type LotteryWinner struct {
 	UserID     int64 `gorm:"index;not null"`
 	UserName   string
 
-	PrizeID          uint
-	PrizeType        string `gorm:"index;not null"`
-	Amount           int
-	Status           string `gorm:"index;not null;default:'pending'"`
-	ClaimedAt        *time.Time
-	PrizeCodePreview string
+	PrizeID               uint
+	PrizeType             string `gorm:"index;not null"`
+	Amount                int
+	Status                string `gorm:"index;not null;default:'pending'"`
+	ClaimedAt             *time.Time
+	PrizeCodePreview      string
+	RewardResultEncrypted string
+	RewardDeliveredAt     *time.Time
 }
 
 func (LotteryWinner) TableName() string {

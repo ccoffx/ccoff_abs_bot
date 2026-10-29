@@ -144,7 +144,7 @@ func HandleTreasureHuntCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text
 		return true
 	}
 	if msg.Chat.IsPrivate() {
-		telegram.SendPlainText(bot, msg.Chat.ID, "🗺 寻宝是群内共享玩法，请在群里发送：发起寻宝")
+		telegram.SendPlainText(bot, msg.Chat.ID, "🗺 寻宝是群内共享玩法，请在群里发送："+textfmt.Copyable("发起寻宝"))
 		return true
 	}
 	telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
@@ -212,10 +212,7 @@ func HandleTreasureHuntCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery
 		telegram.AnswerCallback(bot, cb.ID, ErrTreasurePanel.Error())
 		return true
 	}
-	if locked, message := GetLotteryClaimLockMessage(cb.From.ID); locked {
-		telegram.AnswerCallback(bot, cb.ID, message)
-		return true
-	}
+
 	parts := strings.Split(cb.Data, ":")
 	if len(parts) != 3 {
 		telegram.AnswerCallback(bot, cb.ID, ErrTreasurePanel.Error())

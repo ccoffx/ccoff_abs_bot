@@ -1961,7 +1961,7 @@ func ensureSectSecretRealmLiveBoardSync(bot *tgbotapi.BotAPI, realmID string) er
 	if event.BoardChatID != 0 && event.BoardMessageID != 0 {
 		edit := tgbotapi.NewEditMessageText(event.BoardChatID, event.BoardMessageID, text)
 		edit.ParseMode = "Markdown"
-		if _, err := bot.Send(edit); err == nil {
+		if _, err := bot.Send(telegram.PrepareCopyable(edit)); err == nil {
 			return nil
 		} else if telegram.IsTelegramMessageNotModifiedError(err) {
 			return nil

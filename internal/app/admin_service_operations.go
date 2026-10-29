@@ -680,13 +680,13 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 	if text == "开放注册" && !isSession {
 		session.SetStep("WAITING_OPEN_REG_ACTION")
 		telegram.UserSessions.Store(msg.From.ID, session)
-		telegram.SendPlainText(bot, msg.Chat.ID, "👤 开放注册管理\n\n"+openRegistrationStatusText(time.Now())+"\n\n回复：\n1 - 按总人数开放\n2 - 按时长开放\n3 - 关闭当前开放注册\n取消 - 退出")
+		telegram.SendPlainText(bot, msg.Chat.ID, "👤 开放注册管理\n\n"+openRegistrationStatusText(time.Now())+("\n\n回复：\n"+textfmt.Copyable("1")+" - 按总人数开放"+"\n"+textfmt.Copyable("2")+" - 按时长开放\n"+textfmt.Copyable("3")+" - 关闭当前开放注册\n"+textfmt.Copyable("取消")+" - 退出"))
 		return true
 	}
 	if text == "用户补偿" && !isSession {
 		session.SetStep("WAITING_COMPENSATION_MODE")
 		telegram.UserSessions.Store(msg.From.ID, session)
-		telegram.SendPlainText(bot, msg.Chat.ID, "🛡 用户补偿（高危资产操作）\n\n回复：\n1 - 仅补偿积分\n2 - 仅补偿 ABS 天数\n3 - 积分和 ABS 天数都补偿\n取消 - 退出")
+		telegram.SendPlainText(bot, msg.Chat.ID, "🛡 用户补偿（高危资产操作）\n\n回复：\n"+textfmt.Copyable("1")+" - 仅补偿积分"+"\n"+textfmt.Copyable("2")+" - 仅补偿 ABS 天数\n"+textfmt.Copyable("3")+" - 积分和 ABS 天数都补偿\n"+textfmt.Copyable("取消")+" - 退出")
 		return true
 	}
 
@@ -703,7 +703,7 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 			telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("请输入开放时长，单位为分钟（1-%d，最多 7 天）：", openRegistrationMaxDurationMinutes))
 		case "3":
 			session.SetStep("WAITING_OPEN_REG_CLOSE_CONFIRM")
-			telegram.SendPlainText(bot, msg.Chat.ID, "⚠️ 确认立即关闭当前开放注册？\n请回复：确认关闭开放注册")
+			telegram.SendPlainText(bot, msg.Chat.ID, "⚠️ 确认立即关闭当前开放注册？\n请回复："+textfmt.Copyable("确认关闭开放注册"))
 		default:
 			telegram.SendPlainText(bot, msg.Chat.ID, "请回复 1、2、3，或取消。")
 		}
@@ -738,11 +738,11 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 		if session.GetTemp("open_reg_mode") == openRegistrationModeDuration {
 			modeText = "限制开放时长（分钟）"
 		}
-		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 请确认开放注册\n\n模式：%s\n数值：%s\n原因：%s\n\n开启后符合条件的用户无需邀请码。\n请回复：确认开启开放注册", modeText, session.GetTemp("open_reg_value"), reason))
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 请确认开放注册\n\n模式：%s\n数值：%s\n原因：%s\n\n开启后符合条件的用户无需邀请码。\n请回复："+textfmt.Copyable("确认开启开放注册"), modeText, session.GetTemp("open_reg_value"), reason))
 		return true
 	case "WAITING_OPEN_REG_CONFIRM":
 		if text != "确认开启开放注册" {
-			telegram.SendPlainText(bot, msg.Chat.ID, "请回复“确认开启开放注册”，或取消。")
+			telegram.SendPlainText(bot, msg.Chat.ID, "请回复“"+textfmt.Copyable("确认开启开放注册")+"”，或取消。")
 			return true
 		}
 		v, _ := strconv.Atoi(session.GetTemp("open_reg_value"))
@@ -757,7 +757,7 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 		return true
 	case "WAITING_OPEN_REG_CLOSE_CONFIRM":
 		if text != "确认关闭开放注册" {
-			telegram.SendPlainText(bot, msg.Chat.ID, "请回复“确认关闭开放注册”，或取消。")
+			telegram.SendPlainText(bot, msg.Chat.ID, "请回复“"+textfmt.Copyable("确认关闭开放注册")+"”，或取消。")
 			return true
 		}
 		closed, err := closeOpenRegistrationCampaign(msg.From.ID, time.Now())
@@ -830,11 +830,11 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 		session.SetTemp("comp_announcement", announcement)
 		session.SetStep("WAITING_COMPENSATION_CONFIRM")
 		telegram.UserSessions.Store(msg.From.ID, session)
-		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 高危资产操作确认\n\n接收用户：%d\n每人积分：%d\n每人 ABS 天数：%d\n预计新增总积分：%d\n事故说明：%s\n\n补偿一旦开始不可自动撤销。\n请回复：确认发放用户补偿", count, points, days, count*int64(points), announcement))
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 高危资产操作确认\n\n接收用户：%d\n每人积分：%d\n每人 ABS 天数：%d\n预计新增总积分：%d\n事故说明：%s\n\n补偿一旦开始不可自动撤销。\n请回复："+textfmt.Copyable("确认发放用户补偿"), count, points, days, count*int64(points), announcement))
 		return true
 	case "WAITING_COMPENSATION_CONFIRM":
 		if text != "确认发放用户补偿" {
-			telegram.SendPlainText(bot, msg.Chat.ID, "请回复“确认发放用户补偿”，或取消。")
+			telegram.SendPlainText(bot, msg.Chat.ID, "请回复“"+textfmt.Copyable("确认发放用户补偿")+"”，或取消。")
 			return true
 		}
 		points, _ := strconv.Atoi(session.GetTemp("comp_points"))

@@ -95,20 +95,14 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 	}
 
-	if locked, lockMessage := activity.GetLotteryClaimLockMessage(userID); locked {
-		if msg.Chat.IsPrivate() {
-			telegram.SendPlainText(bot, chatID, lockMessage)
-		} else {
-			telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
-			activity.SendLotteryGroupPlainText(bot, chatID, lockMessage)
-		}
-		return
-	}
-
 	if config.AppConfig.NoticeGroupID != 0 && !telegram.IsMessageFromNoticeGroup(msg) && !telegram.IsUserInGroup(bot, userID, config.AppConfig.NoticeGroupID) {
 		if msg.Chat.IsPrivate() {
 			telegram.ReplyText(bot, chatID, "⚠️ **访问受限：您尚未加入官方交流群！**\n\n为了保障社群的健康生态，本机器人系统仅对官方群成员开放。\n👉 您必须先加入我们的官方大群，才能解锁各项功能。")
 		}
+		return
+	}
+
+	if activity.HandleLotteryClaimCommand(bot, msg, text) {
 		return
 	}
 
@@ -543,7 +537,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			}
 			session.SetStep("WAITING_CODE_CASHOUT_INPUT")
 			telegram.UserSessions.Store(userID, session)
-			telegram.SendPlainText(bot, chatID, "♻️ 本服卡密回收\n\n仅支持本 Bot 生成且当前真实可用的邀请码或续期卡，按当前系统定价的 60% 回收。回收后卡密永久失效且不可恢复。\n\n请发送需要回收的完整卡密，或发送“取消”退出。")
+			telegram.SendPlainText(bot, chatID, "♻️ 本服卡密回收\n\n仅支持本 Bot 生成且当前真实可用的邀请码或续期卡，按当前系统定价的 60% 回收。回收后卡密永久失效且不可恢复。\n\n请发送需要回收的完整卡密，或发送“"+textfmt.Copyable("取消")+"”退出。")
 			return
 		}
 
@@ -984,7 +978,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 		qty, err := strconv.Atoi(strings.TrimSpace(text))
 		if err != nil || qty <= 0 {
-			telegram.SendPlainText(bot, chatID, "回收数量必须是正整数，请重新发送数量，或发送“取消”退出。")
+			telegram.SendPlainText(bot, chatID, "回收数量必须是正整数，请重新发送数量，或发送“"+textfmt.Copyable("取消")+"”退出。")
 			return
 		}
 		points, soldQty, err := game.GardenSellHerbQuantity(userID, seedKey, qty)
@@ -1024,7 +1018,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		telegram.SendPlainText(bot, chatID,
 			fmt.Sprintf(
-				"✅ 链接已记录。\n\n喜马拉雅链接：\n%s\n\n是否需要填写备注？\n例如：想要全集、缺少某几集、指定版本等。\n\n没有备注请发送：跳过",
+				"✅ 链接已记录。\n\n喜马拉雅链接：\n%s\n\n是否需要填写备注？\n例如："+textfmt.Copyable("想要全集")+"、"+textfmt.Copyable("缺少某几集")+"、"+textfmt.Copyable("指定版本等")+"。\n\n没有备注请发送："+textfmt.Copyable("跳过"),
 				xmlyLink,
 			),
 		)
@@ -1058,9 +1052,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				"📚 请确认求书信息：\n\n"+
 					"喜马拉雅链接：\n%s\n\n"+
 					"用户备注：\n%s%s\n\n"+
-					"确认提交请回复：确认提交\n"+
-					"重新填写请回复：重新填写\n"+
-					"取消请回复：取消",
+					("确认提交请回复："+textfmt.Copyable("确认提交")+"\n")+
+					("重新填写请回复："+textfmt.Copyable("重新填写")+"\n")+
+					("取消请回复："+textfmt.Copyable("取消")),
 				xmlyLink,
 				books.DisplayBookRequestText(userNote, "无"),
 				costText,
@@ -1086,7 +1080,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		telegram.SendPlainText(bot, chatID, "请回复：确认提交、重新填写，或取消。")
+		telegram.SendPlainText(bot, chatID, "请回复："+textfmt.Copyable("确认提交")+"、"+textfmt.Copyable("重新填写")+"，或取消。")
 
 	case "WAITING_BOOK_CANCEL_REASON":
 		if !books.IsBookRequestAdmin(userID) {
@@ -1227,7 +1221,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 		if adminNote == "" {
-			telegram.SendPlainText(bot, chatID, "❌ 管理员备注不能为空，请重新发送，或发送“取消”退出。")
+			telegram.SendPlainText(bot, chatID, "❌ 管理员备注不能为空，请重新发送，或发送“"+textfmt.Copyable("取消")+"”退出。")
 			return
 		}
 
@@ -1337,7 +1331,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 		if needInfoNote == "" {
-			telegram.SendPlainText(bot, chatID, "❌ 补充信息说明不能为空，请重新发送，或发送“取消”退出。")
+			telegram.SendPlainText(bot, chatID, "❌ 补充信息说明不能为空，请重新发送，或发送“"+textfmt.Copyable("取消")+"”退出。")
 			return
 		}
 
@@ -1568,11 +1562,11 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		session.SetTemp("cashout_points", strconv.Itoa(quote.Points))
 		session.SetStep("WAITING_CODE_CASHOUT_CONFIRM")
 		telegram.UserSessions.Store(userID, session)
-		telegram.SendPlainText(bot, chatID, fmt.Sprintf("♻️ 本服卡密回收确认\n\n类型：%s\n卡密：%s\n回收所得：%d 积分\n\n确认后该卡密将永久失效，无法充值、交易或恢复。\n\n确认请回复：确认回收卡密\n取消请回复：取消", quote.Name, quote.Preview, quote.Points))
+		telegram.SendPlainText(bot, chatID, fmt.Sprintf("♻️ 本服卡密回收确认\n\n类型：%s\n卡密：%s\n回收所得：%d 积分\n\n确认后该卡密将永久失效，无法充值、交易或恢复。\n\n确认请回复："+textfmt.Copyable("确认回收卡密")+"\n取消请回复："+textfmt.Copyable("取消"), quote.Name, quote.Preview, quote.Points))
 
 	case "WAITING_CODE_CASHOUT_CONFIRM":
 		if text != "确认回收卡密" {
-			telegram.SendPlainText(bot, chatID, "请回复“确认回收卡密”，或发送“取消”退出。")
+			telegram.SendPlainText(bot, chatID, "请回复“"+textfmt.Copyable("确认回收卡密")+"”，或发送“"+textfmt.Copyable("取消")+"”退出。")
 			return
 		}
 		recordID, idErr := strconv.ParseUint(session.GetTemp("cashout_record_id"), 10, 64)

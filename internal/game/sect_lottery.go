@@ -223,7 +223,7 @@ func startSectLotteryCreateWizard(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, s
 	session.SetTemp("sect_lottery_sect_name", sect.Name)
 	session.SetStep("WAITING_SECT_LOTTERY_TITLE")
 	telegram.UserSessions.Store(msg.From.ID, session)
-	telegram.SendPlainText(bot, msg.Chat.ID, "🎁 创建宗门抽奖\n\n第一步：请输入活动标题，2-60 个字，不能包含换行、制表符或控制字符。\n发送“取消”可退出。")
+	telegram.SendPlainText(bot, msg.Chat.ID, "🎁 创建宗门抽奖\n\n第一步：请输入活动标题，2-60 个字，不能包含换行、制表符或控制字符。\n发送“"+textfmt.Copyable("取消")+"”可退出。")
 }
 
 func handleSectLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string, session *telegram.SessionState) {
@@ -249,7 +249,7 @@ func handleSectLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, te
 		session.SetTemp("sect_lottery_title", title)
 		session.SetStep("WAITING_SECT_LOTTERY_MODE")
 		telegram.UserSessions.Store(userID, session)
-		telegram.SendPlainText(bot, chatID, "第二步：请选择开奖模式。\n\n发送：人数\n或发送：时间")
+		telegram.SendPlainText(bot, chatID, "第二步：请选择开奖模式。\n\n发送："+textfmt.Copyable("人数")+"\n或发送："+textfmt.Copyable("时间"))
 	case "WAITING_SECT_LOTTERY_MODE":
 		switch text {
 		case "人数":
@@ -261,9 +261,9 @@ func handleSectLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, te
 			session.SetTemp("sect_lottery_mode", sectLotteryModeTime)
 			session.SetStep("WAITING_SECT_LOTTERY_DRAW_TIME")
 			telegram.UserSessions.Store(userID, session)
-			telegram.SendPlainText(bot, chatID, "第三步：请输入开奖时间。\n\n支持两种格式：\n1. 分钟数，例如：60\n2. 固定时间，例如：2026-06-07 20:00:00")
+			telegram.SendPlainText(bot, chatID, "第三步：请输入开奖时间。\n\n支持两种格式：\n"+"1. 分钟数"+"，例如："+textfmt.Copyable("60")+"\n2. 固定时间，例如："+textfmt.Copyable("2026-06-07 20:00:00"))
 		default:
-			telegram.SendPlainText(bot, chatID, "模式不识别，请发送“人数”或“时间”。")
+			telegram.SendPlainText(bot, chatID, "模式不识别，请发送“"+textfmt.Copyable("人数")+"”或“"+textfmt.Copyable("时间")+"”。")
 		}
 	case "WAITING_SECT_LOTTERY_LIMIT":
 		limit, err := strconv.Atoi(strings.TrimSpace(text))
@@ -309,7 +309,7 @@ func handleSectLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, te
 		}
 		telegram.ClearSession(userID)
 		success, failed := remindSectLotteryMembers(bot, lotteryID)
-		telegram.SendPlainText(bot, chatID, fmt.Sprintf("✅ 宗门抽奖已创建\n\n活动ID：%d\n\n成员私聊发送：\n参加宗门抽奖 %d\n\n成员提醒：成功 %d，失败 %d", lotteryID, lotteryID, success, failed))
+		telegram.SendPlainText(bot, chatID, fmt.Sprintf("✅ 宗门抽奖已创建\n\n活动ID：%d\n\n成员私聊发送：\n"+textfmt.Copyable("参加宗门抽奖 %d")+"\n\n成员提醒：成功 %d，失败 %d", lotteryID, lotteryID, success, failed))
 	default:
 		telegram.ClearSession(userID)
 		telegram.SendPlainText(bot, chatID, "宗门抽奖创建会话异常，已中止。")
@@ -443,7 +443,7 @@ func handleJoinSectLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, r
 	}
 	id, err := strconv.ParseUint(strings.TrimSpace(rawID), 10, 64)
 	if err != nil || id == 0 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：参加宗门抽奖 活动ID")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("参加宗门抽奖 活动ID"))
 		return
 	}
 	joined, target, shouldDraw, err := joinSectLottery(uint(id), msg.From)
@@ -452,7 +452,7 @@ func handleJoinSectLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, r
 		return
 	}
 	if target > 0 {
-		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已参与宗门福利抽奖 #%d\n当前参与：%d/%d", id, joined, target))
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已参与宗门福利抽奖 #%d\n当前参与："+"%d/%d", id, joined, target))
 	} else {
 		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已参与宗门福利抽奖 #%d\n当前参与：%d", id, joined))
 	}
@@ -858,7 +858,7 @@ func showSectLotteryList(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			} else if lot.DrawAt != nil {
 				b.WriteString("开奖：" + lot.DrawAt.Format("2006-01-02 15:04") + "\n")
 			}
-			b.WriteString(fmt.Sprintf("参与：参加宗门抽奖 %d\n", lot.ID))
+			b.WriteString(fmt.Sprintf("参与："+textfmt.Copyable("参加宗门抽奖 %d")+"\n", lot.ID))
 		}
 		b.WriteString("\n")
 	}
@@ -1048,7 +1048,7 @@ func sectLotteryReminderText(lot model.SectLottery) string {
 	} else {
 		rule = "定时开奖"
 	}
-	return fmt.Sprintf("🎁 宗门福利抽奖已开启\n\n宗门：%s\n活动：%s\n活动ID：%d\n规则：%s\n奖品数量：%d\n参与门槛：历史贡献 >= %d\n\n如需参与，请私聊发送：\n参加宗门抽奖 %d", textfmt.LotteryDisplayText(lot.SectName, 80, "-"), textfmt.LotteryDisplayText(lot.Title, 80, "-"), lot.ID, rule, lot.PrizeCount, sectLotteryMinContribution, lot.ID)
+	return fmt.Sprintf("🎁 宗门福利抽奖已开启\n\n宗门：%s\n活动：%s\n活动ID：%d\n规则：%s\n奖品数量：%d\n参与门槛：历史贡献 >= %d\n\n如需参与，请私聊发送：\n"+textfmt.Copyable("参加宗门抽奖 %d"), textfmt.LotteryDisplayText(lot.SectName, 80, "-"), textfmt.LotteryDisplayText(lot.Title, 80, "-"), lot.ID, rule, lot.PrizeCount, sectLotteryMinContribution, lot.ID)
 }
 
 func loadSectLotteryForOperator(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawID string) (model.SectLottery, bool) {
@@ -1059,7 +1059,7 @@ func loadSectLotteryForOperator(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, raw
 	}
 	id, err := strconv.ParseUint(strings.TrimSpace(rawID), 10, 64)
 	if err != nil || id == 0 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：查看宗门抽奖 活动ID")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("查看宗门抽奖 活动ID"))
 		return zero, false
 	}
 	member, _, err := sectLotteryCreatorContext(msg.From.ID)
@@ -1227,7 +1227,7 @@ func formatSectLotteryCreateConfirm(session *telegram.SessionState, prizeCount i
 	} else {
 		rule = session.GetTemp("sect_lottery_draw_desc")
 	}
-	return fmt.Sprintf("请确认创建宗门抽奖：\n\n宗门：%s\n活动：%s\n开奖：%s\n奖品数量：%d\n参与门槛：历史贡献 >= %d\n\n确认创建请回复：%s\n取消请回复：取消", session.GetTemp("sect_lottery_sect_name"), session.GetTemp("sect_lottery_title"), rule, prizeCount, sectLotteryMinContribution, sectLotteryCreateConfirmCommand)
+	return fmt.Sprintf("请确认创建宗门抽奖：\n\n宗门：%s\n活动：%s\n开奖：%s\n奖品数量：%d\n参与门槛：历史贡献 >= %d\n\n确认创建请回复："+textfmt.Copyable("%s")+"\n取消请回复："+textfmt.Copyable("取消"), session.GetTemp("sect_lottery_sect_name"), session.GetTemp("sect_lottery_title"), rule, prizeCount, sectLotteryMinContribution, sectLotteryCreateConfirmCommand)
 }
 
 func sectLotteryActionErrorText(err error) string {

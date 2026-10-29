@@ -414,7 +414,7 @@ func HandleSectSecretRealmAdminCommand(bot *tgbotapi.BotAPI, message *tgbotapi.M
 	session.SetTemp("sect_realm_config_command", normalizedText)
 	session.SetStep("WAITING_SECT_REALM_CONFIG_REASON")
 	telegram.UserSessions.Store(message.From.ID, session)
-	telegram.SendPlainText(bot, message.Chat.ID, fmt.Sprintf("高危操作：该指令会修改全服宗门秘境配置。\n\n待执行指令：\n%s\n\n请输入本次变更原因，%s：", textfmt.FormatPlainValue(normalizedText), storage.AdminReasonRequirementText))
+	telegram.SendPlainText(bot, message.Chat.ID, fmt.Sprintf("高危操作：该指令会修改全服宗门秘境配置。\n\n待执行指令：\n"+textfmt.Copyable("%s")+"\n\n请输入本次变更原因，%s：", textfmt.FormatPlainValue(normalizedText), storage.AdminReasonRequirementText))
 	return true
 }
 
@@ -440,7 +440,7 @@ func handleSectSecretRealmAdminSession(bot *tgbotapi.BotAPI, message *tgbotapi.M
 		session.SetTemp("sect_realm_config_reason", reason)
 		session.SetStep("WAITING_CONFIRM_SECT_REALM_CONFIG")
 		telegram.UserSessions.Store(message.From.ID, session)
-		telegram.SendPlainText(bot, message.Chat.ID, fmt.Sprintf("高危操作二次确认：该指令会修改全服宗门秘境配置。\n\n待执行指令：\n%s\n\n原因：%s\n\n确认执行请回复：确认执行秘境配置\n取消请回复：取消", textfmt.FormatPlainValue(pendingCommand), textfmt.FormatPlainValue(reason)))
+		telegram.SendPlainText(bot, message.Chat.ID, fmt.Sprintf("高危操作二次确认：该指令会修改全服宗门秘境配置。\n\n待执行指令：\n"+textfmt.Copyable("%s")+"\n\n原因：%s\n\n确认执行请回复："+textfmt.Copyable("确认执行秘境配置")+"\n取消请回复："+textfmt.Copyable("取消"), textfmt.FormatPlainValue(pendingCommand), textfmt.FormatPlainValue(reason)))
 		return true
 
 	case "WAITING_CONFIRM_SECT_REALM_CONFIG":
@@ -503,7 +503,7 @@ func ExecuteSectSecretRealmAdminWriteCommand(actorID int64, text string, reason 
 	switch parts[0] {
 	case "设置秘境档位":
 		if len(parts) != 4 {
-			return "", fmt.Errorf("用法：设置秘境档位 档位 字段 值")
+			return "", fmt.Errorf("用法：" + "`设置秘境档位 档位 字段 值`")
 		}
 		profile, index, err := sectSecretRealmConfigProfileByKey(cfg, parts[1])
 		if err != nil {
@@ -521,7 +521,7 @@ func ExecuteSectSecretRealmAdminWriteCommand(actorID int64, text string, reason 
 
 	case "设置秘境倍率":
 		if len(parts) != 5 {
-			return "", fmt.Errorf("用法：设置秘境倍率 档位 大境界 贡献百分比 声望百分比")
+			return "", fmt.Errorf("用法：" + "`设置秘境倍率 档位 大境界 贡献百分比 声望百分比`")
 		}
 		profile, index, err := sectSecretRealmConfigProfileByKey(cfg, parts[1])
 		if err != nil {
@@ -553,7 +553,7 @@ func ExecuteSectSecretRealmAdminWriteCommand(actorID int64, text string, reason 
 
 	case "设置秘境掉落":
 		if len(parts) != 6 {
-			return "", fmt.Errorf("用法：设置秘境掉落 档位 大境界 物品名 数量 概率百分比")
+			return "", fmt.Errorf("用法：" + "`设置秘境掉落 档位 大境界 物品名 数量 概率百分比`")
 		}
 		profile, index, err := sectSecretRealmConfigProfileByKey(cfg, parts[1])
 		if err != nil {

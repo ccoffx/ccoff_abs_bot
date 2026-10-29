@@ -390,7 +390,7 @@ func HandleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		telegram.UserSessions.Store(cb.From.ID, session)
 
 		telegram.AnswerCallback(bot, cb.ID, "请发送需要用户补充的内容")
-		telegram.SendPlainText(bot, cb.From.ID, fmt.Sprintf("❓ 请发送求书工单 #%d 需要用户补充的信息。\n\n例如：请说明缺少哪几集 / 想要哪个主播版本。\n发送“取消”可退出。", reqID))
+		telegram.SendPlainText(bot, cb.From.ID, fmt.Sprintf("❓ 请发送求书工单 #%d 需要用户补充的信息。\n\n例如：请说明缺少哪几集 / 想要哪个主播版本。\n发送“"+textfmt.Copyable("取消")+"”可退出。", reqID))
 		return
 	}
 
@@ -440,7 +440,7 @@ func HandleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		telegram.UserSessions.Store(cb.From.ID, session)
 
 		telegram.AnswerCallback(bot, cb.ID, "请发送管理员备注")
-		telegram.SendPlainText(bot, cb.From.ID, fmt.Sprintf("📝 请发送求书工单 #%d 的管理员备注。\n\n最多 %d 字。\n发送“取消”可退出。", reqID, bookRequestNoteMaxLen))
+		telegram.SendPlainText(bot, cb.From.ID, fmt.Sprintf("📝 请发送求书工单 #%d 的管理员备注。\n\n最多 %d 字。\n发送“"+textfmt.Copyable("取消")+"”可退出。", reqID, bookRequestNoteMaxLen))
 		return
 	}
 
@@ -484,7 +484,7 @@ func HandleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		}
 		telegram.AnswerCallback(bot, cb.ID, "请发送取消原因")
 		telegram.SendPlainText(bot, cb.From.ID, fmt.Sprintf(
-			"🚫 请发送求书工单 #%d 的取消原因。\n\n%s\n%s\n发送“取消”可退出。",
+			"🚫 请发送求书工单 #%d 的取消原因。\n\n%s\n%s\n发送“"+textfmt.Copyable("取消")+"”可退出。",
 			reqID,
 			storage.AdminReasonRequirementText,
 			refundHint,

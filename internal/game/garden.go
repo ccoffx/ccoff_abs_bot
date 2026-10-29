@@ -345,7 +345,7 @@ func HandleGardenSellCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 	}
 	if !msg.Chat.IsPrivate() {
 		telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
-		telegram.SendPlainText(bot, msg.Chat.ID, "药铺回收涉及积分变动，请私聊我发送：回收灵草 玄岩参 1")
+		telegram.SendPlainText(bot, msg.Chat.ID, "药铺回收涉及积分变动，请私聊我发送："+textfmt.Copyable("回收灵草 玄岩参 1"))
 		return true
 	}
 	if _, _, err := storage.EnsureUserWallet(msg.From); err != nil {
@@ -360,7 +360,7 @@ func HandleGardenSellCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 
 	parts := strings.Fields(text)
 	if len(parts) != 3 {
-		telegram.ReplyText(bot, msg.Chat.ID, "用法：回收灵草 玄岩参 1\n请填写要回收的具体数量。")
+		telegram.ReplyText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("回收灵草 玄岩参 1")+"\n请填写要回收的具体数量。")
 		return true
 	}
 
@@ -372,7 +372,7 @@ func HandleGardenSellCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 
 	qty, err := strconv.Atoi(parts[2])
 	if err != nil || qty <= 0 {
-		telegram.ReplyText(bot, msg.Chat.ID, "回收数量必须是正整数，请发送：回收灵草 玄岩参 1")
+		telegram.ReplyText(bot, msg.Chat.ID, "回收数量必须是正整数，请发送："+textfmt.Copyable("回收灵草 玄岩参 1"))
 		return true
 	}
 
@@ -547,7 +547,7 @@ func HandleGardenCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		session.SetTemp("garden_sell_herb_name", cfg.HerbName)
 		telegram.UserSessions.Store(userID, session)
 		telegram.AnswerCallback(bot, cb.ID, "请发送回收数量")
-		telegram.SendPlainText(bot, chatID, fmt.Sprintf("药铺准备回收【%s】。\n请发送要回收的数量，例如：3\n发送“取消”可退出。", cfg.HerbName))
+		telegram.SendPlainText(bot, chatID, fmt.Sprintf("药铺准备回收【%s】。\n请发送要回收的数量，例如："+textfmt.Copyable("3")+"\n发送“"+textfmt.Copyable("取消")+"”可退出。", cfg.HerbName))
 	case "recipes":
 		telegram.AnswerCallback(bot, cb.ID, "丹方已刷新")
 		text, markup := renderGardenRecipes(userID)
@@ -1818,7 +1818,7 @@ func sendGardenMaturityNotice(bot *tgbotapi.BotAPI, userID int64, plantings []mo
 	msg := tgbotapi.NewMessage(userID, gardenMaturityNoticeText(plantings))
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = gardenMaturityNoticeMarkup()
-	_, err := bot.Send(msg)
+	_, err := bot.Send(telegram.PrepareCopyable(msg))
 	return err
 }
 
@@ -1867,7 +1867,7 @@ func editGardenScreen(bot *tgbotapi.BotAPI, chatID int64, messageID int, text st
 	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
 	edit.ParseMode = "Markdown"
 	edit.ReplyMarkup = &markup
-	if _, err := bot.Send(edit); err != nil {
+	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil {
 		log.Printf("编辑药园菜单失败: chat=%d message=%d err=%s", chatID, messageID, textfmt.FormatTelegramSendError(err))
 	}
 }

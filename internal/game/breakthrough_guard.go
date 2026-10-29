@@ -67,7 +67,7 @@ func BreakthroughGuardSuccessRate(base float64, count int) float64 {
 	if count > BreakthroughGuardMax {
 		count = BreakthroughGuardMax
 	}
-	return math.Min(.95, math.Round((base*100+float64(count)))/100)
+	return math.Min(.95, math.Round(base*100+float64(count))/100)
 }
 
 func CreateBreakthroughRitual(userID int64, name string, originChatID, groupID int64, mode string, now time.Time) (*model.BreakthroughRitual, error) {
@@ -360,7 +360,7 @@ func BeginBreakthroughWithGuards(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mo
 	}
 	panel := tgbotapi.NewMessage(groupID, formatBreakthroughRitualPanel(*ritual, nil))
 	panel.ReplyMarkup = breakthroughRitualMarkup(ritual.ID)
-	sent, err := bot.Send(panel)
+	sent, err := bot.Send(telegram.PrepareCopyable(panel))
 	if err == nil {
 		err = ActivateBreakthroughRitual(ritual.ID, sent.MessageID, time.Now())
 	}
@@ -410,7 +410,7 @@ func refreshBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *Break
 	}
 	edit := tgbotapi.NewEditMessageText(ritual.ChatID, ritual.MessageID, text)
 	edit.ReplyMarkup = &markup
-	if _, err := bot.Send(edit); err != nil {
+	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil {
 		log.Printf("互道面板刷新失败: ritual=%d err=%s", id, textfmt.FormatTelegramSendError(err))
 	}
 }

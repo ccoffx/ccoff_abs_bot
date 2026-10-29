@@ -190,18 +190,18 @@ func marketplaceHelpText(role string) string {
 	b.WriteString("🧾 交易行订单与争议帮助\n\n")
 	b.WriteString("订单号在哪里看：\n")
 	b.WriteString("- 购买成功提示会显示订单号。\n")
-	b.WriteString("- 私聊发送“我的购买”或点击“资产交易 -> 我的购买”，可查看最近购买记录和订单号。\n\n")
+	b.WriteString("- 私聊发送“" + textfmt.Copyable("我的购买") + "”或点击“" + "资产交易 -> 我的购买" + "”，可查看最近购买记录和订单号。\n\n")
 	b.WriteString("买家：\n")
 	b.WriteString("- 我的购买：查看最近购买记录，已购卡密可自助取回。\n")
-	b.WriteString("- 举报订单 订单ID 原因：提交异常订单争议，例如“举报订单 12 卡密无法使用”。\n\n")
+	b.WriteString("- 举报订单 订单ID 原因：提交异常订单争议，例如“" + textfmt.Copyable("举报订单 12 卡密无法使用") + "”。\n\n")
 	b.WriteString("卖家：\n")
 	b.WriteString("- 我的交易行：查看自己上架的商品和商品ID。\n")
-	b.WriteString("- 交易行订单 商品ID：查看某个商品最近成交订单，例如“交易行订单 8”。")
+	b.WriteString("- 交易行订单 商品ID：查看某个商品最近成交订单，例如“" + textfmt.Copyable("交易行订单 8") + "”。")
 	if role == "admin" || role == "super_admin" {
 		b.WriteString("\n\n管理员：\n")
-		b.WriteString("- 查交易订单 订单ID：只读查看订单和争议记录，例如“查交易订单 12”。")
+		b.WriteString("- 查交易订单 订单ID：只读查看订单和争议记录，例如“" + textfmt.Copyable("查交易订单 12") + "”。")
 		if role == "super_admin" {
-			b.WriteString("\n- 强制下架商品 商品ID：超级管理员强制下架在售商品，需要原因和二次确认，例如“强制下架商品 8”。")
+			b.WriteString("\n- 强制下架商品 商品ID：超级管理员强制下架在售商品，需要原因和二次确认，例如“" + textfmt.Copyable("强制下架商品 8") + "”。")
 		}
 	}
 	return b.String()
@@ -212,7 +212,7 @@ func startMarketplaceListingWizard(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, 
 		return
 	}
 	session.SetStep("WAITING_MARKET_TYPE")
-	telegram.SendPlainText(bot, msg.Chat.ID, "🛒 交易行上架\n\n请选择上架方式：\n1. 自由上架：需达到斗师境界，自定义商品名和卡密，成交后自动发卡密。\n2. 从背包上架：锁定乾坤袋物品，成交后自动转入买家背包。\n\n请发送 `1` 或 `2`。\n发送“取消”可退出。")
+	telegram.SendPlainText(bot, msg.Chat.ID, "🛒 交易行上架\n\n请选择上架方式：\n1. 自由上架：需达到斗师境界，自定义商品名和卡密，成交后自动发卡密。\n2. 从背包上架：锁定乾坤袋物品，成交后自动转入买家背包。\n\n请发送 `1` 或 `2`。\n发送“"+textfmt.Copyable("取消")+"”可退出。")
 }
 
 func parseMarketplaceSessionInt(session *telegram.SessionState, key string, minValue, maxValue int) (int, error) {
@@ -363,7 +363,7 @@ func handleMarketplaceStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 			}
 			telegram.ClearSession(userID)
 			telegram.SendPlainText(bot, chatID, fmt.Sprintf(
-				"✅ 已从乾坤袋上架交易行商品 #%d\n\n商品：%s\n单价：%d 积分\n库存：%d\n\n买家可私聊发送：购买商品 %d",
+				"✅ 已从乾坤袋上架交易行商品 #%d\n\n商品：%s\n单价：%d 积分\n库存：%d\n\n买家可私聊发送："+textfmt.Copyable("购买商品 %d"),
 				listingID,
 				marketplaceVisibleItemName(itemName),
 				price,
@@ -408,7 +408,7 @@ func handleMarketplaceStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 
 		telegram.ClearSession(userID)
 		telegram.SendPlainText(bot, chatID, fmt.Sprintf(
-			"✅ 已上架交易行商品 #%d\n\n商品：%s\n价格：%d 积分\n库存：%d\n\n买家可私聊发送：购买商品 %d",
+			"✅ 已上架交易行商品 #%d\n\n商品：%s\n价格：%d 积分\n库存：%d\n\n买家可私聊发送："+textfmt.Copyable("购买商品 %d"),
 			listingID,
 			marketplaceVisibleItemName(name),
 			price,
@@ -1158,7 +1158,7 @@ func showMarketplaceListings(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	}
 
 	if len(listings) == 0 {
-		telegram.SendPlainText(bot, chatID, "🛒 交易行暂时没有在售商品。\n\n私聊发送“上架商品”可以寄售卡密。")
+		telegram.SendPlainText(bot, chatID, "🛒 交易行暂时没有在售商品。\n\n私聊发送“"+textfmt.Copyable("上架商品")+"”可以寄售卡密。")
 		return
 	}
 
@@ -1186,7 +1186,7 @@ func showMarketplaceListings(bot *tgbotapi.BotAPI, chatID int64, text string) {
 			continue
 		}
 		b.WriteString(fmt.Sprintf(
-			"#%d 【%s】\n类型：%s｜价格：%d 积分｜库存：%d｜卖家：%s\n%s%s剩余：%s\n发送：购买商品 %d\n\n",
+			"#%d 【%s】\n类型：%s｜价格：%d 积分｜库存：%d｜卖家：%s\n%s%s剩余：%s\n发送："+textfmt.Copyable("购买商品 %d")+"\n\n",
 			listing.ID,
 			marketplaceMarkdownItemName(listing.Name),
 			marketplaceTypeText(listing.ListingType),
@@ -1383,7 +1383,7 @@ func showMyMarketplaceListings(bot *tgbotapi.BotAPI, chatID int64, sellerID int6
 func handleMarketplaceDetail(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	id, ok := parseMarketplaceID(text, "交易行详情")
 	if !ok {
-		telegram.SendPlainText(bot, chatID, "用法：交易行详情 商品ID")
+		telegram.SendPlainText(bot, chatID, "用法："+textfmt.Copyable("交易行详情 商品ID"))
 		return
 	}
 
@@ -1451,7 +1451,7 @@ func marketplaceDetailActionTextWithStockStatus(listing model.MarketplaceListing
 		return "库存状态暂不可用，请稍后再试。"
 	}
 	if listing.Status == marketplaceStatusActive && stock > 0 {
-		return fmt.Sprintf("购买请私聊发送：购买商品 %d", listing.ID)
+		return fmt.Sprintf("购买请私聊发送："+textfmt.Copyable("购买商品 %d"), listing.ID)
 	}
 	if listing.Status == marketplaceStatusActive {
 		return "该商品当前库存不足，暂不可购买。"
@@ -1467,7 +1467,7 @@ func handleMarketplaceBuy(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text stri
 
 	listingID, buyQty, ok := parseMarketplaceBuyCommand(text)
 	if !ok {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：购买商品 商品ID [数量]")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("购买商品 商品ID [数量]"))
 		return
 	}
 	if buyQty > marketplaceMaxBuyQuantity {
@@ -1564,7 +1564,7 @@ func marketplaceSecretPurchaseSuccessText(result marketplacePurchaseResult) stri
 		marketplaceSecretVerificationLine(result.Listing.ListingType, result.Listing.SecretSource),
 		result.GrossAmount,
 		result.PurchaseIDText(),
-		strings.Join(result.Codes, "\n"),
+		textfmt.Copyable(strings.Join(result.Codes, "\n")),
 	)
 }
 
@@ -1677,7 +1677,7 @@ func marketplaceBuyConfirmText(listing model.MarketplaceListing, buyQty int, sto
 		return "", err
 	}
 	return fmt.Sprintf(
-		"🛒 交易行购买确认\n\n商品：%s\n%s%s类型：%s\n单价：%d\n数量：%d\n总价：%d 积分\n库存：%d\n\n确认购买请回复：确认购买商品\n取消请回复：取消",
+		"🛒 交易行购买确认\n\n商品：%s\n%s%s类型：%s\n单价：%d\n数量：%d\n总价：%d 积分\n库存：%d\n\n确认购买请回复："+textfmt.Copyable("确认购买商品")+"\n取消请回复："+textfmt.Copyable("取消"),
 		marketplaceVisibleItemName(listing.Name),
 		marketplaceListingPillEffectLine(listingType, listing.Name),
 		marketplaceSecretVerificationLine(listingType, listing.SecretSource),
@@ -2109,7 +2109,7 @@ func showMyMarketplacePurchases(bot *tgbotapi.BotAPI, chatID int64, buyerID int6
 		codeText := "卡密读取失败，请联系管理员核查订单。"
 		if err := marketplacePurchaseSecretQuery(storage.DB, purchase, buyerID).First(&secret).Error; err == nil {
 			if code, err := decryptMarketplaceSecret(secret.CodeEnc); err == nil {
-				codeText = code
+				codeText = textfmt.Copyable(code)
 			} else {
 				log.Printf("⚠️ 交易行我的购买卡密解密失败: order=%d listing=%d secret=%d buyer=%d err=%s", purchase.ID, purchase.ListingID, purchase.SecretID, buyerID, textfmt.FormatPlainError(err))
 			}
@@ -2148,7 +2148,7 @@ func marketplacePurchaseSecretWhere(purchase model.MarketplacePurchase, buyerID 
 func handleMarketplaceListingOrders(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) {
 	listingID, ok := parseMarketplaceID(text, "交易行订单")
 	if !ok {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：交易行订单 商品ID")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("交易行订单 商品ID"))
 		return
 	}
 
@@ -2191,7 +2191,7 @@ func handleMarketplaceAdminOrderQuery(bot *tgbotapi.BotAPI, msg *tgbotapi.Messag
 	raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "查交易订单"))
 	orderID, err := strconv.ParseUint(raw, 10, 64)
 	if err != nil || orderID == 0 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：查交易订单 订单ID")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("查交易订单 订单ID"))
 		return
 	}
 
@@ -2245,7 +2245,7 @@ func handleMarketplaceForceCloseStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Messag
 	}
 	listingID, ok := parseMarketplaceID(text, "强制下架商品")
 	if !ok {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：强制下架商品 商品ID")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("强制下架商品 商品ID"))
 		return
 	}
 
@@ -2302,7 +2302,7 @@ func handleMarketplaceForceCloseReason(bot *tgbotapi.BotAPI, msg *tgbotapi.Messa
 	session.SetTemp("market_force_close_reason", reason)
 	session.SetStep("WAITING_MARKET_FORCE_CLOSE_CONFIRM")
 	sendPlainTextNoMarkdown(bot, msg.Chat.ID, fmt.Sprintf(
-		"⚠️ 强制下架二次确认\n\n%s\n原因：%s\n\n确认执行请回复：确认强制下架\n取消请回复：取消",
+		"⚠️ 强制下架二次确认\n\n%s\n原因：%s\n\n确认执行请回复："+textfmt.Copyable("确认强制下架")+"\n取消请回复："+textfmt.Copyable("取消"),
 		marketplaceForceCloseListingSummary(listing, stock),
 		textfmt.FormatPlainValue(reason),
 	))
@@ -2391,12 +2391,12 @@ func handleMarketplaceDispute(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text 
 	raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "举报订单"))
 	parts := strings.Fields(raw)
 	if len(parts) < 2 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：举报订单 订单ID 原因")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("举报订单 订单ID 原因"))
 		return
 	}
 	orderID, err := strconv.ParseUint(parts[0], 10, 64)
 	if err != nil || orderID == 0 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：举报订单 订单ID 原因")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("举报订单 订单ID 原因"))
 		return
 	}
 	reason := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]))
@@ -2576,7 +2576,7 @@ func sendPlainTextNoMarkdown(bot *tgbotapi.BotAPI, chatID int64, text string) {
 func handleMarketplaceClose(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) {
 	listingID, ok := parseMarketplaceID(text, "下架商品")
 	if !ok {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法：下架商品 商品ID")
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("下架商品 商品ID"))
 		return
 	}
 

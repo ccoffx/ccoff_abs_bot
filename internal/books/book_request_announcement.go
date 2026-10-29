@@ -937,7 +937,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		}
 		edit := tgbotapi.NewEditMessageText(cb.Message.Chat.ID, cb.Message.MessageID, text)
 		edit.ReplyMarkup = &markup
-		if _, err := bot.Send(edit); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
+		if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
 			log.Printf("book announcement candidate page edit failed: req=%d page=%d err=%s", req.ID, actualPage, textfmt.FormatTelegramSendError(err))
 			telegram.AnswerCallback(bot, cb.ID, "\u7ffb\u9875\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5")
 			return true

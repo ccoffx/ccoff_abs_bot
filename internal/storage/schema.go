@@ -8,6 +8,9 @@ import (
 
 // 当前系统的数据库约束。启动时幂等建索引，不转换或修补历史数据。
 var DatabaseIndexes = []string{
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_lottery_active_join_keyword
+  ON lottery_activities(join_keyword)
+  WHERE join_keyword <> '' AND status IN ('active', 'drawing') AND deleted_at IS NULL;`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_breakthrough_ritual_active_user
   ON breakthrough_rituals(user_id)
   WHERE status IN ('publishing', 'waiting') AND deleted_at IS NULL;`,

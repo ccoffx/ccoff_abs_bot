@@ -21,7 +21,7 @@ func EditMenuPanel(bot *tgbotapi.BotAPI, chatID int64, messageID int, text strin
 	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
 	edit.ParseMode = "Markdown"
 	edit.ReplyMarkup = &markup
-	if _, err := bot.Send(edit); err != nil {
+	if _, err := bot.Send(PrepareCopyable(edit)); err != nil {
 		log.Printf("编辑二级菜单失败: chat=%d message=%d err=%s", chatID, messageID, textfmt.FormatTelegramSendError(err))
 	}
 }

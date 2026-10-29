@@ -55,7 +55,7 @@ func HandleBookAnnouncementRecoveryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.M
 
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 格式错误。请发送“公告异常”查看处置说明。")
+		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 格式错误。请发送“"+textfmt.Copyable("公告异常")+"”查看处置说明。")
 		return true
 	}
 	reqID64, err := strconv.ParseUint(fields[1], 10, 64)
@@ -77,7 +77,7 @@ func HandleBookAnnouncementRecoveryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.M
 	session.SetTemp("book_announcement_recovery_req_id", strconv.FormatUint(uint64(reqID), 10))
 	if strings.HasPrefix(text, "公告异常已发 ") {
 		if len(fields) != 3 {
-			telegram.SendPlainText(bot, msg.Chat.ID, "❌ 格式：公告异常已发 <工单ID> <Telegram消息ID>")
+			telegram.SendPlainText(bot, msg.Chat.ID, "❌ 格式："+textfmt.Copyable("公告异常已发 <工单ID> <Telegram消息ID>"))
 			return true
 		}
 		messageID, parseErr := strconv.Atoi(fields[2])
@@ -88,17 +88,17 @@ func HandleBookAnnouncementRecoveryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.M
 		session.SetTemp("book_announcement_recovery_message_id", strconv.Itoa(messageID))
 		session.SetStep(bookAnnouncementRecoveryConfirmSentStep)
 		telegram.UserSessions.Store(msg.From.ID, session)
-		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 二次确认\n\n请再次核对目标群 %d 中存在公告凭证 %s，且消息 ID 为 %d。\n\n确认无误请完整回复：\n确认公告已发 #%d %d\n\n其他输入将取消。", delivery.TargetChatID, formatBookAnnouncementDeliveryKey(reqID), messageID, reqID, messageID))
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 二次确认\n\n请再次核对目标群 %d 中存在公告凭证 %s，且消息 ID 为 %d。\n\n确认无误请完整回复：\n"+textfmt.Copyable("确认公告已发 #%d %d")+"\n\n其他输入将取消。", delivery.TargetChatID, formatBookAnnouncementDeliveryKey(reqID), messageID, reqID, messageID))
 		return true
 	}
 
 	if len(fields) != 2 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 格式：公告异常未发 <工单ID>")
+		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 格式："+textfmt.Copyable("公告异常未发 <工单ID>"))
 		return true
 	}
 	session.SetStep(bookAnnouncementRecoveryConfirmAbsentStep)
 	telegram.UserSessions.Store(msg.From.ID, session)
-	telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("🚨 二次确认\n\n只有在目标群 %d 中搜索公告凭证 %s，确认不存在原公告后，才能解除重发锁。\n\n确认不存在请完整回复：\n确认公告未发 #%d\n\n误判会造成重复公告，其他输入将取消。", delivery.TargetChatID, formatBookAnnouncementDeliveryKey(reqID), reqID))
+	telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("🚨 二次确认\n\n只有在目标群 %d 中搜索公告凭证 %s，确认不存在原公告后，才能解除重发锁。\n\n确认不存在请完整回复：\n"+textfmt.Copyable("确认公告未发 #%d")+"\n\n误判会造成重复公告，其他输入将取消。", delivery.TargetChatID, formatBookAnnouncementDeliveryKey(reqID), reqID))
 	return true
 }
 
@@ -106,7 +106,7 @@ func handleBookAnnouncementRecoveryConfirmation(bot *tgbotapi.BotAPI, msg *tgbot
 	reqID64, err := strconv.ParseUint(session.GetTemp("book_announcement_recovery_req_id"), 10, 64)
 	if err != nil || reqID64 == 0 {
 		telegram.ClearSession(msg.From.ID)
-		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 确认上下文已失效，请重新发送“公告异常”。")
+		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 确认上下文已失效，请重新发送“"+textfmt.Copyable("公告异常")+"”。")
 		return true
 	}
 	reqID := uint(reqID64)

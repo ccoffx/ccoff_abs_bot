@@ -82,7 +82,7 @@ func HandleWealthLeaderboardCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Callback
 	edit := tgbotapi.NewEditMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatWealthLeaderboardPage(users, totalUsers, actualPage))
 	edit.ParseMode = "Markdown"
 	edit.ReplyMarkup = &markup
-	if _, err := bot.Send(edit); err != nil {
+	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil {
 		if telegram.IsTelegramMessageNotModifiedError(err) {
 			telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("第 %d 页", actualPage))
 			return true

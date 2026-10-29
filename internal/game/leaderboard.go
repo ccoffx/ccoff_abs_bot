@@ -369,7 +369,7 @@ func sendAndManageLeaderboardPinSync(bot *tgbotapi.BotAPI, chatID int64, text st
 	// 3. 使用原生安全通道投递新榜单（不走 sendGroupAutoDeleteMessage，从而永久留存）
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
-	sentMsg, err := bot.Send(msg)
+	sentMsg, err := bot.Send(telegram.PrepareCopyable(msg))
 	if err != nil {
 		log.Printf("❌ 【天机阁异常】新一期 [%s] 榜单发送失败: %s", textfmt.FormatPlainValue(timeframe), textfmt.FormatTelegramSendError(err))
 		return err

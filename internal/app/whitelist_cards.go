@@ -163,7 +163,7 @@ func handleWhitelistCardMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, tex
 		switch text {
 		case "兑换白名单", "使用白名单卡", "白名单卡":
 			session.SetStep("WL_CARD_INPUT")
-			reply("🏳️ 请发送白名单卡密。兑换后永久免除账号生命周期封禁和自动清理。需已有正式听书账号；卡密仅可使用一次。发送“取消”退出。")
+			reply("🏳️ 请发送白名单卡密。兑换后永久免除账号生命周期封禁和自动清理。需已有正式听书账号；卡密仅可使用一次。发送“" + textfmt.Copyable("取消") + "”退出。")
 			return true
 		case "生成白名单", "生成白名单卡":
 			if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -202,10 +202,10 @@ func handleWhitelistCardMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, tex
 		}
 		session.SetTemp("wl_reason", reason)
 		session.SetStep("WL_CARD_GENERATE")
-		reply(fmt.Sprintf("即将生成 %s 张永久白名单卡。\n原因：%s\n确认请回复：确认生成白名单卡\n取消请回复：取消", session.GetTemp("wl_count"), reason))
+		reply(fmt.Sprintf("即将生成 %s 张永久白名单卡。\n原因：%s\n确认请回复："+textfmt.Copyable("确认生成白名单卡")+"\n取消请回复："+textfmt.Copyable("取消"), session.GetTemp("wl_count"), reason))
 	case "WL_CARD_GENERATE":
 		if text != "确认生成白名单卡" {
-			reply("请回复“确认生成白名单卡”，或发送“取消”。")
+			reply("请回复“" + textfmt.Copyable("确认生成白名单卡") + "”，或发送“" + textfmt.Copyable("取消") + "”。")
 			return true
 		}
 		count, _ := strconv.Atoi(session.GetTemp("wl_count"))
@@ -237,11 +237,11 @@ func handleWhitelistCardMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, tex
 			}
 			session.SetTemp("wl_hash", hash)
 			session.SetStep("WL_CARD_REDEEM")
-			reply("确认使用此卡为当前账号开通永久白名单？卡密使用后失效。\n如账号已暂停，兑换后仍需联系管理员恢复。\n确认请回复：确认兑换白名单\n取消请回复：取消")
+			reply("确认使用此卡为当前账号开通永久白名单？卡密使用后失效。\n如账号已暂停，兑换后仍需联系管理员恢复。\n确认请回复：" + textfmt.Copyable("确认兑换白名单") + "\n取消请回复：" + textfmt.Copyable("取消"))
 			return true
 		}
 		if text != "确认兑换白名单" {
-			reply("请回复“确认兑换白名单”，或发送“取消”。")
+			reply("请回复“" + textfmt.Copyable("确认兑换白名单") + "”，或发送“" + textfmt.Copyable("取消") + "”。")
 			return true
 		}
 		err := redeemWhitelistCard(userID, session.GetTemp("wl_hash"))
