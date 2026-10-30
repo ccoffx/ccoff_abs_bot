@@ -81,13 +81,14 @@ func createCultivationIfMissing(userID int64) (*model.Cultivation, error) {
 		return nil, fmt.Errorf("CULTIVATION_CREATE_INVALID")
 	}
 	cul := model.Cultivation{
-		UserID:           userID,
-		TotalAudioTime:   0,
-		PillAudioTime:    0,
-		MajorRealm:       0,
-		MinorRealm:       1,
-		TribulationFails: 0,
-		ConsolidateUntil: time.Now().Add(-24 * time.Hour),
+		UserID:                    userID,
+		SectListeningSettledHours: new(float64),
+		TotalAudioTime:            0,
+		PillAudioTime:             0,
+		MajorRealm:                0,
+		MinorRealm:                1,
+		TribulationFails:          0,
+		ConsolidateUntil:          time.Now().Add(-24 * time.Hour),
 	}
 	res := storage.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&cul)
 	if res.Error != nil {

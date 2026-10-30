@@ -205,6 +205,7 @@ func run(loadConfig func()) {
 
 	// 🚨 新增核心：启动全自动榜单定时投递引擎 (包含日榜、周榜、月榜及热门书单)
 	game.StartLeaderboardScheduler(bot)
+	game.StartSpiritFireScheduler(bot)
 	game.StartWorldBossScheduler(bot)
 	game.StartSectSecretRealmScheduler(bot)
 	activity.StartLotteryScheduler(bot)

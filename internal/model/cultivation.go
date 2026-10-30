@@ -10,14 +10,17 @@ import (
 // 📿 昔风听书斗气系统专属数据表
 // ==========================================
 type Cultivation struct {
-	ID               uint      `gorm:"primaryKey"`
-	UserID           int64     `gorm:"index"`     // 绑定 TelegramID
-	TotalAudioTime   float64   `gorm:"default:0"` // 🎧 累计听书时长（小时）- 纯闭关苦修
-	PillAudioTime    float64   `gorm:"default:0"` // 💊 累计丹药时长（小时）- 氪金药力加成
-	MajorRealm       int       `gorm:"default:0"` // 大境界编号 0-13：斗之气至斗帝
-	MinorRealm       int       `gorm:"default:1"` // 小段位 (1:初期, 2:中期, 3:后期, 4:圆满)
-	TribulationFails int       `gorm:"default:0"` // 渡劫失败次数计数器（暗藏天道保底）
-	ConsolidateUntil time.Time // 境界巩固期（防止老玩家光速吃药连升的冷却时间）
+	ID     uint  `gorm:"primaryKey"`
+	UserID int64 `gorm:"index"` // 绑定 TelegramID
+	// Independent high-water mark for contribution-eligible hours (no spirit fire).
+	// NULL denotes a legacy profile awaiting a no-retroactive-awards baseline.
+	SectListeningSettledHours *float64
+	TotalAudioTime            float64   `gorm:"default:0"` // 🎧 累计听书修为（小时），包含闭关与异火，不含丹药
+	PillAudioTime             float64   `gorm:"default:0"` // 💊 累计丹药时长（小时）- 氪金药力加成
+	MajorRealm                int       `gorm:"default:0"` // 大境界编号 0-13：斗之气至斗帝
+	MinorRealm                int       `gorm:"default:1"` // 小段位 (1:初期, 2:中期, 3:后期, 4:圆满)
+	TribulationFails          int       `gorm:"default:0"` // 渡劫失败次数计数器（暗藏天道保底）
+	ConsolidateUntil          time.Time // 境界巩固期（防止老玩家光速吃药连升的冷却时间）
 }
 
 // BreakthroughAttempt 记录每一次突破尝试。

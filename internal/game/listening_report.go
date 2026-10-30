@@ -35,6 +35,8 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 	var effectiveTotalHours float64 = 0 // 经过天道法则压制后的总修为时长
 	var todayEffectiveHours float64 = 0
 	var todayRawHours float64 = 0
+	spiritFireLine := ""
+	todayUnavailable := false
 	var statsDays map[string]float64
 
 	// 精准映射 ABS 的统计数据结构
@@ -113,9 +115,13 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 				} else if cul := GetOrCreateCultivation(u.TelegramID); cul != nil {
 					effectiveTotalHours = cul.TotalAudioTime
 				}
-				if todayStat, ok := getTodayDailyListeningStat(u.TelegramID, now); ok {
+				if todayStat, ok, readErr := GetTodayDailyListeningStatChecked(u.TelegramID, now); readErr != nil {
+					todayUnavailable = true
+					spiritFireLine = "\n🔥 今日基础与异火修为读取失败，请稍后重试。"
+				} else if ok {
 					todayRawHours = abs.PositiveListeningSeconds(todayStat.RawSeconds) / 3600.0
-					todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now)
+					todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + todayStat.SpiritFireHours
+					spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-todayStat.SpiritFireHours, todayStat.SpiritFireHours)
 				}
 			} else {
 				log.Printf("⚠️ 听书报告每日统计写入失败，使用本次 ABS 数据降级展示: user=%d abs=%s err=%s",
@@ -138,6 +144,10 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 		suppressNotice = "\n*(⚠️ 天道法则感应：您的部分修炼涉嫌强行吸收灵气，转化率已受压制)*"
 	}
 
-	return fmt.Sprintf("📊 你的专属听书战绩\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %.2f 小时\n✨ 净修炼时长: %.2f 小时\n🌅 今日净修为: %.2f 小时%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
-		rawHours, todayRawHours, effectiveTotalHours, todayEffectiveHours, suppressNotice, finishedCountText, listeningCountText)
+	todayText := fmt.Sprintf("%.2f 小时", todayEffectiveHours)
+	if todayUnavailable {
+		todayText = "读取失败"
+	}
+	return fmt.Sprintf("📊 你的专属听书战绩\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %.2f 小时\n✨ 净修炼时长: %.2f 小时\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
+		rawHours, todayRawHours, effectiveTotalHours, todayText, spiritFireLine+suppressNotice, finishedCountText, listeningCountText)
 }

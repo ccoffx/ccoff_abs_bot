@@ -91,13 +91,15 @@ type DailyListeningStat struct {
 	AbsUserID string `gorm:"index"`
 	DayKey    string `gorm:"index;not null"` // 北京时间日期 YYYY-MM-DD
 
-	RawSeconds     float64
-	CappedSeconds  float64
-	EffectiveHours float64
-	LastFetchedAt  time.Time `gorm:"index"`
-	Source         string
-	FetchStatus    string
-	RefreshReason  string
+	RawSeconds           float64
+	CappedSeconds        float64
+	BaseCultivationHours float64
+	SpiritFireHours      float64
+	EffectiveHours       float64
+	LastFetchedAt        time.Time `gorm:"index"`
+	Source               string
+	FetchStatus          string
+	RefreshReason        string
 }
 
 func (DailyListeningStat) TableName() string {

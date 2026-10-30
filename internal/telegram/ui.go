@@ -15,6 +15,12 @@ const (
 // 用户主菜单
 var UserMainMenu = tgbotapi.NewReplyKeyboard(
 	tgbotapi.NewKeyboardButtonRow(
+		tgbotapi.NewKeyboardButton("我的异火"),
+		tgbotapi.NewKeyboardButton("异火榜"),
+		tgbotapi.NewKeyboardButton("焚诀"),
+		tgbotapi.NewKeyboardButton("异火寻缘"),
+	),
+	tgbotapi.NewKeyboardButtonRow(
 		tgbotapi.NewKeyboardButton("📋 我的档案"),
 		tgbotapi.NewKeyboardButton("📆 每日修行"),
 	),

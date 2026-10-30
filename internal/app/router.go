@@ -162,6 +162,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
+	if game.HandleSpiritFireCommand(bot, msg, text) {
+		return
+	}
+
 	if game.HandleWorldBossCommand(bot, msg, text) {
 		return
 	}
@@ -497,7 +501,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					log.Printf("⚠️ 我的信息今日净修为读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 					todayEffectiveHoursText = "`读取失败`"
 				} else if ok {
-					todayEffectiveHours = todayStat.EffectiveHours + game.ActiveSectCaveRetreatBonusHours(userID, time.Now())
+					todayEffectiveHours = todayStat.EffectiveHours + game.ActiveSectCaveRetreatBonusHours(userID, time.Now()) + todayStat.SpiritFireHours
 					todayEffectiveHoursText = fmt.Sprintf("`%.2f`", todayEffectiveHours)
 				}
 

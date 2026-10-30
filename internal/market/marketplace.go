@@ -22,6 +22,7 @@ import (
 	"ccoff-abs-bot/internal/game"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -74,6 +75,9 @@ func HandleMarketplaceCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text 
 	}
 
 	trimmed := strings.TrimSpace(text)
+	if handleSpiritFireListingCommand(bot, msg, trimmed) {
+		return true
+	}
 	if trimmed == "" {
 		return false
 	}
@@ -1143,6 +1147,8 @@ func showMarketplaceListings(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	switch filter.Kind {
 	case marketplaceTypeSecret:
 		query = query.Where("listing_type = ? OR listing_type = ''", marketplaceTypeSecret)
+	case spiritfire.ListingType:
+		query = query.Where("listing_type = ?", spiritfire.ListingType)
 	case marketplaceTypeInventory:
 		query = query.Where("listing_type = ?", marketplaceTypeInventory)
 	}
@@ -1268,7 +1274,7 @@ func marketplaceListingHasStockCondition() string {
 }
 
 func marketplaceListingAllowedTypeCondition() string {
-	return "(listing_type = ? OR listing_type = ? OR listing_type = '')"
+	return "(listing_type = ? OR listing_type = ? OR listing_type = '' OR listing_type = 'spirit_fire')"
 }
 
 type marketplaceListFilter struct {
@@ -1316,6 +1322,8 @@ func parseMarketplaceListFilter(text string) marketplaceListFilter {
 		return marketplaceListFilter{Kind: marketplaceTypeSecret, Label: "自由卡密", Valid: true}
 	case "背包", "背包物品":
 		return marketplaceListFilter{Kind: marketplaceTypeInventory, Label: "背包物品", Valid: true}
+	case "异火":
+		return marketplaceListFilter{Kind: spiritfire.ListingType, Label: "异火", Valid: true}
 	case "丹药", "灵草", "种子":
 		return marketplaceListFilter{Kind: marketplaceTypeInventory, Keyword: raw, Label: raw, Valid: true}
 	default:
@@ -1530,7 +1538,9 @@ func executeMarketplaceBuy(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, listingI
 
 	result.BuyerID = msg.From.ID
 	result.BuyerName = textfmt.GetTelegramDisplayName(msg.From)
-	if result.Listing.ListingType == marketplaceTypeInventory {
+	if result.Listing.ListingType == spiritfire.ListingType {
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("🔥 购买成功：【%s】已归你所有，扣除%d积分。订单：%s。发送“我的异火”查看；掌控记录不随交易转移。", result.Listing.Name, result.GrossAmount, result.PurchaseIDText()))
+	} else if result.Listing.ListingType == marketplaceTypeInventory {
 		telegram.SendPlainText(bot, msg.Chat.ID, marketplaceInventoryPurchaseSuccessText(result))
 	} else {
 		sendPlainTextNoMarkdown(bot, msg.Chat.ID, marketplaceSecretPurchaseSuccessText(result))
@@ -1742,7 +1752,7 @@ func (r marketplacePurchaseResult) PurchaseIDText() string {
 }
 
 func (r marketplacePurchaseResult) SellerSecretPreviewText() string {
-	if r.Listing.ListingType == marketplaceTypeInventory || len(r.PurchasePreviews) == 0 {
+	if r.Listing.ListingType == spiritfire.ListingType || r.Listing.ListingType == marketplaceTypeInventory || len(r.PurchasePreviews) == 0 {
 		return ""
 	}
 	lines := make([]string, 0, len(r.PurchasePreviews))
@@ -1793,6 +1803,11 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 	invalidSecretID := uint(0)
 
 	runTx := func(tx *gorm.DB) error {
+		if spiritfire.Installed(tx) {
+			if err := spiritfire.Lock(tx); err != nil {
+				return err
+			}
+		}
 		if err := marketplaceActiveListingQuery(tx, time.Now()).Where("id = ?", listingID).
 			First(&listing).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1872,7 +1887,14 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 		feeAmount = calculateMarketplaceFee(grossAmount)
 		sellerAmount = grossAmount - feeAmount
 
-		if listing.ListingType == marketplaceTypeInventory {
+		if listing.ListingType == spiritfire.ListingType {
+			if buyQty != 1 || totalQuantity != 1 {
+				return storage.ErrMarketplaceOutOfStock
+			}
+			if err := spiritfire.TransferInTx(tx, listing, buyerID, time.Now()); err != nil {
+				return err
+			}
+		} else if listing.ListingType == marketplaceTypeInventory {
 			itemName := strings.TrimSpace(listing.ItemName)
 			if itemName == "" {
 				itemName = listing.Name
@@ -2088,6 +2110,10 @@ func showMyMarketplacePurchases(bot *tgbotapi.BotAPI, chatID int64, buyerID int6
 				itemName,
 				gross,
 			))
+			continue
+		}
+		if deliveryType == spiritfire.ListingType {
+			b.WriteString(fmt.Sprintf("订单 #%d｜%s｜%d 积分\n交付：唯一异火归属已转移，可在我的异火查看。\n\n", purchase.ID, itemName, gross))
 			continue
 		}
 		if deliveryType == marketplaceTypeInventory {
@@ -2530,6 +2556,8 @@ func MarketplaceListingTypeForPurchase(listingType string) (string, error) {
 	switch listingType {
 	case marketplaceTypeSecret:
 		return marketplaceTypeSecret, nil
+	case spiritfire.ListingType:
+		return spiritfire.ListingType, nil
 	case marketplaceTypeInventory:
 		return marketplaceTypeInventory, nil
 	default:
@@ -2564,7 +2592,7 @@ func handleMarketplaceClose(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text st
 		return
 	}
 
-	refundQty, err := closeMarketplaceListingInTx(storage.DB, msg.From.ID, listingID)
+	refundQty, listing, err := closeMarketplaceListingScopedWithAudit(storage.DB, msg.From.ID, listingID, true, 0, "")
 	if err != nil {
 		if errors.Is(err, storage.ErrMarketplaceCloseNotFound) {
 			telegram.SendPlainText(bot, msg.Chat.ID, "❌ 未找到可下架的本人商品。")
@@ -2581,6 +2609,10 @@ func handleMarketplaceClose(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text st
 		}
 		log.Printf("⚠️ 交易行商品下架失败: seller=%d listing=%d err=%s", msg.From.ID, listingID, textfmt.FormatPlainError(err))
 		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 下架失败，请稍后再试。")
+		return
+	}
+	if listing.ListingType == spiritfire.ListingType {
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 异火商品 #%d 已下架，【%s】已解除锁定，可重新选择启用。", listing.ID, listing.Name))
 		return
 	}
 	if refundQty > 0 {
@@ -2619,6 +2651,9 @@ func notifyMarketplaceForceClosedSeller(bot *tgbotapi.BotAPI, result marketplace
 		return
 	}
 	extra := "未售卡密已停止出售。"
+	if result.Listing.ListingType == spiritfire.ListingType {
+		extra = "异火已解除上架锁定，可重新启用。"
+	}
 	if result.Listing.ListingType == marketplaceTypeInventory {
 		extra = fmt.Sprintf("未售背包物品已退回乾坤袋，数量：%d。", result.RefundQuantity)
 	}
@@ -2723,6 +2758,11 @@ func closeMarketplaceListingScopedWithAudit(db *gorm.DB, sellerID int64, listing
 	refundQty := 0
 	var closedListing model.MarketplaceListing
 	err := db.Transaction(func(tx *gorm.DB) error {
+		if spiritfire.Installed(tx) {
+			if err := spiritfire.Lock(tx); err != nil {
+				return err
+			}
+		}
 		txRefundQty := 0
 		var listing model.MarketplaceListing
 		query := tx.Where("id = ? AND status = ?", listingID, marketplaceStatusActive)
@@ -2777,6 +2817,11 @@ func closeMarketplaceListingScopedWithAudit(db *gorm.DB, sellerID int64, listing
 				if err := game.GardenGrantInventoryInTx(tx, listing.SellerID, itemName, txRefundQty); err != nil {
 					return err
 				}
+			}
+		}
+		if listing.ListingType == spiritfire.ListingType {
+			if err := spiritfire.UnlockListingInTx(tx, listing.ID); err != nil {
+				return err
 			}
 		}
 		secretRes := tx.Model(&model.MarketplaceSecret{}).
@@ -2886,6 +2931,9 @@ func closeExpiredMarketplaceListings(bot *tgbotapi.BotAPI, now time.Time) {
 }
 
 func marketplaceExpiredCloseNoticeText(listing model.MarketplaceListing, refundQty int) string {
+	if listing.ListingType == spiritfire.ListingType {
+		return fmt.Sprintf("🔥 异火商品 #%d 已到期下架，【%s】已解除锁定。", listing.ID, listing.Name)
+	}
 	if listing.ListingType == marketplaceTypeInventory {
 		return fmt.Sprintf(
 			"🛒 交易行商品 #%d 已满 48 小时自动下架。\n\n商品：%s\n未售出的背包物品退回数量：%d",
@@ -3118,6 +3166,8 @@ func marketplaceTypeText(listingType string) string {
 	switch listingType {
 	case marketplaceTypeSecret:
 		return "自由卡密"
+	case spiritfire.ListingType:
+		return "唯一异火"
 	case marketplaceTypeInventory:
 		return "背包物品"
 	default:

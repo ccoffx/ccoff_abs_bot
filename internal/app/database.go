@@ -15,6 +15,7 @@ import (
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/operations"
 	"ccoff-abs-bot/internal/security"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/textfmt"
 )
@@ -145,6 +146,12 @@ func InitDB() {
 	); err != nil {
 		log.Fatalf("数据库结构初始化失败: %s", textfmt.FormatPlainError(err))
 	}
+	if err := storage.DB.AutoMigrate(spiritfire.Models()...); err != nil {
+		log.Fatalf("异火数据库迁移失败: %s", err)
+	}
+	if err := spiritfire.Initialize(storage.DB, time.Now()); err != nil {
+		log.Fatalf("异火初始化失败: %s", err)
+	}
 	if security.GetSensitivePepper() == "" {
 		log.Fatal("SECURITY_PEPPER is not configured; startup blocked. Configure a long-term fixed SECURITY_PEPPER in .env")
 	}
@@ -153,6 +160,9 @@ func InitDB() {
 	}
 	if err := game.SeedDefaultCultivationConfigs(); err != nil {
 		log.Fatalf("斗气默认配置初始化失败: %s", textfmt.FormatPlainError(err))
+	}
+	if err := game.InitializeSectListeningContributionProgress(storage.DB, time.Now()); err != nil {
+		log.Fatalf("宗门听书贡献基线初始化失败: %s", err)
 	}
 	game.InitCultivationRuleCache()
 	if err := operations.StampCompatibility(sqlDB); err != nil {

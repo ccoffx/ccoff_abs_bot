@@ -10,6 +10,7 @@ import (
 
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/textfmt"
 )
@@ -228,6 +229,11 @@ func applySuspendLocalStatusWithAudit(actorID int64, targetID int64, expectedAbs
 
 func deleteLocalUserWithAudit(actorID int64, targetID int64, expectedAbsUserID string, action string, detailBuilder func(model.User) string) error {
 	return storage.DB.Transaction(func(tx *gorm.DB) error {
+		if spiritfire.Installed(tx) {
+			if err := spiritfire.Lock(tx); err != nil {
+				return err
+			}
+		}
 		var target model.User
 		if err := tx.Where("telegram_id = ?", targetID).First(&target).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -242,6 +248,9 @@ func deleteLocalUserWithAudit(actorID int64, targetID int64, expectedAbsUserID s
 			return fmt.Errorf("target_abs_user_changed")
 		}
 
+		if err := spiritfire.ReleaseUserInTx(tx, targetID, time.Now()); err != nil {
+			return err
+		}
 		deleteRes := tx.Unscoped().
 			Where("id = ? AND telegram_id = ? AND abs_user_id = ? AND role <> ?", target.ID, targetID, expectedAbsUserID, "super_admin").
 			Delete(&model.User{})

@@ -20,6 +20,7 @@ import (
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -1059,6 +1060,12 @@ func handleOpenSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, prof
 			FundsCost:      cost,
 		}
 
+		if event.ProfileKey == sectSecretRealmProfileHigh {
+			if err := spiritfire.PrepareEvent(tx, "realm:"+event.RealmID, now, event.ChatID); err != nil {
+				return err
+			}
+		}
+
 		if err := createSectSecretRealmEventInTx(tx, &event); err != nil {
 			return err
 		}
@@ -1732,6 +1739,17 @@ func grantSectSecretRealmRewards(event model.SectSecretRealmEvent, participants 
 			rewardedCount++
 		}
 
+		if event.ProfileKey == sectSecretRealmProfileHigh {
+			ids := []int64{}
+			for _, p := range participants {
+				if p.RewardPoints > 0 {
+					ids = append(ids, p.UserID)
+				}
+			}
+			if err := spiritfire.AwardActivityInTx(tx, "realm:"+event.RealmID, ids, false, event.StartAt, time.Now()); err != nil {
+				return err
+			}
+		}
 		settledAt := time.Now()
 
 		res := tx.Model(&model.SectSecretRealmEvent{}).

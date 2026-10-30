@@ -2976,24 +2976,6 @@ func awardSectContributionTx(tx *gorm.DB, userID int64, delta int, reason string
 	})
 }
 
-func awardSectListeningContribution(userID int64, oldHours float64, newHours float64) {
-	oldWholeHours := int(math.Floor(oldHours))
-	newWholeHours := int(math.Floor(newHours))
-
-	delta := newWholeHours - oldWholeHours
-	if delta <= 0 {
-		return
-	}
-
-	AwardSectContribution(
-		userID,
-		delta,
-		fmt.Sprintf("听书增长奖励 %d 贡献", delta),
-		"listening_hours",
-		SectDayKey(time.Now()),
-	)
-}
-
 type sectDailyTaskStatus struct {
 	Key          string
 	Name         string
@@ -3409,6 +3391,10 @@ func GetTodayDailyListeningStatChecked(userID int64, now time.Time) (model.Daily
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return model.DailyListeningStat{}, false, nil
 		}
+		return model.DailyListeningStat{}, false, err
+	}
+
+	if err := RefreshSpiritFireDailyStat(&stat, now); err != nil {
 		return model.DailyListeningStat{}, false, err
 	}
 

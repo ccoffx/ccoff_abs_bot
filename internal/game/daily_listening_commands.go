@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -106,48 +108,193 @@ func syncCultivationFromDailyListeningStats(userID int64) (float64, bool) {
 }
 
 func syncCultivationFromDailyListeningStatsAt(userID int64, now time.Time) (float64, bool) {
-	totalEffective, ok := totalCultivationEffectiveHoursFromDailyStats(userID, now)
-	if !ok {
+	if storage.DB == nil || GetOrCreateCultivation(userID) == nil {
 		return 0, false
 	}
-	cul := GetOrCreateCultivation(userID)
-	if cul == nil {
-		log.Printf("⚠️ 每日净修为同步读取斗气档案失败: user=%d", userID)
+	enabled := spiritfire.Installed(storage.DB)
+	total := 0.0
+	var cul model.Cultivation
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		// Acquire a SQLite write lock before reading either the totals or the cursor.
+		// The cursor, contribution payment and profile update commit together.
+		if err := lockCultivationListeningTx(tx, userID); err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", userID).First(&cul).Error; err != nil {
+			return err
+		}
+		var base float64
+		var err error
+		total, base, err = dailyCultivationTotalsInTx(tx, userID, now, enabled)
+		if err != nil {
+			return err
+		}
+		settled := base // Legacy fallback: establish a baseline without backpay.
+		if cul.SectListeningSettledHours != nil {
+			settled = *cul.SectListeningSettledHours
+		}
+		if base > settled {
+			delta := int(math.Floor(base)) - int(math.Floor(settled))
+			if delta > 0 {
+				if err := awardSectContributionTx(tx, userID, delta, fmt.Sprintf("听书增长奖励 %d 贡献（不含异火修为）", delta), "listening_hours", SectDayKey(now)); err != nil {
+					return err
+				}
+			}
+			settled = base
+		}
+		res := tx.Model(&model.Cultivation{}).Where("id = ?", cul.ID).Updates(map[string]interface{}{
+			"total_audio_time": total, "sect_listening_settled_hours": settled,
+		})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return storage.ErrCultivationNotFound
+		}
+		cul.TotalAudioTime = total
+		cul.SectListeningSettledHours = &settled
+		return nil
+	})
+	if err != nil {
+		log.Printf("修为与宗门听书贡献结算失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return 0, false
 	}
-	oldHours := cul.TotalAudioTime
-	cul.TotalAudioTime = totalEffective
-	persistCultivationAudioTime(userID, totalEffective)
-	SyncCultivationRealm(cul)
-	awardSectListeningContribution(userID, oldHours, totalEffective)
-	return totalEffective, true
+	SyncCultivationRealm(&cul)
+	return total, true
+}
+
+func lockCultivationListeningTx(tx *gorm.DB, userID int64) error {
+	res := tx.Model(&model.Cultivation{}).Where("user_id = ?", userID).UpdateColumn("total_audio_time", gorm.Expr("total_audio_time"))
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return storage.ErrCultivationNotFound
+	}
+	return nil
+}
+
+// InitializeSectListeningContributionProgress runs once for each legacy profile,
+// before startup jobs can refresh ABS. Cached ordinary hours + retreat evidence
+// form the cutover baseline; historical payouts (including fire) are untouched.
+func InitializeSectListeningContributionProgress(db *gorm.DB, now time.Time) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Cultivation{}).Where("sect_listening_settled_hours IS NULL").UpdateColumn("total_audio_time", gorm.Expr("total_audio_time")).Error; err != nil {
+			return err
+		}
+		var profiles []model.Cultivation
+		if err := tx.Where("sect_listening_settled_hours IS NULL").Find(&profiles).Error; err != nil {
+			return err
+		}
+		for _, cul := range profiles {
+			_, base, err := dailyCultivationTotalsInTx(tx, cul.UserID, now, false)
+			if err != nil {
+				return err
+			}
+			// Very old profiles may predate durable daily statistics. Keep
+			// their existing total as a conservative no-backpay baseline.
+			if base == 0 && cul.TotalAudioTime > 0 {
+				var days int64
+				if err := tx.Model(&model.DailyListeningStat{}).Where("user_id = ?", cul.UserID).Count(&days).Error; err != nil {
+					return err
+				}
+				if days == 0 {
+					base = cul.TotalAudioTime
+				}
+			}
+			res := tx.Model(&model.Cultivation{}).Where("id = ? AND sect_listening_settled_hours IS NULL", cul.ID).UpdateColumn("sect_listening_settled_hours", base)
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected != 1 {
+				return storage.ErrCultivationNotFound
+			}
+			if err := storage.WriteAuditLogInTx(tx, 0, "SECT_LISTENING_BASELINE", fmt.Sprint(cul.UserID), 0, fmt.Sprintf("贡献结算基线 %.6f 小时；保留已发贡献，排除异火收益", base)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// Personal cultivation and contribution-eligible totals are derived from the
+// same read snapshot. EffectiveHours never includes retreat or fire effects.
+func dailyCultivationTotalsInTx(tx *gorm.DB, userID int64, now time.Time, withFire bool) (total, baseTotal float64, err error) {
+	var stats []model.DailyListeningStat
+	if err = tx.Where("user_id = ?", userID).Find(&stats).Error; err != nil {
+		return
+	}
+	var retreats []model.SectCaveRetreat
+	if err = tx.Where("user_id = ? AND start_at <= ?", userID, now).Find(&retreats).Error; err != nil {
+		return
+	}
+	for _, retreat := range retreats {
+		if _, err = decodeSectRetreatEvidence(retreat); err != nil {
+			return
+		}
+	}
+	for _, stat := range stats {
+		base := stat.EffectiveHours + dailySectCaveRetreatBonusHours(stat, retreats)
+		if withFire {
+			if err = spiritfire.RefreshDaily(tx, &stat, base, now); err != nil {
+				return
+			}
+		}
+		baseTotal += base
+		total += base + stat.SpiritFireHours
+	}
+	return
 }
 
 func totalCultivationEffectiveHoursFromDailyStats(userID int64, now time.Time) (float64, bool) {
 	if storage.DB == nil || userID == 0 {
 		return 0, false
 	}
-	var stats []model.DailyListeningStat
-	if err := storage.DB.Where("user_id = ?", userID).Find(&stats).Error; err != nil {
-		log.Printf("累计净修为读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return 0, false
-	}
-	var retreats []model.SectCaveRetreat
-	if err := storage.DB.Where("user_id = ? AND start_at <= ?", userID, now).Find(&retreats).Error; err != nil {
-		log.Printf("累计闭关加成读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return 0, false
-	}
-	for _, retreat := range retreats {
-		if _, err := decodeSectRetreatEvidence(retreat); err != nil {
-			log.Printf("累计闭关凭据读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-			return 0, false
-		}
-	}
+	enabled := spiritfire.Installed(storage.DB)
 	total := 0.0
-	for _, stat := range stats {
-		total += stat.EffectiveHours + dailySectCaveRetreatBonusHours(stat, retreats)
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if enabled {
+			if err := spiritfire.Lock(tx); err != nil {
+				return err
+			}
+		}
+		var err error
+		total, _, err = dailyCultivationTotalsInTx(tx, userID, now, enabled)
+		return err
+	})
+	if err != nil {
+		log.Printf("累计修为读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
+		return 0, false
 	}
 	return total, true
+}
+
+// RefreshSpiritFireDailyStat keeps the original EffectiveHours field unchanged
+// for sect calculations and exposes separate personal cultivation components.
+func RefreshSpiritFireDailyStat(stat *model.DailyListeningStat, now time.Time) error {
+	if !spiritfire.Installed(storage.DB) {
+		return nil
+	}
+	return storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := spiritfire.Lock(tx); err != nil {
+			return err
+		}
+		if stat.ID != 0 {
+			if err := tx.First(stat, stat.ID).Error; err != nil {
+				return err
+			}
+		}
+		var retreats []model.SectCaveRetreat
+		if err := tx.Where("user_id = ? AND start_at <= ?", stat.UserID, now).Find(&retreats).Error; err != nil {
+			return err
+		}
+		for _, retreat := range retreats {
+			if _, err := decodeSectRetreatEvidence(retreat); err != nil {
+				return err
+			}
+		}
+		return spiritfire.RefreshDaily(tx, stat, stat.EffectiveHours+dailySectCaveRetreatBonusHours(*stat, retreats), now)
+	})
 }
 
 func handleRefreshMyDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -237,6 +384,9 @@ func handleQueryDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, 
 }
 
 func formatDailyListeningStat(title string, stat model.DailyListeningStat, totalEffective float64) string {
+	if err := RefreshSpiritFireDailyStat(&stat, time.Now()); err != nil {
+		return "❌ 每日修为及异火加成读取失败，请稍后重试。"
+	}
 	fetchStatus := stat.FetchStatus
 	if fetchStatus == "" {
 		fetchStatus = "unknown"
@@ -248,12 +398,14 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 
 	retreatBonus := 0.0
 	now := time.Now()
-	if stat.DayKey == SectDayKey(now) {
+	if spiritfire.Installed(storage.DB) {
+		retreatBonus = stat.BaseCultivationHours - stat.EffectiveHours
+	} else if stat.DayKey == SectDayKey(now) {
 		retreatBonus = ActiveSectCaveRetreatBonusHours(stat.UserID, now)
 	}
-	retreatLine := ""
+	retreatLine := fmt.Sprintf("\n基础净修为：`%.2f` 小时\n异火额外修为：`+%.2f` 小时", stat.EffectiveHours+retreatBonus, stat.SpiritFireHours)
 	if retreatBonus > 0 {
-		retreatLine = fmt.Sprintf("\n洞府闭关加成：`+%.2f` 小时", retreatBonus)
+		retreatLine += fmt.Sprintf("\n洞府闭关加成：`+%.2f` 小时", retreatBonus)
 	}
 
 	return fmt.Sprintf(
@@ -262,7 +414,7 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 		stat.DayKey,
 		stat.RawSeconds/3600.0,
 		stat.CappedSeconds/3600.0,
-		stat.EffectiveHours+retreatBonus,
+		stat.EffectiveHours+retreatBonus+stat.SpiritFireHours,
 		retreatLine,
 		totalEffective,
 		stat.LastFetchedAt.Format("2006-01-02 15:04:05"),

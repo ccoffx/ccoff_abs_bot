@@ -20,6 +20,7 @@ import (
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -32,14 +33,19 @@ func createWorldBossEventRecord(db *gorm.DB, event *model.WorldBossEvent) error 
 	event.BossID = textfmt.FormatPlainValue(event.BossID)
 	event.Name = textfmt.FormatPlainValue(event.Name)
 	event.Status = textfmt.FormatPlainValue(event.Status)
-	res := db.Create(event)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("WORLD_BOSS_EVENT_CREATE_MISSED")
-	}
-	return nil
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := spiritfire.PrepareEvent(tx, "boss:"+event.BossID, event.StartAt, event.ChatID); err != nil {
+			return err
+		}
+		res := tx.Create(event)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("WORLD_BOSS_EVENT_CREATE_MISSED")
+		}
+		return nil
+	})
 }
 
 func createWorldBossParticipantInTx(db *gorm.DB, participant *model.WorldBossParticipant) (bool, error) {
@@ -807,6 +813,17 @@ func grantWorldBossRewards(event model.WorldBossEvent, participants []model.Worl
 			}
 		}
 
+		if killed {
+			ids := []int64{}
+			for _, p := range participants {
+				if p.Damage >= worldBossValidDamage {
+					ids = append(ids, p.UserID)
+				}
+			}
+			if err := spiritfire.AwardActivityInTx(tx, "boss:"+event.BossID, ids, true, event.StartAt, time.Now()); err != nil {
+				return err
+			}
+		}
 		settledAt := time.Now()
 		res := tx.Model(&model.WorldBossEvent{}).
 			Where("boss_id = ? AND status = ?", event.BossID, "settling").
@@ -1488,20 +1505,10 @@ func getWorldBossRawListeningHours(absUserID string) (float64, error) {
 	return rawSeconds / 3600.0, nil
 }
 
-func updateCultivationAudioHours(userID int64, effectiveHours float64) {
-	cul := GetOrCreateCultivation(userID)
-	if cul == nil {
-		log.Printf("⚠️ 世界 Boss 刷新斗气档案读取失败: user=%d", userID)
-		return
+// Activity refreshes use the same authoritative daily records and atomic
+// contribution cursor as personal reports, never a personal-total delta.
+func updateCultivationAudioHours(userID int64, _ float64) {
+	if _, ok := syncCultivationFromDailyListeningStats(userID); !ok {
+		log.Printf("活动刷新修为与宗门贡献结算失败: user=%d", userID)
 	}
-	if effectiveHours < 0 {
-		effectiveHours = 0
-	}
-
-	oldHours := cul.TotalAudioTime
-	cul.TotalAudioTime = effectiveHours
-	persistCultivationAudioTime(userID, effectiveHours)
-	SyncCultivationRealm(cul)
-
-	awardSectListeningContribution(userID, oldHours, effectiveHours)
 }
