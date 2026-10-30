@@ -125,7 +125,7 @@ func assertRewardCount(t *testing.T, modelType interface{}, want int64) {
 }
 
 func TestLotteryClaimIsOwnerOnlyAndPrivate(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	_, winner := seedClaimReward(t, 101, lotteryPrizePoints, 20, time.Now().Add(time.Hour))
 	bot, _ := newClaimBot(t)
 	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 101}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}}
@@ -156,7 +156,7 @@ func TestLotteryClaimIsOwnerOnlyAndPrivate(t *testing.T) {
 }
 
 func TestLotteryClaimAllPartialFailureAndRepeat(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	_, first := seedClaimReward(t, 101, lotteryPrizePoints, 20, time.Now().Add(time.Hour))
 	_, broken := seedClaimReward(t, 101, "invalid_prize", 1, time.Now().Add(time.Hour))
 	_, last := seedClaimReward(t, 101, lotteryPrizePoints, 30, time.Now().Add(time.Hour))
@@ -184,7 +184,7 @@ func TestLotteryClaimAllPartialFailureAndRepeat(t *testing.T) {
 }
 
 func TestLotteryClaimDeliveryRetryKeepsOriginalCode(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	_, winner := seedClaimReward(t, 101, lotteryPrizeInvite, 1, time.Now().Add(time.Hour))
 	bot, capture := newClaimBot(t)
 	capture.setFailure(101)
@@ -231,7 +231,7 @@ func TestLotteryClaimDeliveryRetryKeepsOriginalCode(t *testing.T) {
 }
 
 func TestLotteryClaimConcurrencyAndEncryptionRollback(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	lot, winner := seedClaimReward(t, 101, lotteryPrizePoints, 15, time.Now().Add(time.Hour))
 	var wg sync.WaitGroup
 	results := make(chan string, 8)
@@ -276,7 +276,7 @@ func TestLotteryClaimConcurrencyAndEncryptionRollback(t *testing.T) {
 }
 
 func TestLotteryClaimExpiryBoundaryAndCleanup(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	deadline := time.Now().Add(time.Hour)
 	lot, winner := seedClaimReward(t, 101, lotteryPrizePoints, 20, deadline)
 	if lotteryWinnerShouldExpire(lot, winner, deadline.Add(-time.Nanosecond)) || !lotteryWinnerShouldExpire(lot, winner, deadline) || !lotteryWinnerShouldExpire(lot, winner, deadline.Add(time.Nanosecond)) {
@@ -316,7 +316,7 @@ func TestLotteryClaimExpiryBoundaryAndCleanup(t *testing.T) {
 }
 
 func TestLotteryClaimPrizeTypesAndBoundCiphertext(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	for _, kind := range []string{lotteryPrizeRenew, lotteryPrizePill, lotteryPrizeManual, lotteryPrizeCustomCode} {
 		lot, winner := seedClaimReward(t, 101, kind, 30, time.Now().Add(time.Hour))
 		reply, err := claimLotteryWinner(lot, winner)
@@ -343,7 +343,7 @@ func TestLotteryClaimPrizeTypesAndBoundCiphertext(t *testing.T) {
 }
 
 func TestLotteryDrawAnnouncementExplainsClaimDespitePrivateFailure(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	lot, winner := seedClaimReward(t, 101, lotteryPrizeCustomCode, 1, time.Now().UTC().Add(time.Hour))
 	config.AppConfig.NoticeGroupID = -100
 	bot, capture := newClaimBot(t)
@@ -375,7 +375,7 @@ func TestLotteryDrawAnnouncementExplainsClaimDespitePrivateFailure(t *testing.T)
 }
 
 func TestLotteryWizardGoesDirectlyToPrizes(t *testing.T) {
-	setupKeywordDB(t)
+	setupLotteryDB(t)
 	bot, capture := newClaimBot(t)
 	session := &telegram.SessionState{}
 	session.SetStep("WAITING_LOTTERY_ENTRY_COST")
@@ -398,12 +398,12 @@ func TestLotteryWizardGoesDirectlyToPrizes(t *testing.T) {
 }
 
 func TestLotteryUnstartedParticipantClaimsAfterActualDraw(t *testing.T) {
-	db := setupKeywordDB(t)
+	db := setupLotteryDB(t)
 	bot, capture := newClaimBot(t)
 	capture.setFailure(101)
 	config.AppConfig.NoticeGroupID = -100
 	future := time.Now().Add(time.Hour)
-	lot := newKeywordLottery("春日好运")
+	lot := newTestLottery("春日好运")
 	lot.Mode = lotteryModeTime
 	lot.DrawAt = &future
 	if err := db.Create(&lot).Error; err != nil {

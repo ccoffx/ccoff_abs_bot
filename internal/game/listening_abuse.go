@@ -1,7 +1,6 @@
 package game
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -31,22 +30,9 @@ func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 	}
 	defer listeningAbuseMu.Unlock()
 
-	effectiveStartDay, err := ensureListeningAbuseEffectiveStartDayChecked(now)
-	if err != nil {
-		if errors.Is(err, errListeningAbuseEffectiveStartDayInit) {
-			recordListeningAbuseStateWriteFailure(bot, storage.ListeningAbuseEffectiveStartDayKey, err)
-		} else {
-			recordListeningAbuseStateReadFailure(bot, storage.ListeningAbuseEffectiveStartDayKey, err)
-		}
-		return
-	}
-	amnestyPreEffectiveListeningAbuseFreezes(bot, now, effectiveStartDay)
 	releaseDueListeningAbuseFreezes(bot, now)
 
 	targetDay := listeningAbuseScanDayKey(now)
-	if targetDay != "" && listeningAbuseDayBefore(targetDay, effectiveStartDay) {
-		return
-	}
 	if targetDay == "" {
 		return
 	}
@@ -71,7 +57,7 @@ func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 		return
 	}
 
-	warnings, freezes, skipped, err := scanListeningAbuseForDay(bot, targetDay, effectiveStartDay, now)
+	warnings, freezes, skipped, err := scanListeningAbuseForDay(bot, targetDay, now)
 	if err != nil {
 		storage.SetSystemConfigError(storage.ListeningAbuseLastErrorKey, err)
 		log.Printf("listening abuse scan failed: day=%s err=%s", textfmt.FormatPlainValue(targetDay), textfmt.FormatPlainError(err))
@@ -102,24 +88,6 @@ func listeningAbuseScanDayKey(now time.Time) string {
 	return localNow.AddDate(0, 0, -1).Format("2006-01-02")
 }
 
-func ensureListeningAbuseEffectiveStartDayChecked(now time.Time) (string, error) {
-	raw, err := storage.GetSystemConfigStringChecked(storage.ListeningAbuseEffectiveStartDayKey)
-	if err != nil {
-		return "", err
-	}
-	dayKey := strings.TrimSpace(raw)
-	if isListeningAbuseDayKey(dayKey) {
-		return dayKey, nil
-	}
-
-	dayKey = storage.DailyOperationsDateKey(now)
-	if err := storage.SetSystemConfigStringChecked(storage.ListeningAbuseEffectiveStartDayKey, dayKey); err != nil {
-		return "", fmt.Errorf("%w: %w", errListeningAbuseEffectiveStartDayInit, err)
-	}
-	log.Printf("listening abuse effective start day initialized: day=%s", textfmt.FormatPlainValue(dayKey))
-	return dayKey, nil
-}
-
 func recordListeningAbuseStateReadFailure(bot *tgbotapi.BotAPI, key string, err error) {
 	storage.SetSystemConfigError(storage.ListeningAbuseLastErrorKey, err)
 	log.Printf("播放异常风控状态读取失败，已跳过本轮巡检: key=%s err=%s", textfmt.FormatPlainValue(key), textfmt.FormatPlainError(err))
@@ -132,18 +100,6 @@ func recordListeningAbuseStateWriteFailure(bot *tgbotapi.BotAPI, key string, err
 	}
 	log.Printf("播放异常风控状态写入失败: key=%s err=%s", textfmt.FormatPlainValue(key), textfmt.FormatPlainError(err))
 	telegram.NotifySuperAdminsPlain(bot, fmt.Sprintf("播放异常风控状态写入失败，请人工核查；相关巡检已中止或完成状态未确认。\n\n配置：%s\n错误：%s", textfmt.FormatPlainValue(key), textfmt.FormatPlainError(err)))
-}
-
-func isListeningAbuseDayKey(dayKey string) bool {
-	if dayKey == "" {
-		return false
-	}
-	_, err := time.ParseInLocation("2006-01-02", dayKey, storage.DailyOperationsLocation)
-	return err == nil
-}
-
-func listeningAbuseDayBefore(dayKey string, otherDayKey string) bool {
-	return isListeningAbuseDayKey(dayKey) && isListeningAbuseDayKey(otherDayKey) && dayKey < otherDayKey
 }
 
 func previousDayKey(dayKey string) (string, bool) {
@@ -162,11 +118,7 @@ func listeningAbuseShouldFreeze(rawHours float64, previousRawHours float64) bool
 	return rawHours > storage.ListeningAbuseDailyRawHoursThreshold && previousRawHours > storage.ListeningAbuseDailyRawHoursThreshold
 }
 
-func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, effectiveStartDay string, now time.Time) (int, int, int, error) {
-	if listeningAbuseDayBefore(dayKey, effectiveStartDay) {
-		return 0, 0, 0, nil
-	}
-
+func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, now time.Time) (int, int, int, error) {
 	previousKey, ok := previousDayKey(dayKey)
 	if !ok {
 		return 0, 0, 0, fmt.Errorf("invalid_day_key")
@@ -175,7 +127,7 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, effectiveStar
 	var users []model.User
 	if err := storage.DB.Select("telegram_id", "username", "abs_user_id", "expire_at", "is_suspended", "is_whitelist", "role", "status").
 		Where("abs_user_id <> '' AND is_whitelist = ? AND role <> ?", false, "super_admin").
-		Where("(status IS NULL OR status = '' OR status = ?)", "active").
+		Where("status = ?", "active").
 		Find(&users).Error; err != nil {
 		return 0, 0, 0, err
 	}
@@ -219,10 +171,7 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, effectiveStar
 		if !listeningAbuseShouldWarn(rawHours) {
 			continue
 		}
-		previousRawHours := 0.0
-		if !listeningAbuseDayBefore(previousKey, effectiveStartDay) {
-			previousRawHours = abs.PositiveListeningSeconds(days[previousKey]) / 3600
-		}
+		previousRawHours := abs.PositiveListeningSeconds(days[previousKey]) / 3600
 		if listeningAbuseShouldFreeze(rawHours, previousRawHours) {
 			started, err := startListeningAbuseFreeze(bot, u, dayKey, previousKey, rawHours, previousRawHours, now)
 			if err != nil {
@@ -383,72 +332,6 @@ func releaseDueListeningAbuseFreezes(bot *tgbotapi.BotAPI, now time.Time) {
 			log.Printf("release listening abuse freeze failed: record=%d user=%d err=%s", record.ID, record.UserID, textfmt.FormatPlainError(err))
 		}
 	}
-}
-
-func amnestyPreEffectiveListeningAbuseFreezes(bot *tgbotapi.BotAPI, now time.Time, effectiveStartDay string) {
-	if !isListeningAbuseDayKey(effectiveStartDay) {
-		return
-	}
-
-	var records []model.ListeningAbuseRecord
-	if err := storage.DB.Where("action = ? AND status = ? AND day_key < ?",
-		storage.ListeningAbuseActionFreeze, storage.ListeningAbuseStatusActive, effectiveStartDay).
-		Find(&records).Error; err != nil {
-		log.Printf("query pre-effective listening abuse freezes failed: effective_start=%s err=%s", textfmt.FormatPlainValue(effectiveStartDay), textfmt.FormatPlainError(err))
-		return
-	}
-
-	for _, record := range records {
-		if err := amnestyListeningAbuseFreeze(bot, record, now, effectiveStartDay); err != nil {
-			log.Printf("amnesty listening abuse freeze failed: record=%d user=%d effective_start=%s err=%s", record.ID, record.UserID, textfmt.FormatPlainValue(effectiveStartDay), textfmt.FormatPlainError(err))
-		}
-	}
-}
-
-func amnestyListeningAbuseFreeze(bot *tgbotapi.BotAPI, record model.ListeningAbuseRecord, now time.Time, effectiveStartDay string) error {
-	var u model.User
-	if err := storage.DB.Where("telegram_id = ?", record.UserID).First(&u).Error; err != nil {
-		return err
-	}
-
-	if u.AbsUserID != record.AbsUserID || u.IsSuspended || storage.IsUserExpiredAt(u, now) {
-		reason := fmt.Sprintf("pre-effective amnesty blocked; effective_start=%s abs_changed=%t suspended=%t expired=%t",
-			textfmt.FormatPlainValue(effectiveStartDay), u.AbsUserID != record.AbsUserID, u.IsSuspended, storage.IsUserExpiredAt(u, now))
-		return markListeningAbuseFreezeReleaseBlocked(record.ID, record.UserID, now, reason)
-	}
-
-	if err := abs.DefaultClient.SetUserActiveStatus(record.AbsUserID, true); err != nil {
-		recordListeningAbuseReleaseError(record.ID, record.UserID, err)
-		writeListeningAbuseFailureAudit(bot, "LISTENING_ABUSE_AMNESTY_FAILED", record.UserID, "播放异常既往不咎恢复失败",
-			fmt.Sprintf("failed to restore pre-effective abnormal listening freeze; record_id=%d effective_start=%s error=%s",
-				record.ID, textfmt.FormatPlainValue(effectiveStartDay), textfmt.FormatPlainError(err)))
-		return err
-	}
-
-	err := storage.DB.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&model.ListeningAbuseRecord{}).
-			Where("id = ? AND status = ?", record.ID, storage.ListeningAbuseStatusActive).
-			Updates(map[string]interface{}{
-				"status":        storage.ListeningAbuseStatusAmnestied,
-				"released_at":   now,
-				"release_error": "",
-			})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return nil
-		}
-		return storage.WriteAuditLogInTx(tx, 0, "LISTENING_ABUSE_AMNESTY", strconv.FormatInt(record.UserID, 10), 0,
-			fmt.Sprintf("restored pre-effective abnormal listening freeze; record_id=%d day=%s effective_start=%s",
-				record.ID, textfmt.FormatPlainValue(record.DayKey), textfmt.FormatPlainValue(effectiveStartDay)))
-	})
-	if err != nil {
-		return err
-	}
-
-	_ = sendListeningAbusePrivateNotice(bot, record.UserID, fmt.Sprintf("✅ **账号暂停已解除**\n\n播放异常风控已改为自北京时间 `%s` 起计算，历史收听时长既往不咎。系统已恢复您的 ABS 听书权限，请保持正常收听。", effectiveStartDay))
-	return nil
 }
 
 func releaseListeningAbuseFreeze(bot *tgbotapi.BotAPI, record model.ListeningAbuseRecord, now time.Time) error {

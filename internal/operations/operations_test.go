@@ -105,3 +105,20 @@ func TestHealthRequiresFreshPollLiveProcessAndDatabase(t *testing.T) {
 		t.Fatal("missing DB healthy")
 	}
 }
+
+func TestDatabaseWithoutMarkerMustBeEmpty(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "unmarked.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := CheckCompatibility(db); err != nil {
+		t.Fatalf("fresh database rejected: %v", err)
+	}
+	if _, err := db.Exec("CREATE TABLE users(id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckCompatibility(db); err == nil {
+		t.Fatal("existing unmarked database accepted")
+	}
+}

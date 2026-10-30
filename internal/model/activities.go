@@ -36,7 +36,6 @@ type LotteryActivity struct {
 	gorm.Model
 
 	Title                   string `gorm:"index;not null"`
-	JoinKeyword             string `gorm:"index"` // Legacy data only; participation uses buttons.
 	Mode                    string `gorm:"index;not null"`
 	Status                  string `gorm:"index;not null;default:'active'"`
 	CreatedByID             int64  `gorm:"index;not null"`

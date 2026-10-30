@@ -14,7 +14,7 @@ import (
 
 func UserProfileStatusInactive(u model.User) bool {
 	status := strings.TrimSpace(u.Status)
-	return status != "" && status != "active"
+	return status != "active"
 }
 
 func ActiveListeningAbuseFreeze(userID int64, absUserID string) (*model.ListeningAbuseRecord, error) {
@@ -129,14 +129,12 @@ const (
 	ListeningAbuseStatusWarningSent    = "warning_sent"
 	ListeningAbuseStatusActive         = "active"
 	ListeningAbuseStatusReleased       = "released"
-	ListeningAbuseStatusAmnestied      = "amnestied"
 	ListeningAbuseStatusReleaseBlocked = "release_blocked"
 
-	ListeningAbuseEffectiveStartDayKey = "listening_abuse_effective_start_day"
-	ListeningAbuseLastScanDayKey       = "listening_abuse_last_scan_day"
-	ListeningAbuseLastScanAtKey        = "listening_abuse_last_scan_at"
-	ListeningAbuseLastAttemptAtKey     = "listening_abuse_last_attempt_at"
-	ListeningAbuseLastErrorKey         = "listening_abuse_last_error"
+	ListeningAbuseLastScanDayKey   = "listening_abuse_last_scan_day"
+	ListeningAbuseLastScanAtKey    = "listening_abuse_last_scan_at"
+	ListeningAbuseLastAttemptAtKey = "listening_abuse_last_attempt_at"
+	ListeningAbuseLastErrorKey     = "listening_abuse_last_error"
 )
 
 func IsUserExpiredAt(u model.User, now time.Time) bool {
@@ -167,18 +165,10 @@ const (
 	ReferralAutoClaimRequestDelay = 80 * time.Millisecond
 )
 
-func normalizeAccountType(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return AccountTypeFormal
-	}
-	return value
-}
-
 func IsTrialAccount(u model.User) bool {
-	return normalizeAccountType(u.AccountType) == AccountTypeTrial
+	return strings.TrimSpace(u.AccountType) == AccountTypeTrial
 }
 
 func IsFormalAccount(u model.User) bool {
-	return !IsTrialAccount(u)
+	return strings.TrimSpace(u.AccountType) == AccountTypeFormal
 }

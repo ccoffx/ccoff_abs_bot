@@ -52,7 +52,7 @@ func TestHistoricalBackfillRecordsRetreatBeyondRecentFivePages(t *testing.T) {
 		if page == 5 {
 			// Same-day sessions do not create cross-day adjustments, but still prove
 			// retreat playback and must not be discarded by the historical scanner.
-			fmt.Fprint(w, `[{"id":"old-retreat","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T04:00:00+08:00","updatedAt":"2026-10-26T08:00:00+08:00","timeListening":14400}]`)
+			fmt.Fprint(w, `{"sessions":[{"id":"old-retreat","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T04:00:00+08:00","updatedAt":"2026-10-26T08:00:00+08:00","timeListening":14400}]}`)
 			return
 		}
 		if page < 0 || page > 5 {
@@ -63,7 +63,7 @@ func TestHistoricalBackfillRecordsRetreatBeyondRecentFivePages(t *testing.T) {
 		for i := range sessions {
 			sessions[i] = map[string]interface{}{"id": fmt.Sprintf("recent-%d-%d", page, i), "userId": "abs1", "date": "2026-10-27", "startedAt": "2026-10-27T10:00:00+08:00", "updatedAt": "2026-10-27T10:01:00+08:00", "timeListening": 60}
 		}
-		_ = json.NewEncoder(w).Encode(sessions)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"sessions": sessions})
 	}))
 	defer server.Close()
 	abs.DefaultClient = &abs.AbsClient{BaseURL: server.URL, Token: "test", HttpClient: server.Client()}
@@ -136,7 +136,7 @@ func TestHistoricalBackfillRollsBackEvidenceAndCursorTogether(t *testing.T) {
 				if r.URL.Query().Get("page") != "5" {
 					t.Errorf("cursor skipped failed page: %s", r.URL.RawQuery)
 				}
-				fmt.Fprint(w, `[{"id":"cross-retreat","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T22:00:00+08:00","updatedAt":"2026-10-27T02:00:00+08:00","timeListening":14400}]`)
+				fmt.Fprint(w, `{"sessions":[{"id":"cross-retreat","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T22:00:00+08:00","updatedAt":"2026-10-27T02:00:00+08:00","timeListening":14400}]}`)
 			}))
 			defer server.Close()
 			abs.DefaultClient = &abs.AbsClient{BaseURL: server.URL, Token: "test", HttpClient: server.Client()}

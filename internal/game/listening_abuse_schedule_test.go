@@ -67,9 +67,6 @@ func setupListeningAbuseScheduleDB(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := storage.SetSystemConfigStringChecked(storage.ListeningAbuseEffectiveStartDayKey, "2026-10-26"); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestListeningAbuseRefreshesBeforeScanAndRetriesIncompleteBatch(t *testing.T) {
@@ -108,7 +105,7 @@ func TestListeningAbuseRefreshesBeforeScanAndRetriesIncompleteBatch(t *testing.T
 			if strings.Contains(r.URL.Path, "/abs2/") {
 				payload = strings.ReplaceAll(payload, "abs1", "abs2")
 			}
-			fmt.Fprint(w, payload)
+			fmt.Fprint(w, `{"sessions":`+payload+`}`)
 		case strings.HasSuffix(r.URL.Path, "/listening-stats"):
 			requestsMu.Lock()
 			requests[r.URL.Path]++
@@ -220,7 +217,7 @@ func TestListeningAbuseRetriesCrossDayCorrectionFailures(t *testing.T) {
 						w.WriteHeader(http.StatusServiceUnavailable)
 						return
 					}
-					fmt.Fprint(w, abuseTestSessions(1))
+					fmt.Fprint(w, `{"sessions":`+abuseTestSessions(1)+`}`)
 					return
 				}
 				t.Errorf("unexpected ABS request: %s %s", r.Method, r.URL.Path)

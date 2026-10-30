@@ -141,8 +141,7 @@ func extractAbsUserIDFromResponse(resBody []byte) (string, error) {
 
 	userObj, ok := resData["user"].(map[string]interface{})
 	if !ok || userObj == nil {
-		// 有些接口可能直接返回用户对象，这里做兼容。
-		userObj = resData
+		return "", fmt.Errorf("ABS 返回中缺少 user 对象")
 	}
 
 	id, ok := userObj["id"].(string)
@@ -277,10 +276,11 @@ func (c *AbsClient) UpdateAbsPassword(absUserID, newPassword string) error {
 		return fmt.Errorf("拉取到的用户原生数据为空")
 	}
 
-	userObj, ok := resData["user"].(map[string]interface{})
-	if !ok || userObj == nil {
-		userObj = resData
+	if id, ok := resData["id"].(string); !ok || id != absUserID {
+		return fmt.Errorf("ABS 用户数据 ID 不匹配")
 	}
+
+	userObj := resData
 
 	if userObj == nil {
 		return fmt.Errorf("用户对象剥离失败，无法注入新密码")
@@ -336,10 +336,11 @@ func (c *AbsClient) UpdateAbsUsername(absUserID, newUsername string) error {
 		return fmt.Errorf("拉取到的用户原生数据为空")
 	}
 
-	userObj, ok := resData["user"].(map[string]interface{})
-	if !ok || userObj == nil {
-		userObj = resData
+	if id, ok := resData["id"].(string); !ok || id != absUserID {
+		return fmt.Errorf("ABS 用户数据 ID 不匹配")
 	}
+
+	userObj := resData
 	if userObj == nil {
 		return fmt.Errorf("用户对象剥离失败，无法注入新用户名")
 	}
@@ -396,8 +397,7 @@ func IsAbsNotFoundError(err error) bool {
 		return apiErr.StatusCode == http.StatusNotFound
 	}
 
-	msg := err.Error()
-	return strings.Contains(msg, ": 404") || strings.Contains(msg, " 404")
+	return false
 }
 
 func PositiveListeningSeconds(seconds float64) float64 {
@@ -463,13 +463,7 @@ func (c *AbsClient) GetServerStats() string {
 			log.Printf("⚠️ 服务器监控 ABS 用户列表结构异常: err=%s", textfmt.FormatPlainError(fmt.Errorf("users field missing or invalid")))
 		}
 	} else {
-		var uList []interface{}
-		if listErr := json.Unmarshal(uBody, &uList); listErr == nil {
-			userCountText = strconv.Itoa(len(uList))
-		} else {
-			log.Printf("⚠️ 服务器监控 ABS 用户列表解析失败: object_err=%s array_err=%s",
-				textfmt.FormatPlainError(err), textfmt.FormatPlainError(listErr))
-		}
+		log.Printf("⚠️ 服务器监控 ABS 用户列表解析失败: %s", textfmt.FormatPlainError(err))
 	}
 
 	// 3. 完美对齐 ABS 控制面板的会话解析逻辑
@@ -483,10 +477,7 @@ func (c *AbsClient) GetServerStats() string {
 			log.Printf("⚠️ 服务器监控 ABS 会话列表结构异常: err=%s", textfmt.FormatPlainError(fmt.Errorf("sessions field missing or invalid")))
 		}
 	} else {
-		if listErr := json.Unmarshal(sBody, &sessionsList); listErr != nil {
-			log.Printf("⚠️ 服务器监控 ABS 会话列表解析失败: object_err=%s array_err=%s",
-				textfmt.FormatPlainError(err), textfmt.FormatPlainError(listErr))
-		}
+		log.Printf("⚠️ 服务器监控 ABS 会话列表解析失败: %s", textfmt.FormatPlainError(err))
 	}
 
 	// 🚨 修正重点：直接统计 ABS 服务端当前挂载的真实活动会话总数，不再进行有无点开书籍的严格过滤
@@ -550,10 +541,11 @@ func (c *AbsClient) SetUserActiveStatus(absUserID string, isActive bool) error {
 		return fmt.Errorf("解析 ABS 用户数据失败: %w", err)
 	}
 
-	userObj, ok := resData["user"].(map[string]interface{})
-	if !ok || userObj == nil {
-		userObj = resData
+	if id, ok := resData["id"].(string); !ok || id != absUserID {
+		return fmt.Errorf("ABS 用户数据 ID 不匹配")
 	}
+
+	userObj := resData
 	if userObj == nil {
 		return fmt.Errorf("获取不到 ABS 用户数据实体")
 	}
@@ -603,10 +595,11 @@ func (c *AbsClient) GetUserActiveStatus(absUserID string) (bool, error) {
 		return false, fmt.Errorf("解析 ABS 用户数据失败: %w", err)
 	}
 
-	userObj, ok := resData["user"].(map[string]interface{})
-	if !ok || userObj == nil {
-		userObj = resData
+	if id, ok := resData["id"].(string); !ok || id != absUserID {
+		return false, fmt.Errorf("ABS 用户数据 ID 不匹配")
 	}
+
+	userObj := resData
 	if userObj == nil {
 		return false, fmt.Errorf("获取不到 ABS 用户数据实体")
 	}
@@ -616,18 +609,11 @@ func (c *AbsClient) GetUserActiveStatus(absUserID string) (bool, error) {
 		return false, fmt.Errorf("ABS 用户数据缺少 isActive 字段")
 	}
 
-	switch v := activeRaw.(type) {
-	case bool:
-		return v, nil
-	case string:
-		active, err := strconv.ParseBool(v)
-		if err != nil {
-			return false, fmt.Errorf("ABS 用户 isActive 字段异常")
-		}
-		return active, nil
-	default:
+	active, ok := activeRaw.(bool)
+	if !ok {
 		return false, fmt.Errorf("ABS 用户 isActive 字段异常")
 	}
+	return active, nil
 }
 
 // 定义用于解析 ABS 用户列表的极简结构体
@@ -648,18 +634,16 @@ func (c *AbsClient) GetAllUsers() ([]AbsUserMinified, error) {
 		return nil, &AbsAPIError{Operation: "拉取 ABS 用户列表失败", StatusCode: code}
 	}
 
-	var users []AbsUserMinified
-	if err := json.Unmarshal(body, &users); err != nil {
-		var wrapped struct {
-			Users []AbsUserMinified `json:"users"`
-		}
-		if err2 := json.Unmarshal(body, &wrapped); err2 == nil {
-			return wrapped.Users, nil
-		}
-		return nil, fmt.Errorf("解析异常")
+	var response struct {
+		Users []AbsUserMinified `json:"users"`
 	}
-
-	return users, nil
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("解析 ABS 用户列表失败: %w", err)
+	}
+	if response.Users == nil {
+		return nil, fmt.Errorf("ABS 用户列表缺少 users 数组")
+	}
+	return response.Users, nil
 }
 
 var DefaultClient *AbsClient

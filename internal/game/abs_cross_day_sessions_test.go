@@ -41,3 +41,23 @@ func TestSessionPlaybackPositionDoesNotCreateListeningTime(t *testing.T) {
 		t.Fatalf("playback position changed official totals: %v, %v", adjusted, corrected)
 	}
 }
+
+func TestABSSessionsResponseContract(t *testing.T) {
+	for _, tc := range []struct {
+		body  string
+		valid bool
+	}{
+		{`{"sessions":[]}`, true},
+		{`{"sessions":[{"id":"session","userId":"account"}]}`, true},
+		{`[]`, false},
+		{`{"data":[]}`, false},
+		{`{"items":[]}`, false},
+		{`{"results":[]}`, false},
+		{`{"sessions":null}`, false},
+	} {
+		_, err := parseABSSessionsPayload([]byte(tc.body))
+		if (err == nil) != tc.valid {
+			t.Errorf("body=%s err=%v", tc.body, err)
+		}
+	}
+}

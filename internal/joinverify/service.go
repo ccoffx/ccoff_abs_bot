@@ -299,7 +299,7 @@ func (s *Service) AccessMessage(chatID, userID int64, hint string) tgbotapi.Mess
 		msg.Text = "⚠️ 验证状态暂时无法读取，请稍后重试。"
 		return msg
 	}
-	if r.State == "pending" && r.PrivateEntry && s.now().Before(r.Deadline) {
+	if r.State == "pending" && s.now().Before(r.Deadline) {
 		msg.Text = fmt.Sprintf("⚠️ 请点击「去 Bot 验证」，在私聊中关注频道并完成验证。\n剩余 %d 秒，重新打开入口不会延长期限。", s.remaining(&r))
 		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonURL("去 Bot 验证", "https://t.me/"+s.botUsername+"?start=jv_"+r.Round)))
@@ -396,7 +396,6 @@ func (s *Service) ensure(userID int64, reason string) (bool, error) {
 		}
 	}
 	r.PrivateMessageID = 0
-	r.PrivateEntry = false
 	r.Confirmed = false
 	r.GroupID = s.groupID
 	r.UserID = userID
@@ -477,7 +476,7 @@ func (s *Service) advance(r *model.JoinVerification) error {
 		}
 	}
 	if r.State == "restoring" {
-		// Confirmation was revoked (or predates private verification). Retain the
+		// Confirmation was revoked. Retain the
 		// original snapshot and deadline, and reapply verification restrictions.
 		r.State = "preparing"
 		r.Muted = false
@@ -534,7 +533,7 @@ func (s *Service) advance(r *model.JoinVerification) error {
 		}
 		return s.unban(r)
 	}
-	if r.MessageID == 0 || !r.PrivateEntry {
+	if r.MessageID == 0 {
 		return s.prompt(r)
 	}
 	return nil
@@ -697,7 +696,6 @@ func (s *Service) prompt(r *model.JoinVerification) error {
 	if r.MessageID == 0 {
 		r.MessageID = msg.MessageID
 	}
-	r.PrivateEntry = true
 	return s.save(r)
 }
 
@@ -791,7 +789,7 @@ func (s *Service) cleanup(r *model.JoinVerification) {
 	}
 }
 func (s *Service) Callback(cb *tgbotapi.CallbackQuery) string {
-	if cb == nil || cb.From == nil || cb.Message == nil || cb.Message.Chat == nil || (cb.Message.Chat.ID != s.groupID && (!cb.Message.Chat.IsPrivate() || cb.Message.Chat.ID != cb.From.ID)) {
+	if cb == nil || cb.From == nil || cb.Message == nil || cb.Message.Chat == nil || (!cb.Message.Chat.IsPrivate() || cb.Message.Chat.ID != cb.From.ID) {
 		return "验证消息无效。"
 	}
 	unlock := s.lock(cb.From.ID)
@@ -799,9 +797,6 @@ func (s *Service) Callback(cb *tgbotapi.CallbackQuery) string {
 	r, err := s.record(cb.From.ID)
 	if err != nil || !strings.HasPrefix(cb.Data, CallbackPrefix) || r.Round != strings.TrimPrefix(cb.Data, CallbackPrefix) {
 		return "此验证仅限本人操作，或本轮验证已失效。"
-	}
-	if cb.Message.Chat.ID == s.groupID {
-		return "请点击群内「去 Bot 验证」入口，在私聊中完成验证。"
 	}
 	if !active(r.State) {
 		return "本轮验证已结束。"

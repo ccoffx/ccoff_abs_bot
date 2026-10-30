@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +18,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func setupKeywordDB(t *testing.T) *gorm.DB {
+func setupLotteryDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	old := storage.DB
 	oldConfig := config.AppConfig
@@ -40,11 +38,11 @@ func setupKeywordDB(t *testing.T) *gorm.DB {
 		config.AppConfig = oldConfig
 		sqlDB.Close()
 	})
-	if err := db.AutoMigrate(&model.LotteryActivity{}, &model.LotteryParticipant{}, &model.User{}, &model.PointTransaction{}, &model.AutoDeleteMsg{}, &model.LotteryPrize{}, &model.AuditLog{}, &model.LotteryWinner{}, &model.LotteryClaimLog{}, &model.Inventory{}, &model.InviteCode{}, &model.RenewCode{}, &model.SystemConfig{}); err != nil {
+	if err := db.AutoMigrate(&model.LotteryActivity{}, &model.LotteryParticipant{}, &model.User{}, &model.PointTransaction{}, &model.AutoDeleteMsg{}, &model.LotteryPrize{}, &model.AuditLog{}, &model.LotteryWinner{}, &model.LotteryClaimLog{}, &model.Inventory{}, &model.InviteCode{}, &model.RenewCode{}, &model.WhitelistCode{}, &model.SystemConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, index := range storage.DatabaseIndexes {
-		if strings.Contains(index, "idx_lottery_active_join_keyword") || strings.Contains(index, "idx_lottery_participants_activity_user_unique") || strings.Contains(index, "idx_lottery_winners_activity_user_unique") || strings.Contains(index, "idx_inventory_user_item_unique") {
+		if strings.Contains(index, "idx_lottery_participants_activity_user_unique") || strings.Contains(index, "idx_lottery_winners_activity_user_unique") || strings.Contains(index, "idx_inventory_user_item_unique") {
 			if err := db.Exec(index).Error; err != nil {
 				t.Fatal(err)
 			}
@@ -53,60 +51,13 @@ func setupKeywordDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func newKeywordLottery(keyword string) model.LotteryActivity {
-	return model.LotteryActivity{Title: "测试活动", JoinKeyword: keyword, Mode: lotteryModeCount, Status: lotteryStatusActive, ParticipantLimit: 10}
+func newTestLottery(title string) model.LotteryActivity {
+	return model.LotteryActivity{Title: title, Mode: lotteryModeCount, Status: lotteryStatusActive, ParticipantLimit: 10}
 }
 
-func TestLotteryKeywordUniqueAndReusable(t *testing.T) {
-	db := setupKeywordDB(t)
-	a := newKeywordLottery("秋日好运")
-	if err := db.Create(&a).Error; err != nil {
-		t.Fatal(err)
-	}
-	var successes atomic.Int32
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Go(func() {
-			b := newKeywordLottery("秋日好运")
-			if db.Create(&b).Error == nil {
-				successes.Add(1)
-			}
-		})
-	}
-	wg.Wait()
-	if successes.Load() != 0 {
-		t.Fatal("concurrent duplicate keyword accepted")
-	}
-	if err := db.Model(&a).Update("status", lotteryStatusDrawing).Error; err != nil {
-		t.Fatal(err)
-	}
-	b := newKeywordLottery("秋日好运")
-	if db.Create(&b).Error == nil {
-		t.Fatal("drawing keyword must remain reserved")
-	}
-	for _, status := range []string{lotteryStatusDrawn, lotteryStatusClosed} {
-		if err := db.Model(&a).Update("status", status).Error; err != nil {
-			t.Fatal(err)
-		}
-		b = newKeywordLottery("秋日好运")
-		if err := db.Create(&b).Error; err != nil {
-			t.Fatalf("reuse after %s: %v", status, err)
-		}
-		if err := db.Delete(&b).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-	for range 2 {
-		b = newKeywordLottery("")
-		if err := db.Create(&b).Error; err != nil {
-			t.Fatal("legacy blank keywords conflict", err)
-		}
-	}
-}
-
-func TestLotteryKeywordJoinAccounting(t *testing.T) {
-	db := setupKeywordDB(t)
-	lot := newKeywordLottery("秋日好运")
+func TestLotteryJoinAccounting(t *testing.T) {
+	db := setupLotteryDB(t)
+	lot := newTestLottery("秋日好运")
 	lot.EntryCost = 5
 	lot.ParticipantLimit = 2
 	if err := db.Create(&lot).Error; err != nil {
@@ -151,9 +102,9 @@ func TestLotteryKeywordJoinAccounting(t *testing.T) {
 }
 
 func TestLotteryCreationWithoutKeyword(t *testing.T) {
-	db := setupKeywordDB(t)
+	db := setupLotteryDB(t)
 	session := &telegram.SessionState{}
-	for key, value := range map[string]string{"lottery_title": "秋日福利", "lottery_join_keyword": "秋日好运", "lottery_mode": lotteryModeCount, "lottery_limit": "10", "lottery_entry_cost": "0", "lottery_prizes": "积分 100 1"} {
+	for key, value := range map[string]string{"lottery_title": "秋日福利", "lottery_mode": lotteryModeCount, "lottery_limit": "10", "lottery_entry_cost": "0", "lottery_prizes": "积分 100 1"} {
 		session.SetTemp(key, value)
 	}
 	specs, err := parseLotteryPrizeSpecs(session.GetTemp("lottery_prizes"))
@@ -172,7 +123,7 @@ func TestLotteryCreationWithoutKeyword(t *testing.T) {
 	if err := db.First(&got, id).Error; err != nil {
 		t.Fatal(err)
 	}
-	if got.JoinKeyword != "" {
+	if got.Title != "秋日福利" || got.Mode != lotteryModeCount || got.ParticipantLimit != 10 {
 		t.Fatalf("independent fields missing: %+v", got)
 	}
 	_, err = createLotteryActivityFromSession(&tgbotapi.Message{From: &tgbotapi.User{ID: 1}}, session)
@@ -181,59 +132,12 @@ func TestLotteryCreationWithoutKeyword(t *testing.T) {
 	}
 }
 
-func TestLotteryStuckDrawingRecovery(t *testing.T) {
-	for _, trigger := range []string{"manual", "scheduler_count", "scheduler_time"} {
-		t.Run(trigger, func(t *testing.T) {
-			db := setupKeywordDB(t)
-			bot, _ := newClaimBot(t)
-			lot := newKeywordLottery("恢复抽奖")
-			lot.Status = lotteryStatusDrawing
-			if trigger == "scheduler_time" {
-				lot.Mode = lotteryModeTime
-				past := time.Now().Add(-time.Minute)
-				lot.DrawAt = &past
-			}
-			if err := db.Create(&lot).Error; err != nil {
-				t.Fatal(err)
-			}
-			if err := db.Create(&model.LotteryParticipant{ActivityID: lot.ID, UserID: 101, JoinedAt: time.Now()}).Error; err != nil {
-				t.Fatal(err)
-			}
-			if err := db.Create(&model.LotteryPrize{ActivityID: lot.ID, PrizeType: lotteryPrizePoints, Amount: 10, Quantity: 1}).Error; err != nil {
-				t.Fatal(err)
-			}
-			if trigger == "manual" {
-				if err := drawLotteryActivity(bot, lot.ID, "manual", 1); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				runLotterySchedulerTick(bot)
-			}
-			if err := db.First(&lot, lot.ID).Error; err != nil {
-				t.Fatal(err)
-			}
-			if lot.Status != lotteryStatusDrawn || lot.WinnersCount != 1 {
-				t.Fatalf("draw did not recover: %+v", lot)
-			}
-			if err := drawLotteryActivity(bot, lot.ID, "manual", 1); !errors.Is(err, storage.ErrLotteryNotActive) {
-				t.Fatalf("repeated draw: %v", err)
-			}
-			assertRewardCount(t, &model.LotteryWinner{}, 1)
-			replacement := newKeywordLottery(lot.JoinKeyword)
-			if err := createLotteryActivityInTx(db, &replacement); err != nil {
-				t.Fatalf("keyword not released: %v", err)
-			}
-		})
-	}
-}
-
-func TestLotteryStuckDrawingRejectsExistingResults(t *testing.T) {
+func TestLotteryDrawRejectsExistingResults(t *testing.T) {
 	for _, evidence := range []string{"drawn_at", "winner", "deleted_winner", "fusion_pool_points"} {
 		t.Run(evidence, func(t *testing.T) {
-			db := setupKeywordDB(t)
+			db := setupLotteryDB(t)
 			bot, _ := newClaimBot(t)
-			lot := newKeywordLottery("保护开奖结果")
-			lot.Status = lotteryStatusDrawing
+			lot := newTestLottery("保护开奖结果")
 			if evidence == "drawn_at" {
 				now := time.Now()
 				lot.DrawnAt = &now
@@ -256,22 +160,22 @@ func TestLotteryStuckDrawingRejectsExistingResults(t *testing.T) {
 				}
 			}
 			if err := drawLotteryActivity(bot, lot.ID, "manual", 1); err == nil || !strings.Contains(err.Error(), "不能重复开奖") {
-				t.Fatalf("unsafe recovery accepted: %v", err)
+				t.Fatalf("duplicate settlement accepted: %v", err)
 			}
 			if err := db.First(&lot, lot.ID).Error; err != nil {
 				t.Fatal(err)
 			}
-			if lot.Status != lotteryStatusDrawing {
-				t.Fatalf("unsafe recovery changed status: %s", lot.Status)
+			if lot.Status != lotteryStatusActive {
+				t.Fatalf("duplicate settlement changed status: %s", lot.Status)
 			}
 		})
 	}
 }
 
 func TestLotteryTextEntryRemovedAndButtonsAvailable(t *testing.T) {
-	db := setupKeywordDB(t)
+	db := setupLotteryDB(t)
 	bot, capture := newClaimBot(t)
-	lot := newKeywordLottery("历史口令")
+	lot := newTestLottery("按钮抽奖")
 	lot.AnnounceChatID = -100
 	if err := db.Create(&lot).Error; err != nil {
 		t.Fatal(err)
@@ -281,7 +185,7 @@ func TestLotteryTextEntryRemovedAndButtonsAvailable(t *testing.T) {
 	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 101}, Chat: &tgbotapi.Chat{ID: 101, Type: "private"}}
 	for _, chat := range []*tgbotapi.Chat{msg.Chat, {ID: -100, Type: "supergroup"}} {
 		msg.Chat = chat
-		for _, input := range []string{lot.JoinKeyword, fmt.Sprintf("参加抽奖 %d", lot.ID), fmt.Sprintf("/join_lottery %d", lot.ID), "领取奖励"} {
+		for _, input := range []string{"任意口令", fmt.Sprintf("参加抽奖 %d", lot.ID), fmt.Sprintf("/join_lottery %d", lot.ID), "领取奖励"} {
 			if HandleLotteryCommand(bot, msg, input, session, "user") {
 				t.Fatalf("text entry still active: %s", input)
 			}
@@ -295,14 +199,14 @@ func TestLotteryTextEntryRemovedAndButtonsAvailable(t *testing.T) {
 		t.Fatalf("expected list and group announcement: %+v", messages)
 	}
 	for _, m := range messages {
-		if strings.Contains(m.Text, lot.JoinKeyword) || !strings.Contains(m.Markup, fmt.Sprintf("lottery_%d", lot.ID)) {
-			t.Fatalf("missing button or exposed keyword: %+v", m)
+		if !strings.Contains(m.Markup, fmt.Sprintf("lottery_%d", lot.ID)) {
+			t.Fatalf("missing participation button: %+v", m)
 		}
 	}
 	if !strings.Contains(messages[0].Markup, "lottery_claim") {
 		t.Fatal("list has no claim button")
 	}
-	// The same legacy activity remains available through the button preview.
+	// Opening the preview does not join until the owner confirms.
 	msg.Chat = &tgbotapi.Chat{ID: 101, Type: "private"}
 	HandleLotteryStart(bot, msg, fmt.Sprintf("/start lottery_%d", lot.ID))
 	assertRewardCount(t, &model.LotteryParticipant{}, 0)

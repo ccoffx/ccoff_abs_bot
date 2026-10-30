@@ -54,60 +54,27 @@ type absListeningSession struct {
 }
 
 func parseABSSessionsPayload(body []byte) ([]map[string]interface{}, error) {
-	var arr []map[string]interface{}
-	if err := json.Unmarshal(body, &arr); err == nil {
-		return arr, nil
+	var response struct {
+		Sessions []map[string]interface{} `json:"sessions"`
 	}
-
-	var obj map[string]interface{}
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, err
 	}
-	for _, key := range []string{"sessions", "data", "items", "results"} {
-		if raw, ok := obj[key]; ok {
-			if sessions := interfaceSliceToMaps(raw); sessions != nil {
-				return sessions, nil
-			}
-		}
+	if response.Sessions == nil {
+		return nil, fmt.Errorf("ABS_SESSIONS_FIELD_MISSING")
 	}
-	return nil, fmt.Errorf("ABS_SESSIONS_FIELD_MISSING")
-}
-
-func interfaceSliceToMaps(raw interface{}) []map[string]interface{} {
-	list, ok := raw.([]interface{})
-	if !ok {
-		return nil
-	}
-	result := make([]map[string]interface{}, 0, len(list))
-	for _, item := range list {
-		if obj, ok := item.(map[string]interface{}); ok {
-			result = append(result, obj)
-		}
-	}
-	return result
+	return response.Sessions, nil
 }
 
 func parseABSListeningSession(raw map[string]interface{}, absUserID string) (absListeningSession, bool) {
-	sessionKey := firstString(raw, "id", "sessionId", "sessionID", "session_id", "socketId", "socketID")
-	itemKey := firstString(raw, "libraryItemId", "libraryItemID", "library_item_id", "mediaItemId", "mediaItemID", "media_item_id", "bookId", "bookID", "episodeId", "episodeID", "chapterId", "chapterID")
-	if itemKey == "" {
-		itemKey = nestedFirstString(raw, []string{"mediaProgress", "libraryItem", "mediaItem", "book", "item"}, "id", "libraryItemId", "libraryItemID", "mediaItemId", "mediaItemID")
+	sessionKey, _ := raw["id"].(string)
+	if strings.TrimSpace(sessionKey) == "" {
+		return absListeningSession{}, false
 	}
-	if itemKey == "" {
-		itemKey = "unknown"
-	}
-
-	startedAt, hasStart := firstTime(raw, "startedAt", "createdAt", "start", "connectedAt")
-	updatedAt, hasUpdate := firstTime(raw, "updatedAt", "lastUpdate", "lastSeenAt", "lastActivityAt", "serverUpdatedAt")
-	listeningSeconds, hasListeningTime := firstFloat(raw, "timeListening", "time_listening")
-	dateKey := strings.TrimSpace(firstString(raw, "date"))
-	if sessionKey == "" {
-		baseTime := ""
-		if hasStart {
-			baseTime = startedAt.UTC().Format(time.RFC3339Nano)
-		}
-		sessionKey = fmt.Sprintf("%s:%s:%s", strings.TrimSpace(absUserID), itemKey, baseTime)
-	}
+	startedAt, hasStart := timeValue(raw["startedAt"])
+	updatedAt, hasUpdate := timeValue(raw["updatedAt"])
+	listeningSeconds, hasListeningTime := raw["timeListening"].(float64)
+	dateKey, _ := raw["date"].(string)
 
 	if !hasListeningTime && !hasStart && !hasUpdate {
 		return absListeningSession{}, false
@@ -474,15 +441,8 @@ func absSessionBelongsToUser(raw map[string]interface{}, absUserID string) bool 
 	if want == "" {
 		return false
 	}
-	for _, got := range []string{
-		firstString(raw, "userId", "userID", "user_id", "user"),
-		nestedFirstString(raw, []string{"user", "account"}, "id", "userId", "userID"),
-	} {
-		if strings.TrimSpace(got) == want {
-			return true
-		}
-	}
-	return false
+	got, _ := raw["userId"].(string)
+	return strings.TrimSpace(got) == want
 }
 
 func splitDurationByBeijingDay(start time.Time, end time.Time) map[string]float64 {
@@ -505,83 +465,6 @@ func splitDurationByBeijingDay(start time.Time, end time.Time) map[string]float6
 		cursor = next
 	}
 	return result
-}
-
-func firstString(raw map[string]interface{}, keys ...string) string {
-	for _, key := range keys {
-		if value := stringValue(raw[key]); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func nestedFirstString(raw map[string]interface{}, parents []string, keys ...string) string {
-	for _, parent := range parents {
-		if child, ok := raw[parent].(map[string]interface{}); ok {
-			if value := firstString(child, keys...); value != "" {
-				return value
-			}
-		}
-	}
-	return ""
-}
-
-func firstFloat(raw map[string]interface{}, keys ...string) (float64, bool) {
-	for _, key := range keys {
-		if value, ok := floatValue(raw[key]); ok {
-			return value, true
-		}
-	}
-	return 0, false
-}
-
-func firstTime(raw map[string]interface{}, keys ...string) (time.Time, bool) {
-	for _, key := range keys {
-		if value, ok := timeValue(raw[key]); ok {
-			return value, true
-		}
-	}
-	return time.Time{}, false
-}
-
-func stringValue(raw interface{}) string {
-	switch v := raw.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	case json.Number:
-		return strings.TrimSpace(v.String())
-	case float64:
-		if v == math.Trunc(v) {
-			return strconv.FormatInt(int64(v), 10)
-		}
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case int:
-		return strconv.Itoa(v)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	}
-	return ""
-}
-
-func floatValue(raw interface{}) (float64, bool) {
-	switch v := raw.(type) {
-	case float64:
-		return v, true
-	case float32:
-		return float64(v), true
-	case int:
-		return float64(v), true
-	case int64:
-		return float64(v), true
-	case json.Number:
-		f, err := v.Float64()
-		return f, err == nil
-	case string:
-		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		return f, err == nil
-	}
-	return 0, false
 }
 
 func timeValue(raw interface{}) (time.Time, bool) {

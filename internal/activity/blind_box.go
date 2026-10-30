@@ -55,13 +55,13 @@ func ExecuteBlindBoxOpen(tgUser *tgbotapi.User) (string, string, error) {
 			if err := storage.CreateRenewCodeRecord(tx, code, 1); err != nil {
 				return err
 			}
-			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得保底奖励：**【1天续期卡】**！\n💳 专属卡密：`%s`\n(卡密已升级为16位安全密钥，请在此发送充值)", code)
+			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得保底奖励：**【1天续期卡】**！\n💳 专属卡密：`%s`\n(请在此发送卡密充值)", code)
 		case roll <= 939:
 			code := fmt.Sprintf("R%d-%s", 3, security.GenerateRandomCode(16))
 			if err := storage.CreateRenewCodeRecord(tx, code, 3); err != nil {
 				return err
 			}
-			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得小奖：**【3天续期卡】**！\n💳 专属卡密：`%s`\n(卡密已升级为16位安全密钥，请在此发送充值)", code)
+			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得小奖：**【3天续期卡】**！\n💳 专属卡密：`%s`\n(请在此发送卡密充值)", code)
 		case roll <= 959:
 			code := security.GenerateRandomCode(16)
 			if err := storage.CreateInviteCodeRecord(tx, code); err != nil {

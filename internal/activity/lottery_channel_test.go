@@ -13,9 +13,9 @@ import (
 )
 
 func TestLotteryPrivateConfirmationDoesNotSpendUntilConfirmed(t *testing.T) {
-	db := setupKeywordDB(t)
+	db := setupLotteryDB(t)
 	bot, cap := newClaimBot(t)
-	a := newKeywordLottery("频道抽奖测试")
+	a := newTestLottery("频道抽奖测试")
 	a.EntryCost = 5
 	if err := createLotteryActivityInTx(db, &a); err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestLotteryPrivateConfirmationDoesNotSpendUntilConfirmed(t *testing.T) {
 	}
 }
 func TestChannelLotterySnapshotsAndDurableLifecycle(t *testing.T) {
-	db := setupKeywordDB(t)
+	db := setupLotteryDB(t)
 	if err := db.AutoMigrate(&model.AnnouncementDelivery{}); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestChannelLotterySnapshotsAndDurableLifecycle(t *testing.T) {
 	bot, _ := newClaimBot(t)
 	session := telegram.GetSession(1)
 	defer telegram.ClearSession(1)
-	for k, v := range map[string]string{"lottery_title": "频道测试", "lottery_join_keyword": "秋日星河", "lottery_mode": lotteryModeCount, "lottery_limit": "5", "lottery_entry_cost": "0", "lottery_prizes": "积分 100 1"} {
+	for k, v := range map[string]string{"lottery_title": "频道测试", "lottery_mode": lotteryModeCount, "lottery_limit": "5", "lottery_entry_cost": "0", "lottery_prizes": "积分 100 1"} {
 		session.SetTemp(k, v)
 	}
 	id, err := createLotteryActivityFromSession(&tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}}, session)
@@ -86,25 +86,25 @@ func TestChannelLotterySnapshotsAndDurableLifecycle(t *testing.T) {
 	if err = db.Where("key = ?", fmt.Sprintf("lottery:%d:result", id)).First(&result).Error; err != nil || result.TargetChatID != -100200 {
 		t.Fatal("draw followed new config instead of saved destination")
 	}
-	// Existing group lotteries must never migrate just because a channel is added.
-	legacy := newKeywordLottery("旧群活动")
-	legacy.AnnounceChatID = -100400
-	if err = db.Create(&legacy).Error; err != nil {
+	// Group lotteries retain their announcement target when a channel is configured.
+	groupLottery := newTestLottery("群活动")
+	groupLottery.AnnounceChatID = -100400
+	if err = db.Create(&groupLottery).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err = queueLotteryIntro(db, legacy); err != nil {
+	if err = queueLotteryIntro(db, groupLottery); err != nil {
 		t.Fatal(err)
 	}
 	var n int64
-	db.Model(&model.AnnouncementDelivery{}).Where("key = ?", fmt.Sprintf("lottery:%d:intro", legacy.ID)).Count(&n)
+	db.Model(&model.AnnouncementDelivery{}).Where("key = ?", fmt.Sprintf("lottery:%d:intro", groupLottery.ID)).Count(&n)
 	if n != 0 {
-		t.Fatal("historical group event migrated")
+		t.Fatal("group event was routed to the channel")
 	}
 }
 func TestPrivateLotteryConfirmationRechecksActivityAndBalance(t *testing.T) {
-	db := setupKeywordDB(t)
+	db := setupLotteryDB(t)
 	bot, _ := newClaimBot(t)
-	a := newKeywordLottery("状态复查")
+	a := newTestLottery("状态复查")
 	a.EntryCost = 10
 	if err := db.Create(&a).Error; err != nil {
 		t.Fatal(err)

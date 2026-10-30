@@ -154,8 +154,8 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	mu.Lock()
 	following = true
 	mu.Unlock()
-	if got := send(joinverify.CallbackPrefix+record.Round, -100); !strings.Contains(got, "私聊") {
-		t.Fatalf("legacy group callback was accepted: %s", got)
+	if got := send(joinverify.CallbackPrefix+record.Round, -100); !strings.Contains(got, "无效") {
+		t.Fatalf("group callback was accepted: %s", got)
 	}
 	start := &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: "/start jv_" + record.Round}
 	if handlePrivateStartFastPath(bot, start) {

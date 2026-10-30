@@ -55,6 +55,13 @@ func CheckCompatibility(db *sql.DB) error {
 	var table string
 	err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='deployment_metadata'").Scan(&table)
 	if errors.Is(err, sql.ErrNoRows) {
+		var tables int
+		if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables); err != nil {
+			return err
+		}
+		if tables != 0 {
+			return fmt.Errorf("existing database has no schema marker; initialize a fresh database")
+		}
 		return nil
 	}
 	if err != nil {

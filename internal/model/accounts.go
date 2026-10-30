@@ -142,7 +142,7 @@ func (ReferralMonthlyRewardQuota) TableName() string {
 }
 
 // WhitelistCode grants the existing permanent whitelist privilege once.
-// Raw codes are only returned to the generating administrator.
+// Raw codes are only returned privately to the generating administrator or lottery winner.
 type WhitelistCode struct {
 	gorm.Model
 	CodeHash    string `gorm:"uniqueIndex;not null"`

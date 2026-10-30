@@ -44,6 +44,7 @@ const (
 	lotteryPrizePoints     = "points"
 	lotteryPrizeInvite     = "invite"
 	lotteryPrizeRenew      = "renew"
+	lotteryPrizeWhitelist  = "whitelist"
 	lotteryPrizePill       = "pill"
 	lotteryPrizeManual     = "manual_contact"
 	lotteryPrizeCustomCode = "custom_code"
@@ -84,7 +85,6 @@ func createLotteryActivityInTx(tx *gorm.DB, activity *model.LotteryActivity) err
 		}
 	}
 	entry.Title = textfmt.LotteryDisplayText(entry.Title, 80, "-")
-	entry.JoinKeyword = "" // Historical keywords are no longer used.
 	entry.Mode = textfmt.FormatPlainValue(entry.Mode)
 	entry.Status = textfmt.FormatPlainValue(entry.Status)
 	entry.CreatedBy = textfmt.FormatPlainValue(entry.CreatedBy)
@@ -347,13 +347,15 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 		session.SetTemp("lottery_entry_cost", strconv.Itoa(entryCost))
 		session.SetStep("WAITING_LOTTERY_PRIZES")
 		telegram.SendPlainText(bot, chatID,
-			"第四步：请发送奖品配置，每行一个奖品。\n\n"+
+			"第四步：请在同一条消息中发送全部奖品配置，每行一种，可混合多种类型。每位中奖者随机获得一份奖品，全部奖品合计最多 100 份。\n\n"+
 				"格式示例（可整块复制后修改）：\n"+
-				textfmt.Copyable("积分 100 3\n续期 30 2\n邀请码 1\n丹药 回气丹 1\n人工 实体纪念品 2\n卡密 Steam礼品卡|AAAA-BBBB-CCCC")+"\n\n"+
+				textfmt.Copyable("积分 100 3\n续期 30 2\n邀请码 1\n白名单 1\n丹药 回气丹 1\n人工 实体纪念品 2\n卡密 Steam礼品卡|AAAA-BBBB-CCCC")+"\n\n"+
 				"说明：\n"+
 				"积分 100 3 = 100 积分奖品 3 份\n"+
 				"续期 30 2 = 30 天续期卡 2 份\n"+
 				"邀请码 1 = 邀请码 1 份\n"+
+				"白名单 1 = 永久白名单卡 1 份，领取后通过「兑换白名单」使用\n"+
+				"邀请码、续期卡、白名单卡均在领奖时自动生成；创建及开奖时不生成\n"+
 				"丹药 回气丹 1 = 回气丹 1 份\n"+
 				"人工 实体纪念品 2 = 中奖者点击「领取奖励」按钮确认后联系管理员领奖\n"+
 				"卡密 奖品名称|卡密内容 = 每行导入一份自定义卡密；卡密只加密保存，中奖者点击「领取奖励」按钮私聊领取")
@@ -456,6 +458,22 @@ func parseLotteryPrizeSpecs(raw string) ([]lotteryPrizeSpec, error) {
 				Amount:      1,
 				Quantity:    qty,
 				DisplayName: "邀请码",
+			})
+			totalQuantity += qty
+
+		case "白名单", "白名单卡":
+			if len(fields) != 2 {
+				return nil, fmt.Errorf("白名单格式应为：白名单 1")
+			}
+			qty, err := strconv.Atoi(fields[1])
+			if err != nil || qty < 1 || qty > 100 {
+				return nil, fmt.Errorf("白名单卡份数需为 1-100")
+			}
+			specs = append(specs, lotteryPrizeSpec{
+				PrizeType:   lotteryPrizeWhitelist,
+				Amount:      1,
+				Quantity:    qty,
+				DisplayName: "永久白名单卡",
 			})
 			totalQuantity += qty
 
@@ -1055,7 +1073,7 @@ func drawLotteryActivity(bot *tgbotapi.BotAPI, activityID uint, reason string, a
 
 	err := storage.RunFusionPoolLockedTransaction(func(tx *gorm.DB) error {
 		res := tx.Model(&model.LotteryActivity{}).
-			Where("id = ? AND status IN ?", activityID, []string{lotteryStatusActive, lotteryStatusDrawing}).
+			Where("id = ? AND status = ?", activityID, lotteryStatusActive).
 			Update("status", lotteryStatusDrawing)
 		if res.Error != nil {
 			return res.Error
@@ -1067,8 +1085,7 @@ func drawLotteryActivity(bot *tgbotapi.BotAPI, activityID uint, reason string, a
 		if err := tx.First(&activity, activityID).Error; err != nil {
 			return err
 		}
-		// A persisted drawing state can be left by older versions. Only retry
-		// draws without settlement evidence; never reroll an existing result.
+		// Never reroll an activity that already has settlement evidence.
 		if activity.DrawnAt != nil || activity.ClaimDeadlineAt != nil || activity.WinnersCount != 0 || activity.TotalEntryCost != 0 || activity.TotalRefundPoints != 0 || activity.FusionPoolPoints != 0 {
 			return fmt.Errorf("抽奖已有结算记录，请人工核查状态，不能重复开奖")
 		}
@@ -1329,6 +1346,8 @@ func lotteryPrizeText(prizeType string, amount int) string {
 		return fmt.Sprintf("%d 积分", amount)
 	case lotteryPrizeInvite:
 		return "邀请码"
+	case lotteryPrizeWhitelist:
+		return "永久白名单卡"
 	case lotteryPrizeRenew:
 		return fmt.Sprintf("%d 天续期卡", amount)
 	case lotteryPrizePill:
@@ -1448,6 +1467,14 @@ func claimLotteryWinner(activity model.LotteryActivity, winner model.LotteryWinn
 			}
 			current.PrizeCodePreview = security.MaskSecret(code)
 			reply = fmt.Sprintf("🎲 恭喜中奖！\n\n活动：%s\n奖品：%d 天续期卡\n\n你的专属续期卡：%s", textfmt.LotteryDisplayText(activity.Title, 80, "-"), current.Amount, textfmt.Copyable(code))
+
+		case lotteryPrizeWhitelist:
+			code, err := createLotteryWhitelistCodeInTx(tx, activity.CreatedByID)
+			if err != nil {
+				return err
+			}
+			current.PrizeCodePreview = security.MaskSecret(code)
+			reply = fmt.Sprintf("🎲 恭喜中奖！\n\n活动：%s\n奖品：永久白名单卡\n\n你的专属白名单卡：%s\n\n请私聊发送 %s，按提示兑换。兑换需已有正式听书账号；已是白名单或超级管理员不能兑换，卡密不会消耗。", textfmt.LotteryDisplayText(activity.Title, 80, "-"), textfmt.Copyable(code), textfmt.Copyable("兑换白名单"))
 
 		case lotteryPrizePill:
 			itemName, err := getLotteryPrizeDisplayNameInTx(tx, activity.ID, current)
@@ -1735,6 +1762,29 @@ func createLotteryInviteCodeInTx(tx *gorm.DB) (string, error) {
 		}
 	}
 	return "", storage.ErrCreateInviteCodeFailed
+}
+
+func createLotteryWhitelistCodeInTx(tx *gorm.DB, createdByID int64) (string, error) {
+	for i := 0; i < 5; i++ {
+		code := "WL-" + security.GenerateRandomCode(32)
+		hash := security.HashSensitiveToken(code)
+		if hash == "" {
+			return "", storage.ErrSecurityPepperNotConfigured
+		}
+		record := model.WhitelistCode{CodeHash: hash, CodePreview: security.MaskSecret(code), CreatedByID: createdByID}
+		res := tx.Create(&record)
+		if res.Error != nil {
+			if storage.IsUniqueConstraintError(res.Error) {
+				continue
+			}
+			return "", res.Error
+		}
+		if res.RowsAffected != 1 {
+			return "", fmt.Errorf("LOTTERY_WHITELIST_CODE_CREATE_MISSED")
+		}
+		return code, nil
+	}
+	return "", fmt.Errorf("LOTTERY_WHITELIST_CODE_COLLISION_LIMIT")
 }
 
 func createLotteryRenewCodeInTx(tx *gorm.DB, days int) (string, error) {
@@ -2043,7 +2093,7 @@ func StartLotteryScheduler(bot *tgbotapi.BotAPI) {
 func runLotterySchedulerTick(bot *tgbotapi.BotAPI) {
 	now := time.Now()
 	var dueActivities []model.LotteryActivity
-	if err := storage.DB.Where("status = ? OR (status = ? AND mode = ? AND draw_at IS NOT NULL AND draw_at <= ?)", lotteryStatusDrawing, lotteryStatusActive, lotteryModeTime, now).
+	if err := storage.DB.Where("status = ? AND mode = ? AND draw_at IS NOT NULL AND draw_at <= ?", lotteryStatusActive, lotteryModeTime, now).
 		Order("draw_at asc").
 		Limit(20).
 		Find(&dueActivities).Error; err != nil {

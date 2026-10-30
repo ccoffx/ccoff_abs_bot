@@ -635,7 +635,7 @@ func querySectHornRecipientsTx(tx *gorm.DB, scope string, sectID int64) ([]sectH
 			Select("sm.user_id AS user_id, COALESCE(NULLIF(u.username, ''), sm.user_name) AS user_name").
 			Joins("JOIN users AS u ON u.telegram_id = sm.user_id AND u.deleted_at IS NULL").
 			Where("sm.sect_id = ? AND sm.deleted_at IS NULL", sectID).
-			Where("(u.status IS NULL OR u.status = '' OR u.status = ?) AND u.is_suspended = ?", "active", false).
+			Where("u.status = ? AND u.is_suspended = ?", "active", false).
 			Order("sm.joined_at ASC").
 			Scan(&recipients).Error
 		return dedupeSectHornRecipients(recipients), err
@@ -643,7 +643,7 @@ func querySectHornRecipientsTx(tx *gorm.DB, scope string, sectID int64) ([]sectH
 		err := tx.Model(&model.User{}).
 			Select("telegram_id AS user_id, username AS user_name").
 			Where("abs_user_id <> ''").
-			Where("(status IS NULL OR status = '' OR status = ?) AND is_suspended = ?", "active", false).
+			Where("status = ? AND is_suspended = ?", "active", false).
 			Order("telegram_id ASC").
 			Scan(&recipients).Error
 		return dedupeSectHornRecipients(recipients), err

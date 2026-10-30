@@ -225,7 +225,7 @@ func (m *MockTransport) handle(r *http.Request) (int, any) {
 			for _, id := range ids {
 				users = append(users, mockUserResponse(m.state.Users[id]))
 			}
-			return 200, users
+			return 200, map[string]any{"users": users}
 		}
 		if r.Method == "POST" {
 			if payload.Username == "" || payload.Password == nil || *payload.Password == "" {

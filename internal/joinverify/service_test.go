@@ -512,8 +512,8 @@ func TestPrivateEntryOwnershipAndNoAutomaticPass(t *testing.T) {
 	if f.calls["sendMessage"] != before || !record(t, s, 1).Deadline.Equal(r.Deadline) || !strings.Contains(last.params["text"], "89 秒") {
 		t.Fatal("reopening extended deadline or duplicated panel")
 	}
-	legacy := &tgbotapi.CallbackQuery{From: &tgbotapi.User{ID: 1}, Data: CallbackPrefix + r.Round, Message: &tgbotapi.Message{MessageID: r.MessageID, Chat: &tgbotapi.Chat{ID: s.groupID}}}
-	if hint := s.Callback(legacy); !strings.Contains(hint, "私聊") {
+	groupCallback := &tgbotapi.CallbackQuery{From: &tgbotapi.User{ID: 1}, Data: CallbackPrefix + r.Round, Message: &tgbotapi.Message{MessageID: r.MessageID, Chat: &tgbotapi.Chat{ID: s.groupID}}}
+	if hint := s.Callback(groupCallback); !strings.Contains(hint, "无效") {
 		t.Fatal(hint)
 	}
 	wrongPanel := callback(s, r, 1)
@@ -536,27 +536,6 @@ func TestPrivateEntryOwnershipAndNoAutomaticPass(t *testing.T) {
 	}
 	if !cleaned {
 		t.Fatal("private success panel still has buttons")
-	}
-}
-
-func TestLegacyPromptUpgradeRetainsDeadlineAndPermissions(t *testing.T) {
-	s, f, now := fixture(t)
-	s.Check(1)
-	r := record(t, s, 1)
-	r.PrivateEntry = false // Existing database rows have no private entry marker.
-	if err := s.save(&r); err != nil {
-		t.Fatal(err)
-	}
-	*now = now.Add(45 * time.Second)
-	before := f.calls["sendMessage"]
-	s.Sweep()
-	latest := record(t, s, 1)
-	if !latest.PrivateEntry || latest.MessageID != r.MessageID || !latest.Deadline.Equal(r.Deadline) || latest.OriginalPermissions != r.OriginalPermissions || f.calls["sendMessage"] != before {
-		t.Fatal("legacy prompt was not upgraded in place")
-	}
-	last := f.requests[len(f.requests)-1]
-	if last.method != "editMessageText" || !strings.Contains(last.params["text"], "75 秒") || !strings.Contains(last.params["reply_markup"], "去 Bot 验证") {
-		t.Fatalf("incorrect upgraded prompt: %+v", last)
 	}
 }
 

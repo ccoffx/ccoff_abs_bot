@@ -20,7 +20,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: 1.26.10
-          cache: true
+          cache: false
+      # setup-go's dependency-only cache key stops updating once go.sum is stable.
+      # Save each source snapshot so subsequent commits reuse compiled packages.
+      - name: Restore and update Go checks cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-checks-v1-${{ runner.os }}-${{ runner.arch }}-1.26.10-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            go-checks-v1-${{ runner.os }}-${{ runner.arch }}-1.26.10-${{ hashFiles('go.mod', 'go.sum') }}-
       - run: go test ./...
       - run: go test -race ./...
       - run: go vet ./...
@@ -32,7 +43,7 @@ jobs:
         run: for file in deploy.sh scripts/*.sh; do bash -n "$file"; done
   build:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: checks
+    # Build concurrently with checks; the bundle below gates release eligibility.
     name: Native image build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -54,6 +65,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v4
+        id: builder
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -77,6 +89,25 @@ jobs:
             cat "$registry_error" >&2
             exit 1
           fi
+      # GHA layer caches do not include RUN --mount=type=cache contents.
+      # Restore the compiler cache separately for each native architecture.
+      - name: Restore and update Docker Go compiler cache
+        if: steps.existing.outputs.exists != 'true'
+        id: go-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/docker-go-build
+          key: docker-go-v1-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Dockerfile', 'go.mod', 'go.sum') }}-${{ hashFiles('main.go', 'internal/**/*.go') }}
+          restore-keys: |
+            docker-go-v1-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Dockerfile', 'go.mod', 'go.sum') }}-
+      - name: Inject and extract Docker Go compiler cache
+        if: steps.existing.outputs.exists != 'true'
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3
+        with:
+          builder: ${{ steps.builder.outputs.name }}
+          cache-map: '{"${{ runner.temp }}/docker-go-build": "/root/.cache/go-build"}'
+          scratch-dir: ${{ runner.temp }}/buildkit-cache-dance
+          skip-extraction: ${{ steps.go-cache.outputs.cache-hit }}
       - name: Build native CGO image
         if: steps.existing.outputs.exists != 'true'
         id: build
@@ -193,7 +224,7 @@ jobs:
         run: ./scripts/image-smoke.sh "$IMAGE" "$PLATFORM"
   bundle:
     name: Package verified candidate
-    needs: [candidate, smoke]
+    needs: [checks, candidate, smoke]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

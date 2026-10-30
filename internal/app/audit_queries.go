@@ -401,8 +401,6 @@ var highRiskAuditActionSet = map[string]struct{}{
 	"LISTENING_ABUSE_RELEASE":                {},
 	"LISTENING_ABUSE_RELEASE_FAILED":         {},
 	"LISTENING_ABUSE_RELEASE_BLOCKED":        {},
-	"LISTENING_ABUSE_AMNESTY":                {},
-	"LISTENING_ABUSE_AMNESTY_FAILED":         {},
 	"RENEW_REACTIVATE_USER":                  {},
 	"RENEW_REACTIVATE_USER_FAILED":           {},
 	"RENEW_REACTIVATE_USER_LOCAL_FAILED":     {},

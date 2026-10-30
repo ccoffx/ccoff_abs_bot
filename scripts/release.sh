@@ -31,11 +31,6 @@ echo "仓库：$repo"
 echo "版本：$version"
 echo "提交：$sha"
 echo "候选 CI：https://github.com/$repo/actions/runs/$run_id"
-echo '请确认已针对上述完整提交完成：'
-echo '  1. 独立测试 Bot 私聊验收。'
-echo '  2. 当前结构首次建库和重启验证（数据库兼容组 1）。'
-read -r -p '输入版本号确认发布，其他输入取消：' confirmation || fail '未收到确认，已取消。'
-[[ "$confirmation" == "$version" ]] || fail '确认不匹配，已取消。'
 
 gh workflow run release.yml --repo "$repo" --ref main \
   -f "commit=$sha" -f "version=$version" \

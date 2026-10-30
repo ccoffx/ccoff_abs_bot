@@ -30,6 +30,11 @@ func TestDatabaseFreshStartAndRestart(t *testing.T) {
 	configpkg.AppConfig = &configpkg.Config{DbURL: filepath.Join(t.TempDir(), "fresh.db"), DatabaseMaxOpenConns: 1, DatabaseMaxIdleConns: 1, DatabaseBusyTimeoutMS: 1000, SecurityPepper: strings.Repeat("s", 64)}
 	InitDB()
 	assertCurrentDatabaseIndexes(t)
+	for table, column := range map[string]string{"lottery_activities": "join_keyword", "join_verifications": "private_entry"} {
+		if storage.DB.Migrator().HasColumn(table, column) {
+			t.Fatalf("unused column %s.%s was created", table, column)
+		}
+	}
 	if err := storage.DB.Create(&model.User{TelegramID: 1, Username: "player", Points: 50}).Error; err != nil {
 		t.Fatal(err)
 	}

@@ -26,10 +26,10 @@ func TestListeningAbuseDoesNotPunishEstimatedMidnightPlayback(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/listening-stats"):
 			fmt.Fprint(w, `{"days":{"2026-10-26":58200,"2026-10-27":54000}}`)
 		case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
-			fmt.Fprint(w, `[
+			fmt.Fprint(w, `{"sessions":[
     {"id":"previous","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T00:00:00+08:00","updatedAt":"2026-10-26T16:00:00+08:00","timeListening":57600},
     {"id":"cross","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T23:50:00+08:00","updatedAt":"2026-10-27T00:10:00+08:00","timeListening":600},
-    {"id":"target","userId":"abs1","date":"2026-10-27","startedAt":"2026-10-27T08:00:00+08:00","updatedAt":"2026-10-27T23:00:00+08:00","timeListening":54000}]`)
+    {"id":"target","userId":"abs1","date":"2026-10-27","startedAt":"2026-10-27T08:00:00+08:00","updatedAt":"2026-10-27T23:00:00+08:00","timeListening":54000}]}`)
 		default:
 			t.Errorf("unexpected request (possible freeze): %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -126,7 +126,7 @@ func TestSecretRealmUsesHistoricalRetreatTotalAndFailsClosed(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"days": map[string]float64{day: 8 * 3600}})
 			return
 		}
-		fmt.Fprint(w, `[]`)
+		fmt.Fprint(w, `{"sessions":[]}`)
 	}))
 	defer server.Close()
 	abs.DefaultClient = &abs.AbsClient{BaseURL: server.URL, Token: "test", HttpClient: server.Client()}
@@ -190,7 +190,7 @@ func TestListeningAbuseProvesMissingOfficialDates(t *testing.T) {
 				case strings.HasSuffix(r.URL.Path, "/listening-stats"):
 					fmt.Fprint(w, tc.stats)
 				case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
-					fmt.Fprint(w, tc.sessions)
+					fmt.Fprint(w, `{"sessions":`+tc.sessions+`}`)
 				case r.URL.Path == "/api/users/abs1" && r.Method == http.MethodGet:
 					fmt.Fprint(w, `{"id":"abs1","username":"user1","type":"user","permissions":{},"librariesAccessible":[]}`)
 				case r.URL.Path == "/api/users/abs1" && r.Method == http.MethodPatch:

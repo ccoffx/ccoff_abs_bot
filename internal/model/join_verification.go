@@ -15,7 +15,6 @@ type JoinVerification struct {
 	Deadline            time.Time `gorm:"index"`
 	MessageID           int
 	PrivateMessageID    int
-	PrivateEntry        bool
 	Confirmed           bool
 	OriginalPermissions string
 	OriginalUntil       int64
