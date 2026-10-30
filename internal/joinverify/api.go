@@ -90,6 +90,9 @@ func (s *Service) restrict(userID int64, p permissions, until int64) error {
 	return s.call("restrictChatMember", q, nil)
 }
 func (s *Service) Validate() error {
+	if strings.TrimSpace(s.botUsername) == "" {
+		return fmt.Errorf("JOIN_VERIFY requires the Bot username for private verification links")
+	}
 	var g chat
 	if err := s.call("getChat", params(s.groupID, 0), &g); err != nil {
 		return err

@@ -230,6 +230,7 @@ func renderSuperAdminMenu(key string) (string, tgbotapi.InlineKeyboardMarkup) {
 			adminCmdRow("🛡 用户补偿", "user_compensation"),
 			adminCmdRow("📣 发布服务公告", "service_announcement"),
 			adminCmdRow("📋 频道公告异常", "channel_announcement_status"),
+			adminCmdRow("💬 群关键词回复", "group_replies"),
 			adminCmdRow("🌐 设置线路", "set_lines"),
 			adminCmdRow("邀请码价格", "invite_price"),
 			adminCmdRow("续期卡价格", "renew_price"),
@@ -288,6 +289,7 @@ func adminMenuCommandText(key string) (command string, superOnly bool, ok bool) 
 		"backup":                      {"备份", true},
 		"backup_status":               {"备份状态", true},
 		"set_lines":                   {"设置线路", true},
+		"group_replies":               {"群关键词回复", true},
 	}
 	item, exists := commands[key]
 	if !exists {

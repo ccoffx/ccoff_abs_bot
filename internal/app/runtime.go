@@ -153,7 +153,7 @@ func run(loadConfig func()) {
 		for id := range config.AppConfig.AdminIDs {
 			admins = append(admins, id)
 		}
-		joinVerification = joinverify.New(storage.DB, bot, config.AppConfig.NoticeGroupID, config.AppConfig.JoinVerifyChannelID, bot.Self.ID, config.AppConfig.JoinVerifyChannelURL, admins)
+		joinVerification = joinverify.New(storage.DB, bot, config.AppConfig.NoticeGroupID, config.AppConfig.JoinVerifyChannelID, bot.Self.ID, config.AppConfig.JoinVerifyChannelURL, admins, bot.Self.UserName)
 		if err := joinVerification.Validate(); err != nil {
 			log.Fatalf("入群验证配置或权限检查失败: %s", textfmt.FormatTelegramSendError(err))
 		}
@@ -364,6 +364,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			if handleMenuCallback(bot, cb) {
 				return
 			}
+			if handleGroupReplyCallback(bot, cb) {
+				return
+			}
 			if handleAdminMenuCallback(bot, cb) {
 				return
 			}
@@ -377,6 +380,9 @@ func handlePrivateStartFastPath(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) boo
 		return false
 	}
 	if !telegram.IsTelegramCommandText(msg.Text, "/start") {
+		return false
+	}
+	if joinverify.IsStart(msg.Text) {
 		return false
 	}
 	if activity.IsLotteryStart(msg.Text) {

@@ -19,6 +19,7 @@ import (
 	"ccoff-abs-bot/internal/books"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/game"
+	"ccoff-abs-bot/internal/joinverify"
 	"ccoff-abs-bot/internal/market"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
@@ -40,6 +41,14 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
 	text := strings.TrimSpace(msg.Text)
 	if joinVerification != nil && (len(msg.NewChatMembers) > 0 || msg.LeftChatMember != nil) {
+		return
+	}
+	if msg.Chat.IsPrivate() && joinverify.IsStart(text) {
+		if joinVerification == nil {
+			telegram.SendPlainText(bot, chatID, "入群验证当前未启用。")
+		} else if hint := joinVerification.Start(msg); hint != "" {
+			telegram.SendPlainText(bot, chatID, hint)
+		}
 		return
 	}
 	if joinVerification != nil {
@@ -106,6 +115,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			} else {
 				telegram.ReplyText(bot, chatID, "❌ 拒绝访问：您没有管理员权限。")
 			}
+			return
+		}
+
+		if handleGroupReplyAdminMessage(bot, msg, text) {
 			return
 		}
 
@@ -331,6 +344,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if handleAdminMenuEntry(bot, msg, text) {
+		return
+	}
+
+	if handleGroupKeywordReply(bot, msg, text) {
 		return
 	}
 

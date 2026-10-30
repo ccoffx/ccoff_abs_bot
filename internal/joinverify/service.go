@@ -33,14 +33,15 @@ type Service struct {
 	api                       API
 	groupID, channelID, botID int64
 	channelURL                string
+	botUsername               string
 	admins                    []int64
 	locks                     [64]sync.Mutex
 	wake                      chan struct{}
 	now                       func() time.Time
 }
 
-func New(db *gorm.DB, api API, groupID, channelID, botID int64, channelURL string, admins []int64) *Service {
-	return &Service{db: db, api: api, groupID: groupID, channelID: channelID, botID: botID, channelURL: channelURL, admins: admins, wake: make(chan struct{}, 1), now: time.Now}
+func New(db *gorm.DB, api API, groupID, channelID, botID int64, channelURL string, admins []int64, botUsername string) *Service {
+	return &Service{db: db, api: api, groupID: groupID, channelID: channelID, botID: botID, channelURL: channelURL, botUsername: botUsername, admins: admins, wake: make(chan struct{}, 1), now: time.Now}
 }
 func (s *Service) lock(userID int64) func() {
 	m := &s.locks[uint64(userID)%uint64(len(s.locks))]
@@ -194,7 +195,7 @@ func (s *Service) Sweep() {
 	}
 	// Cleaning prompts is independent of the verification result and retried.
 	var cleanup []model.JoinVerification
-	if err := s.db.Where("group_id = ? AND message_id <> 0 AND state NOT IN ?", s.groupID, strings.Split(activeStates, ",")).Limit(100).Find(&cleanup).Error; err == nil {
+	if err := s.db.Where("group_id = ? AND (message_id <> 0 OR private_message_id <> 0) AND state NOT IN ?", s.groupID, strings.Split(activeStates, ",")).Limit(100).Find(&cleanup).Error; err == nil {
 		for _, r := range cleanup {
 			func() {
 				unlock := s.lock(r.UserID)
@@ -253,6 +254,12 @@ func (s *Service) handleEvent(e tgbotapi.ChatMemberUpdated) error {
 	}
 	was, now := sdkPresent(e.OldChatMember), sdkPresent(e.NewChatMember)
 	if was && !now {
+		if active(r.State) {
+			r.Confirmed = false
+			if err = s.save(&r); err != nil {
+				return err
+			}
+		}
 		_, err = s.ensure(id, "unsubscribe")
 		return err
 	}
@@ -272,7 +279,7 @@ func (s *Service) Check(userID int64) (bool, string) {
 		return false, "⚠️ 关注状态暂时无法确认，请稍后重试。"
 	}
 	if !ok {
-		return false, "⚠️ 请先加入官方群，关注指定频道，并点击群内「我已关注，验证」按钮完成验证。"
+		return false, "⚠️ 请先加入官方群，关注指定频道，并通过群内「去 Bot 验证」入口，在私聊中完成验证。"
 	}
 	return true, ""
 }
@@ -332,6 +339,16 @@ func (s *Service) ensure(userID int64, reason string) (bool, error) {
 		}
 		original = string(data)
 	}
+	if r.PrivateMessageID != 0 {
+		// A failed panel cleanup must not prevent a new verification round.
+		cleanup := model.AutoDeleteMsg{ChatID: userID, MessageID: r.PrivateMessageID, DeleteAt: s.now()}
+		if err := s.db.Create(&cleanup).Error; err != nil {
+			return false, err
+		}
+	}
+	r.PrivateMessageID = 0
+	r.PrivateEntry = false
+	r.Confirmed = false
 	r.GroupID = s.groupID
 	r.UserID = userID
 	r.ChannelID = s.channelID
@@ -394,7 +411,7 @@ func (s *Service) advance(r *model.JoinVerification) error {
 	if err != nil {
 		return err
 	}
-	if c.present() {
+	if c.present() && r.Confirmed {
 		if r.State == "preparing" && g.Status == "restricted" && g.permissions == (permissions{}) && g.UntilDate == 0 {
 			// A previous restrict request may have succeeded with its response lost.
 			r.Muted = true
@@ -404,8 +421,14 @@ func (s *Service) advance(r *model.JoinVerification) error {
 		}
 		return s.restore(r, g)
 	}
+	if !c.present() && r.Confirmed {
+		r.Confirmed = false
+		if err = s.save(r); err != nil {
+			return err
+		}
+	}
 	if r.State == "restoring" {
-		// Subscription was removed while a restore was being retried. Retain the
+		// Confirmation was revoked (or predates private verification). Retain the
 		// original snapshot and deadline, and reapply verification restrictions.
 		r.State = "preparing"
 		r.Muted = false
@@ -462,7 +485,7 @@ func (s *Service) advance(r *model.JoinVerification) error {
 		}
 		return s.unban(r)
 	}
-	if r.MessageID == 0 {
+	if r.MessageID == 0 || !r.PrivateEntry {
 		return s.prompt(r)
 	}
 	return nil
@@ -563,29 +586,146 @@ func (s *Service) finish(r *model.JoinVerification, state, detail string) error 
 	s.cleanup(r)
 	return nil
 }
+
+// IsStart also recognizes malformed verification payloads so they never fall
+// through to the ordinary menu or business sessions.
+func IsStart(text string) bool {
+	parts := strings.Fields(text)
+	return len(parts) >= 2 && strings.Split(parts[0], "@")[0] == "/start" && strings.HasPrefix(parts[1], "jv_")
+}
+func messageMissing(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "message to edit not found")
+}
+func messageUnchanged(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "message is not modified")
+}
+func (s *Service) reason(r *model.JoinVerification) string {
+	switch r.Reason {
+	case "join":
+		return "请完成频道关注验证。"
+	case "unsubscribe":
+		return "检测到你已取消关注指定频道，群内发言已暂停，请重新关注并完成验证。"
+	default:
+		return "使用本群服务需要关注指定频道，请完成验证。"
+	}
+}
+func (s *Service) remaining(r *model.JoinVerification) int {
+	n := int(r.Deadline.Sub(s.now()).Seconds())
+	if n < 0 {
+		return 0
+	}
+	return n
+}
 func (s *Service) prompt(r *model.JoinVerification) error {
 	q := params(s.groupID, 0)
-	q["text"] = fmt.Sprintf("<a href=\"tg://user?id=%d\">新成员</a>，请在 2 分钟内关注指定频道，关注后点击「我已关注，验证」。超时将被移出群，可重新加入。", r.UserID)
+	q["text"] = fmt.Sprintf("<a href=\"tg://user?id=%d\">成员</a>，%s\n剩余 %d 秒，请前往 Bot 私聊关注频道并点击验证。超时将被移出群，可重新加入。", r.UserID, s.reason(r), s.remaining(r))
 	q["parse_mode"] = "HTML"
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL("前往关注频道", s.channelURL)),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("我已关注，验证", CallbackPrefix+r.Round)),
-	)
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonURL("去 Bot 验证", "https://t.me/"+s.botUsername+"?start=jv_"+r.Round)))
 	data, err := json.Marshal(keyboard)
 	if err != nil {
 		return err
 	}
 	q["reply_markup"] = string(data)
+	method := "sendMessage"
+	if r.MessageID != 0 {
+		method = "editMessageText"
+		q["message_id"] = strconv.Itoa(r.MessageID)
+	}
 	var msg struct {
 		MessageID int `json:"message_id"`
 	}
-	if err = s.call("sendMessage", q, &msg); err != nil {
-		return err
+	if err = s.call(method, q, &msg); err != nil && !messageUnchanged(err) {
+		if method != "editMessageText" || !messageMissing(err) {
+			return err
+		}
+		delete(q, "message_id")
+		if err = s.call("sendMessage", q, &msg); err != nil {
+			return err
+		}
+		r.MessageID = 0
 	}
-	r.MessageID = msg.MessageID
+	if r.MessageID == 0 {
+		r.MessageID = msg.MessageID
+	}
+	r.PrivateEntry = true
 	return s.save(r)
 }
+
+// Start opens a panel only for the owner of the current durable round.
+func (s *Service) Start(msg *tgbotapi.Message) string {
+	if msg == nil || msg.From == nil || msg.Chat == nil || !msg.Chat.IsPrivate() || msg.Chat.ID != msg.From.ID || !IsStart(msg.Text) {
+		return "验证入口无效。"
+	}
+	unlock := s.lock(msg.From.ID)
+	defer unlock()
+	parts := strings.Fields(msg.Text)
+	r, err := s.record(msg.From.ID)
+	if err != nil || len(parts) != 2 || parts[1] != "jv_"+r.Round {
+		return "此验证仅限本人操作，或本轮验证已失效。"
+	}
+	if !active(r.State) {
+		return "本轮验证已结束。"
+	}
+	if !s.now().Before(r.Deadline) {
+		return "本轮验证已超时，请等待处理；被移出后可重新加入。"
+	}
+	q := params(r.UserID, 0)
+	q["text"] = fmt.Sprintf("%s\n剩余 %d 秒。关注后请点击「我已关注，验证」。超时将被移出群，可重新加入。", s.reason(&r), s.remaining(&r))
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL("前往关注频道", s.channelURL)),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("我已关注，验证", CallbackPrefix+r.Round)))
+	data, _ := json.Marshal(keyboard)
+	q["reply_markup"] = string(data)
+	method := "sendMessage"
+	if r.PrivateMessageID != 0 {
+		method = "editMessageText"
+		q["message_id"] = strconv.Itoa(r.PrivateMessageID)
+	}
+	var out struct {
+		MessageID int `json:"message_id"`
+	}
+	if err = s.call(method, q, &out); method == "editMessageText" && messageMissing(err) {
+		delete(q, "message_id")
+		err = s.call("sendMessage", q, &out)
+		if err == nil {
+			r.PrivateMessageID = 0
+		}
+	}
+	if err != nil && !messageUnchanged(err) {
+		s.failure(&r, err)
+		return "验证面板暂时无法打开，请重新点击群内入口。"
+	}
+	if r.PrivateMessageID == 0 {
+		r.PrivateMessageID = out.MessageID
+	}
+	if err = s.save(&r); err != nil {
+		return "验证面板暂时无法保存，请重新点击群内入口。"
+	}
+	return ""
+}
 func (s *Service) cleanup(r *model.JoinVerification) {
+	if r.PrivateMessageID != 0 {
+		q := params(r.UserID, 0)
+		q["message_id"] = strconv.Itoa(r.PrivateMessageID)
+		q["text"] = "本轮验证已结束。"
+		if r.State == "passed" {
+			q["text"] = "验证通过，已恢复验证前的群权限。"
+		}
+		if r.State == "expired" {
+			q["text"] = "验证超时，已移出群，可重新加入。"
+		}
+		q["reply_markup"] = `{"inline_keyboard":[]}`
+		err := s.call("editMessageText", q, nil)
+		if err == nil || messageUnchanged(err) || strings.Contains(strings.ToLower(err.Error()), "message to edit not found") {
+			r.PrivateMessageID = 0
+			if err := s.save(r); err != nil {
+				log.Printf("private verification cleanup persistence: %s", textfmt.FormatPlainError(err))
+			}
+		} else {
+			log.Printf("private verification cleanup: %s", textfmt.FormatTelegramSendError(err))
+		}
+	}
 	if r.MessageID == 0 {
 		return
 	}
@@ -602,27 +742,53 @@ func (s *Service) cleanup(r *model.JoinVerification) {
 	}
 }
 func (s *Service) Callback(cb *tgbotapi.CallbackQuery) string {
-	if cb == nil || cb.From == nil || cb.Message == nil || cb.Message.Chat == nil || cb.Message.Chat.ID != s.groupID {
+	if cb == nil || cb.From == nil || cb.Message == nil || cb.Message.Chat == nil || (cb.Message.Chat.ID != s.groupID && (!cb.Message.Chat.IsPrivate() || cb.Message.Chat.ID != cb.From.ID)) {
 		return "验证消息无效。"
 	}
 	unlock := s.lock(cb.From.ID)
 	defer unlock()
 	r, err := s.record(cb.From.ID)
-	if err != nil || r.Round != strings.TrimPrefix(cb.Data, CallbackPrefix) || r.MessageID != cb.Message.MessageID {
+	if err != nil || !strings.HasPrefix(cb.Data, CallbackPrefix) || r.Round != strings.TrimPrefix(cb.Data, CallbackPrefix) {
 		return "此验证仅限本人操作，或本轮验证已失效。"
+	}
+	if cb.Message.Chat.ID == s.groupID {
+		return "请点击群内「去 Bot 验证」入口，在私聊中完成验证。"
 	}
 	if !active(r.State) {
 		return "本轮验证已结束。"
 	}
+	if r.PrivateMessageID == 0 || r.PrivateMessageID != cb.Message.MessageID {
+		return "验证面板已失效，请重新点击群内入口。"
+	}
 	if !s.now().Before(r.Deadline) {
 		return "本轮验证已超时，请等待处理；被移出后可重新加入。"
+	}
+	c, err := s.getMember(s.channelID, r.UserID)
+	if err != nil {
+		return "关注状态暂时无法确认，请稍后重试。"
+	}
+	if !c.present() {
+		if r.Confirmed {
+			r.Confirmed = false
+			if err = s.save(&r); err != nil {
+				return "验证暂时失败，请稍后重试。"
+			}
+		}
+		return "尚未确认关注，请先关注频道，再点击验证。"
+	}
+	if !s.now().Before(r.Deadline) {
+		return "本轮验证已超时，请等待处理；被移出后可重新加入。"
+	}
+	r.Confirmed = true
+	if err = s.save(&r); err != nil {
+		return "验证暂时失败，请稍后重试。"
 	}
 	if err = s.advance(&r); err != nil {
 		s.failure(&r, err)
 		return "验证暂时失败，请稍后重试。"
 	}
 	if r.State == "passed" {
-		return "✅ 验证成功，欢迎加入！"
+		return "✅ 验证通过，已恢复验证前的群权限。"
 	}
-	return "尚未确认关注，请先关注频道，再点击验证。"
+	return "验证正在处理，请稍后重试。"
 }

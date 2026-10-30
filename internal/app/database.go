@@ -59,6 +59,7 @@ func InitDB() {
 	if err := storage.DB.AutoMigrate(
 		&model.AnnouncementDelivery{},
 		&model.JoinVerification{},
+		&model.GroupReply{},
 		&model.JoinVerificationEvent{},
 		&model.User{},
 		&model.InviteCode{},

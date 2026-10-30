@@ -6,6 +6,7 @@ import "strings"
 var BotCommandNames = []string{
 	"/",
 	"/lottery",
+	"/start",
 	"Boss排行",
 	"Boss状态",
 	"⚙️ 系统配置",
@@ -135,6 +136,7 @@ var BotCommandNames = []string{
 	"结算宗门周目标",
 	"结算宗门秘境",
 	"续期",
+	"群关键词回复",
 	"聚宝斋",
 	"聚气化旋",
 	"背包",

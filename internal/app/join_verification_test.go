@@ -39,7 +39,7 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 		var result any = true
 		switch method {
 		case "getMe":
-			result = map[string]any{"id": 999, "is_bot": true, "first_name": "test"}
+			result = map[string]any{"id": 999, "is_bot": true, "first_name": "test", "username": "testbot"}
 		case "getChatMember":
 			if r.Form.Get("chat_id") == "-200" {
 				status := "left"
@@ -73,7 +73,7 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	joinVerification = joinverify.New(storage.DB, bot, -100, -200, 999, "https://t.me/example", nil)
+	joinVerification = joinverify.New(storage.DB, bot, -100, -200, 999, "https://t.me/example", nil, "testbot")
 	telegram.ClearSession(1)
 	defer telegram.ClearSession(1)
 	handleInteractiveMessage(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: "/start"})
@@ -119,7 +119,15 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	mu.Lock()
 	following = true
 	mu.Unlock()
-	if got := send(joinverify.CallbackPrefix+record.Round, -100); !strings.Contains(got, "成功") {
+	if got := send(joinverify.CallbackPrefix+record.Round, -100); !strings.Contains(got, "私聊") {
+		t.Fatalf("legacy group callback was accepted: %s", got)
+	}
+	start := &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: "/start jv_" + record.Round}
+	if handlePrivateStartFastPath(bot, start) {
+		t.Fatal("verification start consumed by main menu fast path")
+	}
+	handleInteractiveMessage(bot, start)
+	if got := send(joinverify.CallbackPrefix+record.Round, 1); !strings.Contains(got, "验证通过") {
 		t.Fatalf("verification callback could not bypass business gate: %s", got)
 	}
 }
