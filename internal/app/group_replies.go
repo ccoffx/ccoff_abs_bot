@@ -144,7 +144,7 @@ func showGroupReplies(bot *tgbotapi.BotAPI, chatID int64, page int) {
 		rows = append(rows, groupReplyButton("下一页", fmt.Sprintf("list:%d", page+1)))
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("返回系统配置", "admin:config")))
-	sendGroupReplyPanel(bot, chatID, fmt.Sprintf("群关键词回复（共 %d 条，第 %d/%d 页）\n\n仅在官方群触发；整条消息完全匹配，忽略首尾空格，区分大小写。现有指令和活动口令优先。\n点击规则可修改、启停或删除。", count, page+1, last+1), rows)
+	sendGroupReplyPanel(bot, chatID, fmt.Sprintf("群关键词回复（共 %d 条，第 %d/%d 页）\n\n仅在官方群触发；整条消息完全匹配，忽略首尾空格，区分大小写。现有业务指令优先。\n点击规则可修改、启停或删除。", count, page+1, last+1), rows)
 }
 func showGroupReply(bot *tgbotapi.BotAPI, chatID int64, id uint) {
 	var r model.GroupReply

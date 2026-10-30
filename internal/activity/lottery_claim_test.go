@@ -52,6 +52,7 @@ type claimMessage struct {
 	ChatID   int64
 	Text     string
 	Entities []tgbotapi.MessageEntity
+	Markup   string
 }
 type claimBotCapture struct {
 	mu       sync.Mutex
@@ -78,7 +79,7 @@ func newClaimBot(t *testing.T) (*tgbotapi.BotAPI, *claimBotCapture) {
 			t.Error(err)
 		}
 		id, _ := strconv.ParseInt(r.Form.Get("chat_id"), 10, 64)
-		msg := claimMessage{ChatID: id, Text: r.Form.Get("text")}
+		msg := claimMessage{ChatID: id, Text: r.Form.Get("text"), Markup: r.Form.Get("reply_markup")}
 		if raw := r.Form.Get("entities"); raw != "" {
 			if err := json.Unmarshal([]byte(raw), &msg.Entities); err != nil {
 				t.Error(err)
@@ -126,42 +127,31 @@ func assertRewardCount(t *testing.T, modelType interface{}, want int64) {
 func TestLotteryClaimIsOwnerOnlyAndPrivate(t *testing.T) {
 	setupKeywordDB(t)
 	_, winner := seedClaimReward(t, 101, lotteryPrizePoints, 20, time.Now().Add(time.Hour))
-	bot, capture := newClaimBot(t)
+	bot, _ := newClaimBot(t)
 	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 101}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}}
-	if !HandleLotteryClaimCommand(bot, msg, lotteryClaimCommand) {
-		t.Fatal("group command not routed")
+	HandleLotteryStart(bot, msg, "/start lottery_claim")
+	if reloadWinner(t, winner.ID).Status != lotteryWinnerPending {
+		t.Fatal("group awarded reward")
 	}
-	if got := reloadWinner(t, winner.ID); got.Status != lotteryWinnerPending {
-		t.Fatal("group command awarded reward")
-	}
-	out := capture.snapshot()
-	if !strings.Contains(out[0].Text, "Start") || !strings.Contains(out[0].Text, "领取奖励") || len(out[0].Entities) == 0 {
-		t.Fatalf("missing private/copy instructions: %+v", out)
-	}
-	// Another account cannot claim or discover the owner's prize.
 	msg.From.ID = 102
 	msg.Chat = &tgbotapi.Chat{ID: 102, Type: "private"}
-	HandleLotteryClaimCommand(bot, msg, lotteryClaimCommand)
-	if got := reloadWinner(t, winner.ID); got.Status != lotteryWinnerPending {
+	HandleLotteryStart(bot, msg, "/start lottery_claim")
+	if reloadWinner(t, winner.ID).Status != lotteryWinnerPending {
 		t.Fatal("another account claimed prize")
 	}
-	// No start flag is required for group participation. Receiving this private
-	// command is sufficient after the winner opens/starts the Bot.
 	msg.From.ID = 101
 	msg.Chat = &tgbotapi.Chat{ID: 101, Type: "private"}
 	session := &telegram.SessionState{}
 	session.SetStep("WAITING_MARKET_PRICE")
-	if !HandleLotteryCommand(bot, msg, lotteryClaimCommand, session, "user") {
-		t.Fatal("claim was swallowed by form")
+	if HandleLotteryCommand(bot, msg, "领取奖励", session, "user") {
+		t.Fatal("text claim route still active")
 	}
+	HandleLotteryStart(bot, msg, "/start lottery_claim")
 	if got := reloadWinner(t, winner.ID); got.Status != lotteryWinnerClaimed || got.RewardDeliveredAt == nil {
 		t.Fatalf("private claim failed: %+v", got)
 	}
 	if session.GetStep() != "WAITING_MARKET_PRICE" {
 		t.Fatal("claim discarded the form")
-	}
-	if HandleLotteryCommand(bot, msg, "抽奖领奖 旧暗号", session, "user") {
-		t.Fatal("old claim route still active")
 	}
 }
 
@@ -370,7 +360,7 @@ func TestLotteryDrawAnnouncementExplainsClaimDespitePrivateFailure(t *testing.T)
 				t.Fatalf("announcement lacks %q: %q", s, msg.Text)
 			}
 		}
-		if strings.Contains(msg.Text, "已私聊") || strings.Contains(msg.Text, "暗号") || strings.Contains(msg.Text, "礼品`卡") || len(msg.Entities) == 0 {
+		if strings.Contains(msg.Text, "已私聊") || strings.Contains(msg.Text, "暗号") || strings.Contains(msg.Text, "礼品`卡") || !strings.Contains(msg.Markup, "lottery_claim") {
 			t.Fatalf("misleading/leaking announcement: %+v", msg)
 		}
 	}
@@ -402,7 +392,7 @@ func TestLotteryWizardGoesDirectlyToPrizes(t *testing.T) {
 	session.SetTemp("lottery_mode", lotteryModeCount)
 	session.SetTemp("lottery_limit", "10")
 	confirmation := formatLotteryCreateConfirm(session, []lotteryPrizeSpec{})
-	if !strings.Contains(confirmation, "24 小时") || !strings.Contains(confirmation, lotteryClaimCommand) || strings.Contains(confirmation, "暗号") {
+	if !strings.Contains(confirmation, "24 小时") || !strings.Contains(confirmation, "领取奖励") || strings.Contains(confirmation, "暗号") {
 		t.Fatalf("incorrect confirmation: %s", confirmation)
 	}
 }
@@ -446,9 +436,7 @@ func TestLotteryUnstartedParticipantClaimsAfterActualDraw(t *testing.T) {
 	assertRewardCount(t, &model.PointTransaction{}, 0)
 	capture.setFailure(0)
 	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 101}, Chat: &tgbotapi.Chat{ID: 101, Type: "private"}}
-	if !HandleLotteryClaimCommand(bot, msg, lotteryClaimCommand) {
-		t.Fatal("winner could not claim after opening Bot")
-	}
+	HandleLotteryStart(bot, msg, "/start lottery_claim")
 	var user model.User
 	if err := db.Where("telegram_id = ?", 101).First(&user).Error; err != nil {
 		t.Fatal(err)

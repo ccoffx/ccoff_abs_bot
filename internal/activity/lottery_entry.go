@@ -27,6 +27,9 @@ func IsLotteryStart(text string) bool {
 	return strings.HasPrefix(p, "lottery_")
 }
 func HandleLotteryStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) {
+	if bot == nil || msg == nil || msg.From == nil || msg.Chat == nil || !msg.Chat.IsPrivate() || msg.Chat.ID != msg.From.ID {
+		return
+	}
 	p := lotteryStartPayload(text)
 	if p == "lottery_claim" {
 		claimAllLotteryRewards(bot, msg.Chat.ID, msg.From.ID)
@@ -87,4 +90,14 @@ func HandleLotteryEntryCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery
 	telegram.AnswerCallback(bot, cb.ID, "正在确认参与结果。")
 	joinLotteryByID(bot, &tgbotapi.Message{From: cb.From, Chat: cb.Message.Chat}, uint(id))
 	return true
+}
+
+func lotteryLinkRow(bot *tgbotapi.BotAPI, label, payload string) []tgbotapi.InlineKeyboardButton {
+	return tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(label, "https://t.me/"+bot.Self.UserName+"?start="+payload))
+}
+
+func sendLotteryButtonText(bot *tgbotapi.BotAPI, chatID int64, text, label, payload string) (tgbotapi.Message, error) {
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(lotteryLinkRow(bot, label, payload))
+	return telegram.SendNoAutoDelete(bot, m)
 }

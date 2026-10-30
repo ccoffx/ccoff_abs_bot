@@ -8,7 +8,20 @@
 
 镜像位置为 `ghcr.io/huliyoudiangou/yueer_abs_bot`。候选首次创建后，在 GitHub Packages 中确认可见性为 **Private**，授予仓库 Actions 对该包的写入权限。工作流使用自带 `GITHUB_TOKEN`，无需配置正式设备的 SSH 或 Bot/ABS 密钥。
 
-在 Mac 用独立测试 Bot 验收完整 SHA。然后在 GitHub Actions 手动运行 **Promote tested candidate**，选择 main，填写该 40 位 SHA、全新的 `v1.0.0` 等版本号，并确认已完成私聊验收、当前结构首次建库和重启验证。
+在 Mac 用独立测试 Bot 验收完整 SHA，完成当前结构首次建库和重启验证后，可直接在仓库目录用终端发版，无需打开 GitHub Actions：
+
+```sh
+# 首次安装和登录
+brew install gh
+gh auth login
+
+# 将待发布提交推送到 main，等待完整候选 CI 成功后执行
+./scripts/release.sh v1.0.1
+```
+
+脚本发布本地当前 `HEAD`，自动识别 GitHub 仓库、检查工作区无未提交改动、版本未被使用，以及该提交的 main 分支候选 CI 已成功。核对终端展示的仓库、完整 SHA 和候选 CI，并确认已完成上述人工验收后，输入版本号即可触发发布。脚本不会自动提交或推送代码，也不会执行正式设备更新。提交任务后，可按终端提示查看进度；任务提交成功不代表发布已完成。
+
+也可继续在 GitHub Actions 手动运行 **Promote tested candidate**，选择 main，填写完整 SHA、全新版本号及两项验收确认。
 
 发布工作流只接受主分支成功候选，从该次构建下载 digest 和部署包，复用镜像 manifest，不重新构建。已存在的版本拒绝覆盖。Release 附件包括：
 

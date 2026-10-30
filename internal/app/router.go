@@ -143,10 +143,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	if activity.HandleLotteryClaimCommand(bot, msg, text) {
-		return
-	}
-
 	if HandleChannelAnnouncementCommand(bot, msg, text) {
 		return
 	}

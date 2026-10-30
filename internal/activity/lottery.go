@@ -49,11 +49,9 @@ const (
 	lotteryPrizeCustomCode = "custom_code"
 
 	lotteryClaimValidDuration = 24 * time.Hour
-	lotteryClaimCommand       = "领取奖励"
 
-	lotteryTitleRequirementText = "2-60 个字，且不能包含换行、制表符或其他控制/分隔字符"
-	lotteryCustomCodeMaxRunes   = 200
-	lotteryPrizeNameMaxRunes    = 80
+	lotteryCustomCodeMaxRunes = 200
+	lotteryPrizeNameMaxRunes  = 80
 )
 
 func createLotteryClaimLogInTx(tx *gorm.DB, logEntry *model.LotteryClaimLog) error {
@@ -86,16 +84,13 @@ func createLotteryActivityInTx(tx *gorm.DB, activity *model.LotteryActivity) err
 		}
 	}
 	entry.Title = textfmt.LotteryDisplayText(entry.Title, 80, "-")
-	entry.JoinKeyword = strings.TrimSpace(entry.JoinKeyword)
+	entry.JoinKeyword = "" // Historical keywords are no longer used.
 	entry.Mode = textfmt.FormatPlainValue(entry.Mode)
 	entry.Status = textfmt.FormatPlainValue(entry.Status)
 	entry.CreatedBy = textfmt.FormatPlainValue(entry.CreatedBy)
 	entry.ResultNote = textfmt.FormatPlainValue(entry.ResultNote)
 	res := tx.Create(&entry)
 	if res.Error != nil {
-		if storage.IsUniqueConstraintError(res.Error) {
-			return fmt.Errorf("参与口令正在使用，请更换后重新创建")
-		}
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
@@ -216,9 +211,6 @@ func HandleLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text stri
 		return false
 	}
 
-	if HandleLotteryClaimCommand(bot, msg, text) {
-		return true
-	}
 	step := session.GetStep()
 	if strings.HasPrefix(step, "WAITING_LOTTERY_") {
 		handleLotteryCreateStep(bot, msg, text, session, role)
@@ -232,19 +224,11 @@ func HandleLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text stri
 		return false
 	}
 
-	if step == "IDLE" && handleLotteryKeyword(bot, msg, trimmed) {
-		return true
-	}
-
 	if !msg.Chat.IsPrivate() {
 		switch {
 		case trimmed == "/lottery" || trimmed == "积分抽奖" || trimmed == "抽奖列表":
 			telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
 			showActiveLotteries(bot, chatID)
-			return true
-		case strings.HasPrefix(trimmed, "参加抽奖") || strings.HasPrefix(trimmed, "/join_lottery"):
-			telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
-			handleJoinLotteryCommand(bot, msg, trimmed)
 			return true
 		}
 		return false
@@ -274,9 +258,6 @@ func HandleLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text stri
 	case trimmed == "/lottery" || trimmed == "积分抽奖" || trimmed == "抽奖列表":
 		showLotteryList(bot, chatID, role == "super_admin")
 		return true
-	case strings.HasPrefix(trimmed, "参加抽奖") || strings.HasPrefix(trimmed, "/join_lottery"):
-		handleJoinLotteryCommand(bot, msg, trimmed)
-		return true
 	default:
 		return false
 	}
@@ -287,8 +268,8 @@ func startLotteryCreateWizard(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, sessi
 		return
 	}
 	session.SetTemp("lottery_title", "积分抽奖 "+time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05"))
-	session.SetStep("WAITING_LOTTERY_JOIN_KEYWORD")
-	telegram.SendPlainText(bot, msg.Chat.ID, "🎲 创建积分抽奖\n\n活动名称自动生成。第一步：请设置参与口令（2–40 个字），例如："+textfmt.Copyable("秋日好运")+"。\n不得使用 Bot 指令、纯数字或控制字符。\n发送“"+textfmt.Copyable("取消")+"”可退出。")
+	session.SetStep("WAITING_LOTTERY_MODE")
+	telegram.SendPlainText(bot, msg.Chat.ID, "🎲 创建积分抽奖\n\n活动名称自动生成，用户通过按钮参与和领奖。\n第一步：请选择开奖模式。\n\n发送："+textfmt.Copyable("人数")+"\n或发送："+textfmt.Copyable("时间")+"\n发送“"+textfmt.Copyable("取消")+"”可退出。")
 	telegram.UserSessions.Store(msg.From.ID, session)
 }
 
@@ -299,7 +280,7 @@ func showLotteryAdminHelp(bot *tgbotapi.BotAPI, chatID int64) {
 	for _, command := range commands {
 		b.WriteString(textfmt.Copyable(command) + "\n")
 	}
-	b.WriteString("\n用户参与：直接发送对应活动的参与口令。\n兼容旧指令模板：" + textfmt.Copyable("参加抽奖 活动ID") + "\n私聊领奖：" + textfmt.Copyable(lotteryClaimCommand))
+	b.WriteString("\n用户点击活动按钮参与，中奖后点击「领取奖励」按钮私聊领奖。")
 	telegram.SendPlainText(bot, chatID, b.String())
 }
 
@@ -321,52 +302,17 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 	}
 
 	switch session.GetStep() {
-	case "WAITING_LOTTERY_TITLE":
-		if !validLotteryTitle(text) {
-			telegram.SendPlainText(bot, chatID, "活动名称需为"+lotteryTitleRequirementText+"，请重新发送：")
-			return
-		}
-		session.SetTemp("lottery_title", text)
-		session.SetStep("WAITING_LOTTERY_JOIN_KEYWORD")
-		telegram.SendPlainText(bot, chatID, "第二步：请设置公开的参与口令，2–40 个字，例如："+textfmt.Copyable("秋日好运")+"。\n不得使用 Bot 指令、纯数字或控制字符。\n活动结束后可复用，但旧公告的口令也会对应新活动。\n发送“"+textfmt.Copyable("取消")+"”可退出。")
-
-	case "WAITING_LOTTERY_JOIN_KEYWORD":
-		if err := validateLotteryJoinKeyword(text); err != nil {
-			telegram.SendPlainText(bot, chatID, "❌ "+err.Error())
-			return
-		}
-		var existing model.LotteryActivity
-		err := storage.DB.Where("join_keyword = ? AND status IN ?", text, []string{lotteryStatusActive, lotteryStatusDrawing}).First(&existing).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			telegram.SendPlainText(bot, chatID, "❌ 参与口令校验失败，请稍后重试。")
-			return
-		}
-		if err == nil {
-			message := fmt.Sprintf("❌ 参与口令正在使用：抽奖 #%d《%s》，状态：%s。\n请发送 %s 查看，或换一个口令。", existing.ID, textfmt.LotteryDisplayText(existing.Title, 80, "-"), lotteryStatusText(existing.Status), textfmt.Copyable(fmt.Sprintf("抽奖详情 %d", existing.ID)))
-			if existing.Status == lotteryStatusDrawing {
-				message += fmt.Sprintf("\n若长期停留在开奖中，可发送 %s 重试未完成的开奖。", textfmt.Copyable(fmt.Sprintf("强制开奖 %d", existing.ID)))
-			}
-			if existing.Status == lotteryStatusActive && existing.Mode == lotteryModeTime && existing.DrawAt != nil && !existing.DrawAt.After(time.Now()) {
-				message += "\n该活动已到开奖时间，但尚未完成开奖，仍占用口令。请检查开奖是否失败，或使用“强制开奖 活动ID”重试。"
-			}
-			telegram.SendPlainText(bot, chatID, message)
-			return
-		}
-		session.SetTemp("lottery_join_keyword", text)
-		session.SetStep("WAITING_LOTTERY_MODE")
-		telegram.SendPlainText(bot, chatID, "第二步：请选择开奖模式。\n\n发送："+textfmt.Copyable("人数")+"\n或发送："+textfmt.Copyable("时间"))
-
 	case "WAITING_LOTTERY_MODE":
 		if text == "人数" || text == "1" {
 			session.SetTemp("lottery_mode", lotteryModeCount)
 			session.SetStep("WAITING_LOTTERY_LIMIT")
-			telegram.SendPlainText(bot, chatID, "第三步：请输入满多少人开奖，范围 2-100000：")
+			telegram.SendPlainText(bot, chatID, "第二步：请输入满多少人开奖，范围 2-100000：")
 			return
 		}
 		if text == "时间" || text == "2" {
 			session.SetTemp("lottery_mode", lotteryModeTime)
 			session.SetStep("WAITING_LOTTERY_DRAW_MINUTES")
-			telegram.SendPlainText(bot, chatID, "第三步：请输入开奖时间。\n\n支持两种格式：\n"+"1. 分钟数"+"，例如："+textfmt.Copyable("60")+"\n2. 固定时间，例如："+textfmt.Copyable("2026-06-07 20:00:00"))
+			telegram.SendPlainText(bot, chatID, "第二步：请输入开奖时间。\n\n支持两种格式：\n"+"1. 分钟数"+"，例如："+textfmt.Copyable("60")+"\n2. 固定时间，例如："+textfmt.Copyable("2026-06-07 20:00:00"))
 			return
 		}
 		telegram.SendPlainText(bot, chatID, "模式不识别，请发送“"+textfmt.Copyable("人数")+"”或“"+textfmt.Copyable("时间")+"”。")
@@ -379,7 +325,7 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 		}
 		session.SetTemp("lottery_limit", strconv.Itoa(limit))
 		session.SetStep("WAITING_LOTTERY_ENTRY_COST")
-		telegram.SendPlainText(bot, chatID, "第四步：请输入参与消耗积分，0 表示免费，范围 0-10000：")
+		telegram.SendPlainText(bot, chatID, "第三步：请输入参与消耗积分，0 表示免费，范围 0-10000：")
 
 	case "WAITING_LOTTERY_DRAW_MINUTES":
 		drawAt, drawDesc, err := textfmt.ParseLotteryDrawTimeInput(text, time.Now())
@@ -390,7 +336,7 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 		session.SetTemp("lottery_draw_at", strconv.FormatInt(drawAt.Unix(), 10))
 		session.SetTemp("lottery_draw_desc", drawDesc)
 		session.SetStep("WAITING_LOTTERY_ENTRY_COST")
-		telegram.SendPlainText(bot, chatID, "第四步：请输入参与消耗积分，0 表示免费，范围 0-10000：")
+		telegram.SendPlainText(bot, chatID, "第三步：请输入参与消耗积分，0 表示免费，范围 0-10000：")
 
 	case "WAITING_LOTTERY_ENTRY_COST":
 		entryCost, err := strconv.Atoi(text)
@@ -401,7 +347,7 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 		session.SetTemp("lottery_entry_cost", strconv.Itoa(entryCost))
 		session.SetStep("WAITING_LOTTERY_PRIZES")
 		telegram.SendPlainText(bot, chatID,
-			"第五步：请发送奖品配置，每行一个奖品。\n\n"+
+			"第四步：请发送奖品配置，每行一个奖品。\n\n"+
 				"格式示例（可整块复制后修改）：\n"+
 				textfmt.Copyable("积分 100 3\n续期 30 2\n邀请码 1\n丹药 回气丹 1\n人工 实体纪念品 2\n卡密 Steam礼品卡|AAAA-BBBB-CCCC")+"\n\n"+
 				"说明：\n"+
@@ -409,8 +355,8 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 				"续期 30 2 = 30 天续期卡 2 份\n"+
 				"邀请码 1 = 邀请码 1 份\n"+
 				"丹药 回气丹 1 = 回气丹 1 份\n"+
-				"人工 实体纪念品 2 = 中奖者发送 "+textfmt.Copyable(lotteryClaimCommand)+" 确认后联系管理员领奖\n"+
-				"卡密 奖品名称|卡密内容 = 每行导入一份自定义卡密；卡密只加密保存，中奖者私聊发送 "+textfmt.Copyable(lotteryClaimCommand)+" 领取")
+				"人工 实体纪念品 2 = 中奖者点击「领取奖励」按钮确认后联系管理员领奖\n"+
+				"卡密 奖品名称|卡密内容 = 每行导入一份自定义卡密；卡密只加密保存，中奖者点击「领取奖励」按钮私聊领取")
 
 	case "WAITING_LOTTERY_PRIZES":
 		specs, err := parseLotteryPrizeSpecs(text)
@@ -435,18 +381,9 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 			return
 		}
 		telegram.ClearSession(userID)
-		telegram.SendPlainText(bot, chatID, fmt.Sprintf("✅ 积分抽奖创建成功，活动 ID：%d\n\n用户可在群聊或私聊发送："+textfmt.Copyable("%s"), activityID, textfmt.Copyable(session.GetTemp("lottery_join_keyword"))))
+		telegram.SendPlainText(bot, chatID, fmt.Sprintf("✅ 积分抽奖创建成功，活动 ID：%d\n\n用户点击活动按钮参与和领奖。", activityID))
 		announceLotteryCreated(bot, chatID, activityID)
 	}
-}
-
-func validLotteryTitle(title string) bool {
-	title = strings.TrimSpace(title)
-	titleLen := len([]rune(title))
-	if titleLen < 2 || titleLen > 60 {
-		return false
-	}
-	return !textfmt.ContainsDisallowedControl(title, false)
 }
 
 func parseLotteryPrizeSpecs(raw string) ([]lotteryPrizeSpec, error) {
@@ -663,7 +600,6 @@ func formatLotteryCreateConfirm(session *telegram.SessionState, specs []lotteryP
 	var b strings.Builder
 	b.WriteString("请核对抽奖活动：\n\n")
 	b.WriteString("名称：" + session.GetTemp("lottery_title") + "\n")
-	b.WriteString("参与口令：" + textfmt.Copyable(session.GetTemp("lottery_join_keyword")) + "\n")
 	b.WriteString("模式：" + modeText + "\n")
 	b.WriteString("规则：" + ruleText + "\n")
 	entryCost, entryCostErr := parseLotterySessionInt(session, "lottery_entry_cost", 0, 10000)
@@ -676,7 +612,7 @@ func formatLotteryCreateConfirm(session *telegram.SessionState, specs []lotteryP
 		b.WriteString("天道奖池：按总参与积分的 10% 注入\n")
 	}
 	b.WriteString("领奖期限：开奖后 24 小时\n")
-	b.WriteString("私聊领奖：" + textfmt.Copyable(lotteryClaimCommand) + "\n逾期未领取自动失效。\n\n")
+	b.WriteString("私聊领奖：点击「领取奖励」按钮\n逾期未领取自动失效。\n\n")
 	b.WriteString("奖品：\n")
 	for _, spec := range specs {
 		b.WriteString(fmt.Sprintf("- %s x %d\n", spec.DisplayName, spec.Quantity))
@@ -691,10 +627,6 @@ func createLotteryActivityFromSession(msg *tgbotapi.Message, session *telegram.S
 		return 0, err
 	}
 
-	keyword := strings.TrimSpace(session.GetTemp("lottery_join_keyword"))
-	if err := validateLotteryJoinKeyword(keyword); err != nil {
-		return 0, err
-	}
 	for i := range specs {
 		if specs[i].PrizeType != lotteryPrizeCustomCode {
 			continue
@@ -714,7 +646,6 @@ func createLotteryActivityFromSession(msg *tgbotapi.Message, session *telegram.S
 
 	activity := model.LotteryActivity{
 		Title:       session.GetTemp("lottery_title"),
-		JoinKeyword: keyword,
 		Mode:        mode,
 		Status:      lotteryStatusActive,
 		CreatedByID: msg.From.ID,
@@ -783,8 +714,9 @@ func showLotteryList(bot *tgbotapi.BotAPI, chatID int64, showIDs bool) {
 		return
 	}
 
+	var rows [][]tgbotapi.InlineKeyboardButton
 	var b strings.Builder
-	b.WriteString("🎲 积分抽奖活动\n领奖规则：开奖后 24 小时内私聊发送 " + textfmt.Copyable(lotteryClaimCommand) + "；逾期未领取自动失效。\n\n")
+	b.WriteString("🎲 积分抽奖活动\n领奖规则：开奖后 24 小时内点击「领取奖励」按钮私聊领取；逾期未领取自动失效。\n\n")
 	for _, activity := range activities {
 		participantCount, participantErr := countLotteryParticipants(activity.ID)
 		statusText := lotteryStatusText(activity.Status)
@@ -803,12 +735,16 @@ func showLotteryList(bot *tgbotapi.BotAPI, chatID int64, showIDs bool) {
 			} else if activity.DrawAt != nil {
 				b.WriteString(fmt.Sprintf("开奖时间：%s\n", activity.DrawAt.Format("2006-01-02 15:04")))
 			}
-			b.WriteString("参与：" + textfmt.Copyable(lotteryJoinInput(activity)) + "\n\n")
+			b.WriteString("参与：点击下方对应活动按钮\n\n")
+			rows = append(rows, lotteryLinkRow(bot, "参与抽奖："+textfmt.LotteryDisplayText(activity.Title, 40, "抽奖"), fmt.Sprintf("lottery_%d", activity.ID)))
 		} else {
-			b.WriteString("已开奖：中奖者请私聊发送“" + textfmt.Copyable(lotteryClaimCommand) + "”领取。\n领奖截止：" + formatLotteryClaimDeadline(activity) + "\n逾期未领取自动失效。\n\n")
+			b.WriteString("已开奖：中奖者请点击「领取奖励」按钮私聊领取。\n领奖截止：" + formatLotteryClaimDeadline(activity) + "\n逾期未领取自动失效。\n\n")
 		}
 	}
-	telegram.SendPlainText(bot, chatID, b.String())
+	rows = append(rows, lotteryLinkRow(bot, "领取奖励", "lottery_claim"))
+	m := tgbotapi.NewMessage(chatID, b.String())
+	m.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	_, _ = telegram.SendAutoDelete(bot, m)
 }
 
 func announceLotteryCreated(bot *tgbotapi.BotAPI, adminChatID int64, activityID uint) {
@@ -859,7 +795,7 @@ func announceLotteryCreated(bot *tgbotapi.BotAPI, adminChatID int64, activityID 
 	for _, prize := range prizes {
 		b.WriteString(fmt.Sprintf("- %s x %d\n", textfmt.LotteryDisplayText(prize.DisplayName, 80, "-"), prize.Quantity))
 	}
-	b.WriteString("\n参与方式：发送 " + textfmt.Copyable(lotteryJoinInput(activity)))
+	b.WriteString("\n点击「参与抽奖」进入 Bot，确认后才扣分报名。")
 
 	text := b.String()
 	if telegram.EnqueueTelegramAsync(telegram.TelegramAsyncJob{
@@ -881,7 +817,7 @@ func announceLotteryCreated(bot *tgbotapi.BotAPI, adminChatID int64, activityID 
 }
 
 func sendLotteryIntroAnnouncementSync(bot *tgbotapi.BotAPI, adminChatID int64, activityID uint, targetChatID int64, text string) error {
-	sentMsg, err := sendLotteryGroupPersistentText(bot, targetChatID, text)
+	sentMsg, err := sendLotteryButtonText(bot, targetChatID, text, "参与抽奖", fmt.Sprintf("lottery_%d", activityID))
 	if err != nil {
 		log.Printf("⚠️ 抽奖创建群内公告发送失败: activity=%d chat=%d err=%s", activityID, targetChatID, textfmt.FormatTelegramSendError(err))
 		if adminChatID != 0 {
@@ -906,21 +842,6 @@ func sendLotteryIntroAnnouncementSync(bot *tgbotapi.BotAPI, adminChatID int64, a
 		log.Printf("lottery intro announcement record update missed: activity=%d chat=%d message=%d", activityID, targetChatID, sentMsg.MessageID)
 	}
 	return nil
-}
-
-func handleJoinLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) {
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "请按格式发送："+textfmt.Copyable("参加抽奖 活动ID"))
-		return
-	}
-	id, err := strconv.ParseUint(parts[len(parts)-1], 10, 64)
-	if err != nil || id == 0 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "活动 ID 格式不正确。")
-		return
-	}
-
-	joinLotteryByID(bot, msg, uint(id))
 }
 
 func joinLotteryByID(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, id uint) {
@@ -1329,7 +1250,7 @@ func lotteryResultText(activity model.LotteryActivity, participantCount int, win
 		for i, winner := range winners {
 			b.WriteString(fmt.Sprintf("%d. %s - %s\n", i+1, textfmt.LotteryDisplayText(winner.UserName, 80, "-"), lotteryPrizeDisplayText(winner.PrizeType, winner.Amount, winner.DisplayName)))
 		}
-		b.WriteString("\n领奖方式：打开 Bot，点击 Start / 开始后，私聊发送 " + textfmt.Copyable(lotteryClaimCommand) + "。\n开奖后 24 小时内领取，逾期未领取自动失效。")
+		b.WriteString("\n领奖方式：点击「领取奖励」按钮进入 Bot，点击 Start / 开始后领取。\n开奖后 24 小时内领取，逾期未领取自动失效。")
 	} else {
 		b.WriteString("\n本期无人中奖。")
 	}
@@ -1364,7 +1285,7 @@ func notifyLotteryDrawn(bot *tgbotapi.BotAPI, activity model.LotteryActivity, pa
 }
 
 func sendLotteryResultAnnouncementSync(bot *tgbotapi.BotAPI, activityID uint, targetChatID int64, text string) error {
-	sentMsg, err := sendLotteryGroupPersistentText(bot, targetChatID, text)
+	sentMsg, err := sendLotteryButtonText(bot, targetChatID, text, "领取奖励", "lottery_claim")
 	if err != nil {
 		log.Printf("⚠️ 抽奖开奖群内公告发送失败: activity=%d chat=%d err=%s", activityID, targetChatID, textfmt.FormatTelegramSendError(err))
 		return err
@@ -1394,8 +1315,8 @@ func notifyLotteryWinnersPrivately(bot *tgbotapi.BotAPI, activity model.LotteryA
 	}
 
 	for _, winner := range winners {
-		text := fmt.Sprintf("🎲 恭喜中奖！\n\n活动：%s\n奖品：%s\n领奖截止：%s\n\n请私聊发送：%s\n开奖后 24 小时内领取，逾期未领取自动失效。", textfmt.LotteryDisplayText(activity.Title, 80, "-"), lotteryPrizeDisplayText(winner.PrizeType, winner.Amount, winner.DisplayName), formatLotteryClaimDeadline(activity), textfmt.Copyable(lotteryClaimCommand))
-		if err := sendLotteryPlainText(bot, winner.UserID, text); err != nil {
+		text := fmt.Sprintf("🎲 恭喜中奖！\n\n活动：%s\n奖品：%s\n领奖截止：%s\n\n请点击「领取奖励」按钮私聊领取。\n开奖后 24 小时内领取，逾期未领取自动失效。", textfmt.LotteryDisplayText(activity.Title, 80, "-"), lotteryPrizeDisplayText(winner.PrizeType, winner.Amount, winner.DisplayName), formatLotteryClaimDeadline(activity))
+		if _, err := sendLotteryButtonText(bot, winner.UserID, text, "领取奖励", "lottery_claim"); err != nil {
 			log.Printf("⚠️ 抽奖中奖私聊提醒失败: activity=%d user=%d err=%s", activity.ID, winner.UserID, textfmt.FormatTelegramSendError(err))
 			telegram.NotifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 抽奖 #%d 中奖用户 %d 私聊提醒失败，请人工通知。", activity.ID, winner.UserID))
 		}
@@ -1693,11 +1614,6 @@ func sendLotteryReplyPlainText(bot *tgbotapi.BotAPI, sourceMsg *tgbotapi.Message
 	}
 }
 
-func sendLotteryGroupPersistentText(bot *tgbotapi.BotAPI, chatID int64, text string) (tgbotapi.Message, error) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	return telegram.SendNoAutoDelete(bot, msg)
-}
-
 func pinLotteryMessage(bot *tgbotapi.BotAPI, chatID int64, messageID int, activityID uint, label string) bool {
 	if bot == nil || chatID == 0 || messageID == 0 {
 		return false
@@ -1895,7 +1811,6 @@ func handleLotteryDetailCommand(bot *tgbotapi.BotAPI, chatID int64, text string)
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("抽奖 #%d：%s\n", activity.ID, textfmt.LotteryDisplayText(activity.Title, 80, "-")))
 	b.WriteString("状态：" + lotteryStatusText(activity.Status) + "\n")
-	b.WriteString("参与口令：" + textfmt.Copyable(lotteryJoinInput(activity)) + "\n")
 	if participantCount, err := countLotteryParticipants(activity.ID); err != nil {
 		b.WriteString("参与人数：读取失败\n")
 	} else {
@@ -1906,7 +1821,7 @@ func handleLotteryDetailCommand(bot *tgbotapi.BotAPI, chatID int64, text string)
 	} else if activity.DrawAt != nil {
 		b.WriteString("开奖时间：" + activity.DrawAt.Format("2006-01-02 15:04") + "\n")
 	}
-	b.WriteString("领奖规则：开奖后 24 小时内私聊发送 " + textfmt.Copyable(lotteryClaimCommand) + "；逾期未领取自动失效。\n")
+	b.WriteString("领奖规则：开奖后 24 小时内点击「领取奖励」按钮私聊领取；逾期未领取自动失效。\n")
 	if activity.ClaimDeadlineAt != nil {
 		b.WriteString("领奖截止：" + formatLotteryClaimDeadline(activity) + "\n")
 	}

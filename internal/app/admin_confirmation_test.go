@@ -103,7 +103,7 @@ func TestLotteryAndWhitelistCreationSkipExplanation(t *testing.T) {
 	if !activity.HandleLotteryCommand(bot, msg, "创建积分抽奖", session, "super_admin") {
 		t.Fatal("unhandled")
 	}
-	if session.GetStep() != "WAITING_LOTTERY_JOIN_KEYWORD" || !strings.HasPrefix(session.GetTemp("lottery_title"), "积分抽奖 ") {
+	if session.GetStep() != "WAITING_LOTTERY_MODE" || !strings.HasPrefix(session.GetTemp("lottery_title"), "积分抽奖 ") {
 		t.Fatal("lottery still asks for title")
 	}
 	session.SetStep("WL_CARD_COUNT")

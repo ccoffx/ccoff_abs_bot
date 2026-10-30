@@ -169,7 +169,6 @@ var BotCommandNames = []string{
 	"限时",
 	"限时秘境",
 	"青灵养气丹",
-	"领取奖励",
 	"领取宗门任务奖励",
 	"频道公告已发",
 	"频道公告异常",
@@ -209,7 +208,6 @@ var BotCommandNames = []string{
 
 var botCommandPrefixes = []string{
 	"/",
-	"/join_lottery",
 	"世界喇叭 ",
 	"任命成员 ",
 	"任命长老 ",
@@ -220,7 +218,6 @@ var botCommandPrefixes = []string{
 	"加入宗门 ",
 	"升级科技 ",
 	"参加宗门抽奖 ",
-	"参加抽奖",
 	"取消宗门抽奖 ",
 	"取消抽奖",
 	"回收灵草",

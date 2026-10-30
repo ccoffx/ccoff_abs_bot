@@ -31,29 +31,10 @@ func formatLotteryClaimDeadline(activity model.LotteryActivity) string {
 	return activity.ClaimDeadlineAt.In(lotteryClaimLocation).Format("2006-01-02 15:04:05") + "（北京时间）"
 }
 
-// HandleLotteryClaimCommand only grants to the sender, in a private chat.
-// It can be invoked without discarding an in-progress form.
-func HandleLotteryClaimCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) bool {
-	if bot == nil || msg == nil || msg.Chat == nil || msg.From == nil || strings.TrimSpace(text) != lotteryClaimCommand {
-		return false
-	}
-	if !msg.Chat.IsPrivate() {
-		telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
-		hint := "🎲 请打开 Bot 私聊，点击 Start / 开始后发送：" + textfmt.Copyable(lotteryClaimCommand) + "。\n奖励须在开奖后 24 小时内领取，逾期未领取自动失效。群内不会发放奖品或展示卡密。"
-		if bot.Self.UserName != "" {
-			hint += "\nhttps://t.me/" + bot.Self.UserName
-		}
-		SendLotteryGroupPlainText(bot, msg.Chat.ID, hint)
-		return true
-	}
-	claimAllLotteryRewards(bot, msg.Chat.ID, msg.From.ID)
-	return true
-}
-
 func claimAllLotteryRewards(bot *tgbotapi.BotAPI, chatID, userID int64) {
 	var winners []model.LotteryWinner
 	if err := storage.DB.Where("user_id = ? AND (status = ? OR (status = ? AND reward_delivered_at IS NULL))", userID, lotteryWinnerPending, lotteryWinnerClaimed).Order("id asc").Find(&winners).Error; err != nil {
-		telegram.SendPlainText(bot, chatID, "❌ 查询奖励失败，请稍后重新发送 "+textfmt.Copyable(lotteryClaimCommand)+"。")
+		telegram.SendPlainText(bot, chatID, "❌ 查询奖励失败，请稍后再次点击「领取奖励」按钮。")
 		return
 	}
 	handled := false
@@ -71,12 +52,12 @@ func claimAllLotteryRewards(bot *tgbotapi.BotAPI, chatID, userID int64) {
 		}
 		if err != nil {
 			log.Printf("抽奖领奖失败: activity=%d winner=%d user=%d err=%s", winner.ActivityID, winner.ID, userID, textfmt.FormatPlainError(err))
-			telegram.SendPlainText(bot, chatID, fmt.Sprintf("❌ %s的奖励暂时领取失败，已保留重试资格。请稍后发送 %s。", lotteryUserActivityLabel(winner.ActivityID), textfmt.Copyable(lotteryClaimCommand)))
+			telegram.SendPlainText(bot, chatID, fmt.Sprintf("❌ %s的奖励暂时领取失败，已保留重试资格。请稍后再次点击「领取奖励」按钮。", lotteryUserActivityLabel(winner.ActivityID)))
 			continue
 		}
 		if err := sendLotteryPlainText(bot, chatID, reply); err != nil {
 			log.Printf("抽奖领取结果发送失败，保留原结果供重试: winner=%d user=%d err=%s", winner.ID, userID, textfmt.FormatTelegramSendError(err))
-			telegram.NotifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 抽奖 #%d 用户 %d 已领取奖励，但私聊发送失败。已加密保存领取结果，用户可再次发送领取奖励重试。", winner.ActivityID, userID))
+			telegram.NotifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 抽奖 #%d 用户 %d 已领取奖励，但私聊发送失败。已加密保存领取结果，用户可再次点击「领取奖励」按钮重试。", winner.ActivityID, userID))
 			continue
 		}
 		deliveredAt := time.Now()
