@@ -193,7 +193,7 @@ func marketplaceHelpText(role string) string {
 	b.WriteString("- 私聊发送“" + textfmt.Copyable("我的购买") + "”或点击“" + "资产交易 -> 我的购买" + "”，可查看最近购买记录和订单号。\n\n")
 	b.WriteString("买家：\n")
 	b.WriteString("- 我的购买：查看最近购买记录，已购卡密可自助取回。\n")
-	b.WriteString("- 举报订单 订单ID 原因：提交异常订单争议，例如“" + textfmt.Copyable("举报订单 12 卡密无法使用") + "”。\n\n")
+	b.WriteString("- 举报订单 订单ID [原因]：提交异常订单争议，例如“" + textfmt.Copyable("举报订单 12 卡密无法使用") + "”。\n\n")
 	b.WriteString("卖家：\n")
 	b.WriteString("- 我的交易行：查看自己上架的商品和商品ID。\n")
 	b.WriteString("- 交易行订单 商品ID：查看某个商品最近成交订单，例如“" + textfmt.Copyable("交易行订单 8") + "”。")
@@ -2249,24 +2249,9 @@ func handleMarketplaceForceCloseStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Messag
 		return
 	}
 
-	listing, stock, err := loadMarketplaceActiveListingForAdmin(listingID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			telegram.SendPlainText(bot, msg.Chat.ID, "❌ 未找到该在售商品，可能已下架或不存在。")
-		} else {
-			log.Printf("⚠️ 强制下架交易行商品读取失败: admin=%d listing=%d err=%s", msg.From.ID, listingID, textfmt.FormatPlainError(err))
-			telegram.SendPlainText(bot, msg.Chat.ID, "❌ 商品状态读取失败，请稍后重试。")
-		}
-		return
-	}
-
 	session.SetTemp("market_force_close_listing_id", strconv.FormatUint(uint64(listingID), 10))
 	session.SetStep("WAITING_MARKET_FORCE_CLOSE_REASON")
-	sendPlainTextNoMarkdown(bot, msg.Chat.ID, fmt.Sprintf(
-		"⚠️ 强制下架交易行商品\n\n%s\n\n请输入操作原因，%s：",
-		marketplaceForceCloseListingSummary(listing, stock),
-		storage.AdminReasonRequirementText,
-	))
+	handleMarketplaceForceCloseReason(bot, msg, "", session)
 }
 
 func handleMarketplaceForceCloseReason(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string, session *telegram.SessionState) {
@@ -2275,11 +2260,7 @@ func handleMarketplaceForceCloseReason(bot *tgbotapi.BotAPI, msg *tgbotapi.Messa
 		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 权限不足：强制下架商品仅限超级管理员。")
 		return
 	}
-	reason, ok := storage.ValidateAdminReason(text)
-	if !ok {
-		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 操作原因格式不符合要求，"+storage.AdminReasonRequirementText+"。请重新发送：")
-		return
-	}
+	reason := storage.AutomaticAdminReason
 	listingID, err := strconv.ParseUint(session.GetTemp("market_force_close_listing_id"), 10, 64)
 	if err != nil || listingID == 0 {
 		telegram.ClearSession(msg.From.ID)
@@ -2390,16 +2371,19 @@ func marketplaceForceCloseListingSummary(listing model.MarketplaceListing, stock
 func handleMarketplaceDispute(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) {
 	raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "举报订单"))
 	parts := strings.Fields(raw)
-	if len(parts) < 2 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("举报订单 订单ID 原因"))
+	if len(parts) < 1 {
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("举报订单 订单ID [原因]"))
 		return
 	}
 	orderID, err := strconv.ParseUint(parts[0], 10, 64)
 	if err != nil || orderID == 0 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("举报订单 订单ID 原因"))
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable("举报订单 订单ID [原因]"))
 		return
 	}
 	reason := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]))
+	if reason == "" {
+		reason = "用户提交订单异常举报"
+	}
 	if !validMarketplaceDisputeReason(reason) {
 		telegram.SendPlainText(bot, msg.Chat.ID, "举报原因需为 3-200 个字，且不能包含换行、制表符或控制字符。")
 		return

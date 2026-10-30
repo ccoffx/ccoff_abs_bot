@@ -192,14 +192,9 @@ func handleWhitelistCardMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, tex
 			return true
 		}
 		session.SetTemp("wl_count", strconv.Itoa(count))
-		session.SetStep("WL_CARD_REASON")
-		reply("请输入生成原因，" + storage.AdminReasonRequirementText + "：")
+		fallthrough
 	case "WL_CARD_REASON":
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			reply(storage.AdminReasonInvalidText)
-			return true
-		}
+		reason := storage.AutomaticAdminReason
 		session.SetTemp("wl_reason", reason)
 		session.SetStep("WL_CARD_GENERATE")
 		reply(fmt.Sprintf("即将生成 %s 张永久白名单卡。\n原因：%s\n确认请回复："+textfmt.Copyable("确认生成白名单卡")+"\n取消请回复："+textfmt.Copyable("取消"), session.GetTemp("wl_count"), reason))

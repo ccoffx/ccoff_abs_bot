@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -15,10 +16,12 @@ import (
 	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/account"
 	"ccoff-abs-bot/internal/activity"
+	"ccoff-abs-bot/internal/announcements"
 	"ccoff-abs-bot/internal/books"
 	"ccoff-abs-bot/internal/buildinfo"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/game"
+	"ccoff-abs-bot/internal/joinverify"
 	"ccoff-abs-bot/internal/market"
 	"ccoff-abs-bot/internal/metrics"
 	"ccoff-abs-bot/internal/operations"
@@ -26,6 +29,8 @@ import (
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
 )
+
+var joinVerification *joinverify.Service
 
 type telegramMessageJob struct {
 	msg        *tgbotapi.Message
@@ -143,6 +148,23 @@ func run(loadConfig func()) {
 		log.Panicf("🤖 Bot 启动失败: %s", textfmt.FormatTelegramSendError(err))
 	}
 
+	if config.AppConfig.JoinVerifyEnabled {
+		admins := make([]int64, 0, len(config.AppConfig.AdminIDs))
+		for id := range config.AppConfig.AdminIDs {
+			admins = append(admins, id)
+		}
+		joinVerification = joinverify.New(storage.DB, bot, config.AppConfig.NoticeGroupID, config.AppConfig.JoinVerifyChannelID, bot.Self.ID, config.AppConfig.JoinVerifyChannelURL, admins)
+		if err := joinVerification.Validate(); err != nil {
+			log.Fatalf("入群验证配置或权限检查失败: %s", textfmt.FormatTelegramSendError(err))
+		}
+	}
+
+	if err := announcements.Validate(bot); err != nil {
+		log.Fatalf("公告频道权限检查失败: %s", textfmt.FormatTelegramSendError(err))
+	}
+	if err := announcements.Recover(storage.DB); err != nil {
+		log.Fatalf("公告投递恢复失败: %s", textfmt.FormatPlainError(err))
+	}
 	bot.Debug = false // 建议线上环境关闭上帝视角，避免日志爆炸
 	if config.AppConfig.IsTest() {
 		if !strings.EqualFold(bot.Self.UserName, config.AppConfig.TestBotUsername) {
@@ -161,10 +183,10 @@ func run(loadConfig func()) {
 		log.Printf("ℹ️ Telegram webhook 状态: url_configured=%t pending_updates=%d", info.URL != "", info.PendingUpdateCount)
 	}
 
-	if _, err := bot.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: telegram.TelegramWebhookDropOnStartup}); err != nil {
+	if _, err := bot.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: telegram.TelegramWebhookDropOnStartup && joinVerification == nil}); err != nil {
 		log.Fatalf("❌ 清理 Telegram webhook 失败，长轮询无法可靠接收消息: %s", textfmt.FormatTelegramSendError(err))
 	}
-	log.Printf("✅ Telegram webhook 已清理，开始使用长轮询接收消息: drop_pending=%t", telegram.TelegramWebhookDropOnStartup)
+	log.Printf("✅ Telegram webhook 已清理，开始使用长轮询接收消息: drop_pending=%t", telegram.TelegramWebhookDropOnStartup && joinVerification == nil)
 	writeStartupHealth("webhook_cleared", bot.Self.UserName)
 	notifyAdminsOnStartup(bot)
 
@@ -173,6 +195,10 @@ func run(loadConfig func()) {
 	})
 
 	telegram.StartTelegramDispatcher(bot)
+	StartChannelAnnouncementDispatcher(bot)
+	if joinVerification != nil {
+		go joinVerification.Run(context.Background())
+	}
 
 	// 正式启动后台核心任务（生命周期巡检与加密备份）
 	startBackgroundJobs(bot)
@@ -203,6 +229,9 @@ func pollTelegramUpdates(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = telegram.TelegramLongPollTimeout
 	u.AllowedUpdates = []string{"message", "callback_query"}
+	if joinVerification != nil {
+		u.AllowedUpdates = append(u.AllowedUpdates, "chat_member")
+	}
 
 	log.Printf("✅ Telegram 长轮询已启动: timeout=%ds allowed_updates=%s", telegram.TelegramLongPollTimeout, textfmt.FormatPlainValue(strings.Join(u.AllowedUpdates, ",")))
 	writeStartupHealth("polling_started", bot.Self.UserName)
@@ -245,6 +274,17 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 	if !testUpdateAllowed(update) {
 		return
 	}
+	if joinVerification != nil && update.ChatMember != nil {
+		for {
+			if err := joinVerification.Enqueue(update); err == nil {
+				break
+			} else {
+				log.Printf("入群验证事件持久化失败，将重试: %s", textfmt.FormatPlainError(err))
+			}
+			time.Sleep(telegram.TelegramPollRetryDelay)
+		}
+		return
+	}
 	if update.Message != nil {
 		logIncomingMessage(update.Message)
 		if handlePrivateStartFastPath(bot, update.Message) {
@@ -279,6 +319,20 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			books.StartDelayedCallbackAck(bot, cb.ID)
 			unlock := telegram.LockUser(cb.From.ID)
 			defer unlock()
+			if strings.HasPrefix(cb.Data, joinverify.CallbackPrefix) {
+				if joinVerification == nil {
+					telegram.AnswerCallback(bot, cb.ID, "入群验证当前未启用。")
+				} else {
+					telegram.AnswerCallback(bot, cb.ID, joinVerification.Callback(cb))
+				}
+				return
+			}
+			if joinVerification != nil {
+				if ok, hint := joinVerification.Check(cb.From.ID); !ok {
+					telegram.AnswerCallback(bot, cb.ID, hint)
+					return
+				}
+			}
 			// 官方群成员门禁与消息路径（interactive.go）保持一致：
 			// 防止已退群用户继续通过历史面板上的按钮触发功能。
 			if config.AppConfig != nil && config.AppConfig.NoticeGroupID != 0 && !telegram.IsUserInGroup(bot, cb.From.ID, config.AppConfig.NoticeGroupID) {
@@ -287,6 +341,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 				if _, err := bot.Request(ack); err != nil && !telegram.IsOldTelegramCallbackError(err) {
 					log.Printf("⚠️ 拒绝非群成员 callback 应答失败: user=%d err=%s", cb.From.ID, textfmt.FormatTelegramSendError(err))
 				}
+				return
+			}
+			if activity.HandleLotteryEntryCallback(bot, cb) {
 				return
 			}
 			if game.HandleBreakthroughGuardCallback(bot, cb) {
@@ -320,6 +377,9 @@ func handlePrivateStartFastPath(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) boo
 		return false
 	}
 	if !telegram.IsTelegramCommandText(msg.Text, "/start") {
+		return false
+	}
+	if activity.IsLotteryStart(msg.Text) {
 		return false
 	}
 	if _, ok := account.ParseReferralStartPayload(msg.Text); ok {

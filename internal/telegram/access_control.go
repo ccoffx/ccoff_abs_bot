@@ -50,7 +50,7 @@ func IsUserInGroup(bot *tgbotapi.BotAPI, userID int64, groupID int64) bool {
 	inGroup := member.Status == "member" ||
 		member.Status == "creator" ||
 		member.Status == "administrator" ||
-		member.Status == "restricted"
+		(member.Status == "restricted" && member.IsMember)
 
 	ttl := groupMemberNegativeTTL
 	if inGroup {
@@ -96,7 +96,7 @@ func IsUserInGroupFresh(bot *tgbotapi.BotAPI, userID int64, groupID int64) bool 
 	inGroup := member.Status == "member" ||
 		member.Status == "creator" ||
 		member.Status == "administrator" ||
-		member.Status == "restricted"
+		(member.Status == "restricted" && member.IsMember)
 
 	groupMemberCache.Store(cacheKey, &groupMemberCacheEntry{
 		inGroup:  inGroup,

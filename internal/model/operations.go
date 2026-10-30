@@ -8,14 +8,16 @@ import (
 
 type OpenRegistrationCampaign struct {
 	gorm.Model
-	CampaignID string `gorm:"uniqueIndex;not null"`
-	Mode       string `gorm:"index;not null"`
-	Quota      int
-	EndsAt     *time.Time `gorm:"index"`
-	Status     string     `gorm:"index;not null"`
-	CreatedBy  int64      `gorm:"index;not null"`
-	Reason     string
-	ClosedAt   *time.Time
+	CampaignID            string `gorm:"uniqueIndex;not null"`
+	AnnouncementChannelID int64
+	AnnouncementGroupID   int64
+	Mode                  string `gorm:"index;not null"`
+	Quota                 int
+	EndsAt                *time.Time `gorm:"index"`
+	Status                string     `gorm:"index;not null"`
+	CreatedBy             int64      `gorm:"index;not null"`
+	Reason                string
+	ClosedAt              *time.Time
 }
 
 func (OpenRegistrationCampaign) TableName() string { return "open_registration_campaigns" }
@@ -36,19 +38,20 @@ func (OpenRegistrationReservation) TableName() string {
 
 type CompensationCampaign struct {
 	gorm.Model
-	CampaignID     string `gorm:"uniqueIndex;not null"`
-	CreatedBy      int64  `gorm:"index;not null"`
-	Points         int
-	Days           int
-	Announcement   string
-	Status         string `gorm:"index;not null"`
-	RecipientCount int
-	AppliedCount   int
-	SuccessCount   int
-	FailedCount    int
-	CreatedAtRun   time.Time `gorm:"index;not null"`
-	CompletedAt    *time.Time
-	LastError      string
+	CampaignID            string `gorm:"uniqueIndex;not null"`
+	AnnouncementChannelID int64
+	CreatedBy             int64 `gorm:"index;not null"`
+	Points                int
+	Days                  int
+	Announcement          string
+	Status                string `gorm:"index;not null"`
+	RecipientCount        int
+	AppliedCount          int
+	SuccessCount          int
+	FailedCount           int
+	CreatedAtRun          time.Time `gorm:"index;not null"`
+	CompletedAt           *time.Time
+	LastError             string
 }
 
 func (CompensationCampaign) TableName() string { return "compensation_campaigns" }

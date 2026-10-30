@@ -35,6 +35,15 @@ func TestSandboxFiltersBeforeStartFastPathAndCallbacks(t *testing.T) {
 	}
 }
 
+func TestSandboxRejectsChannelMemberEvents(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = &config.Config{AppEnv: "test", AdminIDs: map[int64]bool{1: true}}
+	t.Cleanup(func() { config.AppConfig = previous })
+	if testUpdateAllowed(tgbotapi.Update{ChatMember: &tgbotapi.ChatMemberUpdated{Chat: tgbotapi.Chat{ID: -100200, Type: "channel"}}}) {
+		t.Fatal("test accepted channel event")
+	}
+}
+
 func TestSandboxOutboundFilterPreservesBody(t *testing.T) {
 	previous := config.AppConfig
 	config.AppConfig = &config.Config{AppEnv: "test", AdminIDs: map[int64]bool{1: true}}

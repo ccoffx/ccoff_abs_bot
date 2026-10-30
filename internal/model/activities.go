@@ -35,13 +35,15 @@ type RedPacketGrab struct {
 type LotteryActivity struct {
 	gorm.Model
 
-	Title          string `gorm:"index;not null"`
-	JoinKeyword    string `gorm:"index"`
-	Mode           string `gorm:"index;not null"`
-	Status         string `gorm:"index;not null;default:'active'"`
-	CreatedByID    int64  `gorm:"index;not null"`
-	CreatedBy      string
-	AnnounceChatID int64 `gorm:"index"`
+	Title                   string `gorm:"index;not null"`
+	JoinKeyword             string `gorm:"index"`
+	Mode                    string `gorm:"index;not null"`
+	Status                  string `gorm:"index;not null;default:'active'"`
+	CreatedByID             int64  `gorm:"index;not null"`
+	CreatedBy               string
+	AnnounceChatID          int64 `gorm:"index"`
+	AnnounceIsChannel       bool
+	AnnounceReminderGroupID int64
 
 	IntroMessageID  int
 	ResultMessageID int

@@ -27,6 +27,10 @@ type Config struct {
 	AbsKey                string
 	AbsTemplateID         string
 	NoticeGroupID         int64
+	AnnouncementChannelID int64
+	JoinVerifyEnabled     bool
+	JoinVerifyChannelID   int64
+	JoinVerifyChannelURL  string
 	BackupGroupID         int64
 	BackupEncryptKey      string
 	SecurityPepper        string
@@ -83,6 +87,10 @@ func loadConfig(lookup func(string) (string, bool)) {
 		AbsKey:                getEnv("ABS_API_KEY", ""),
 		AbsTemplateID:         getEnv("ABS_TEMPLATE_USER_ID", ""),
 		NoticeGroupID:         getEnvAsInt64("NOTICE_GROUP_ID", 0),
+		AnnouncementChannelID: getEnvAsInt64("ANNOUNCEMENT_CHANNEL_ID", 0),
+		JoinVerifyEnabled:     getEnvAsBool("JOIN_VERIFY_ENABLED", false),
+		JoinVerifyChannelID:   getEnvAsInt64("JOIN_VERIFY_CHANNEL_ID", 0),
+		JoinVerifyChannelURL:  getEnv("JOIN_VERIFY_CHANNEL_URL", ""),
 		BackupGroupID:         getEnvAsInt64("BACKUP_GROUP_ID", 0),
 		BackupEncryptKey:      getEnv("BACKUP_ENCRYPT_KEY", ""),
 		SecurityPepper:        getEnv("SECURITY_PEPPER", ""),
@@ -124,6 +132,25 @@ func (c *Config) IsTest() bool { return c != nil && c.AppEnv == "test" }
 
 // ValidateEnvironment runs before any database or network access.
 func (c *Config) ValidateEnvironment() error {
+	if c.AnnouncementChannelID > 0 || (c.AnnouncementChannelID != 0 && c.AnnouncementChannelID == c.NoticeGroupID) {
+		return fmt.Errorf("ANNOUNCEMENT_CHANNEL_ID must be a negative channel ID distinct from NOTICE_GROUP_ID")
+	}
+	if c.IsTest() && c.AnnouncementChannelID != 0 {
+		return fmt.Errorf("test forbids ANNOUNCEMENT_CHANNEL_ID")
+	}
+
+	if c.IsTest() && (c.JoinVerifyEnabled || c.JoinVerifyChannelID != 0 || c.JoinVerifyChannelURL != "") {
+		return fmt.Errorf("test forbids JOIN_VERIFY configuration; use simulated Telegram API tests")
+	}
+	if c.JoinVerifyEnabled {
+		u, err := url.Parse(c.JoinVerifyChannelURL)
+		if c.NoticeGroupID >= 0 || c.JoinVerifyChannelID >= 0 || c.NoticeGroupID == c.JoinVerifyChannelID {
+			return fmt.Errorf("JOIN_VERIFY requires distinct negative NOTICE_GROUP_ID and JOIN_VERIFY_CHANNEL_ID")
+		}
+		if err != nil || u.Scheme != "https" || u.Host != "t.me" || u.User != nil || u.Path == "" || u.Path == "/" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("JOIN_VERIFY_CHANNEL_URL must be an https://t.me/ channel link")
+		}
+	}
 	if c.AppEnv != "production" && c.AppEnv != "test" {
 		return fmt.Errorf("APP_ENV must be production or test")
 	}

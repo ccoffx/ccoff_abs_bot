@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"ccoff-abs-bot/internal/abs"
+	"ccoff-abs-bot/internal/announcements"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
@@ -137,12 +138,13 @@ type absBookMetadata struct {
 }
 
 type BookAnnouncementCandidate struct {
-	ItemID      string
-	LibraryID   string
-	LibraryName string
-	Title       string
-	Narrators   string
-	RecentAt    time.Time
+	AnnouncementTargetID int64 `json:"announcement_target_id,omitempty"`
+	ItemID               string
+	LibraryID            string
+	LibraryName          string
+	Title                string
+	Narrators            string
+	RecentAt             time.Time
 }
 
 func GetRecentBookAnnouncementCandidates(c *abs.AbsClient, window time.Duration, now time.Time) ([]BookAnnouncementCandidate, error) {
@@ -481,8 +483,8 @@ func DownloadBookAnnouncementCover(c *abs.AbsClient, itemID string) ([]byte, err
 }
 
 func maybePromptBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, adminID int64, req model.BookRequest) string {
-	if bot == nil || abs.DefaultClient == nil || config.AppConfig == nil || config.AppConfig.NoticeGroupID == 0 {
-		return "已处理，未配置大群公告"
+	if bot == nil || abs.DefaultClient == nil || config.AppConfig == nil || announcements.Target() == 0 {
+		return "已处理，未配置新书公告"
 	}
 	if !isBookRequestUploadedStatus(req.Status) {
 		return "已处理"
@@ -495,7 +497,7 @@ func maybePromptBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, adminID int64
 		}
 		return "已处理，公告候选生成失败"
 	}
-	return "已处理，请选择并确认群公告"
+	return "已处理，请选择并确认新书公告"
 }
 
 func sendBookAnnouncementRetryPrompt(bot *tgbotapi.BotAPI, adminID int64, reqID uint) error {
@@ -750,7 +752,8 @@ func sendBookAnnouncementPreview(bot *tgbotapi.BotAPI, adminID int64, reqID uint
 	if err != nil {
 		return err
 	}
-	caption := "请确认是否发布到大群：\n\n" + formatBookAnnouncementCaption(candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(reqID)
+	candidate.AnnouncementTargetID = announcements.Target()
+	caption := "请确认是否发布到" + announcements.TargetLabel(candidate.AnnouncementTargetID) + "：\n\n" + formatBookAnnouncementCaption(candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(reqID)
 	token := storeBookAnnouncementPreviewCandidate(reqID, candidate)
 	if token == "" {
 		return fmt.Errorf("BOOK_ANNOUNCEMENT_PREVIEW_TOKEN_PERSIST_FAILED")
@@ -896,7 +899,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 	data := cb.Data
 	if reqID, ok := parseBookRequestCallbackID(data, "br_ann_skip_"); ok {
 		removeBookAnnouncementPreviewButtons(bot, cb)
-		telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("已跳过求书 #%d 的大群公告", reqID))
+		telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("已跳过求书 #%d 的新书公告", reqID))
 		return true
 	}
 
@@ -980,8 +983,8 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 	if !ok {
 		return false
 	}
-	if config.AppConfig == nil || config.AppConfig.NoticeGroupID == 0 {
-		telegram.AnswerCallback(bot, cb.ID, "未配置通知群，无法发布")
+	if config.AppConfig == nil {
+		telegram.AnswerCallback(bot, cb.ID, "未配置公告目标，无法发布")
 		return true
 	}
 	if abs.DefaultClient == nil {
@@ -1004,6 +1007,18 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		return true
 	}
 
+	if candidate.AnnouncementTargetID == 0 {
+		if announcements.Target() == 0 {
+			telegram.AnswerCallback(bot, cb.ID, "未配置公告目标，无法生成新预览。")
+			return true
+		}
+		if err := sendBookAnnouncementPreview(bot, cb.From.ID, reqID, candidate); err != nil {
+			telegram.AnswerCallback(bot, cb.ID, "旧预览已失效，请重新预览后发布。")
+		} else {
+			telegram.AnswerCallback(bot, cb.ID, "请在新的目标预览中确认发布。")
+		}
+		return true
+	}
 	lockKey := reqID
 	if _, loaded := bookRequestAnnouncementLocks.LoadOrStore(lockKey, time.Now()); loaded {
 		telegram.AnswerCallback(bot, cb.ID, "\u8be5\u5de5\u5355\u516c\u544a\u6b63\u5728\u5904\u7406\uff0c\u8bf7\u52ff\u91cd\u590d\u70b9\u51fb")
@@ -1022,7 +1037,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		telegram.AnswerCallback(bot, cb.ID, "\u8be5\u5de5\u5355\u7684\u65b0\u4e66\u516c\u544a\u5df2\u7ecf\u53d1\u5e03")
 		return true
 	}
-	_, claimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, config.AppConfig.NoticeGroupID, cb.From.ID, time.Now())
+	_, claimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, candidate.AnnouncementTargetID, cb.From.ID, time.Now())
 	if claimErr != nil {
 		switch {
 		case errors.Is(claimErr, errBookAnnouncementAlreadySent):
@@ -1056,7 +1071,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 			}
 			deleteBookAnnouncementPreviewCandidateToken(token)
 			removeBookAnnouncementPreviewButtons(bot, cb)
-			telegram.AnswerCallback(bot, cb.ID, "已发布到大群")
+			telegram.AnswerCallback(bot, cb.ID, "已发布到"+announcements.TargetLabel(candidate.AnnouncementTargetID))
 			return true
 		}
 
@@ -1068,19 +1083,19 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		}
 		if markErr := markBookRequestAnnouncementDelivery(reqID, status, errorCode); markErr != nil {
 			log.Printf("book announcement delivery failure state write failed: req=%d err=%s", reqID, textfmt.FormatPlainError(markErr))
-			telegram.AnswerCallback(bot, cb.ID, "发送或状态登记失败，结果按不确定处理；请先检查通知群，勿重复点击")
+			telegram.AnswerCallback(bot, cb.ID, "发送或状态登记失败，结果按不确定处理；请先检查公告目标，勿重复点击")
 			return true
 		}
 		log.Printf("book announcement publish failed: req=%d item=%s admin=%d attempt=%d uncertain=%t err=%s", reqID, textfmt.FormatPlainValue(candidate.ItemID), cb.From.ID, attempt, publishErr.DeliveryMayHaveSucceeded, textfmt.FormatPlainError(publishErr.Err))
 		if publishErr.DeliveryMayHaveSucceeded {
 			removeBookAnnouncementPreviewButtons(bot, cb)
-			telegram.AnswerCallback(bot, cb.ID, "发送结果不确定，已停止自动重发；请人工检查通知群")
+			telegram.AnswerCallback(bot, cb.ID, "发送结果不确定，已停止自动重发；请人工检查公告目标")
 			return true
 		}
 		// 明确失败（未被标记为 uncertain）时最多重试 3 次。
 		if attempt < maxPublishAttempts {
 			// 失败后状态已写为 failed，允许再次 claim 后重试。
-			if _, retryClaimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, config.AppConfig.NoticeGroupID, cb.From.ID, time.Now()); retryClaimErr != nil {
+			if _, retryClaimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, candidate.AnnouncementTargetID, cb.From.ID, time.Now()); retryClaimErr != nil {
 				log.Printf("book announcement retry claim failed: req=%d attempt=%d err=%s", reqID, attempt+1, textfmt.FormatPlainError(retryClaimErr))
 				break
 			}
@@ -1169,6 +1184,10 @@ func definiteTelegramRejection(err error) bool {
 }
 
 func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req model.BookRequest, candidate BookAnnouncementCandidate) (tgbotapi.Message, *bookAnnouncementPublishError) {
+	target := candidate.AnnouncementTargetID
+	if target == 0 {
+		target = announcements.Target()
+	}
 	var zero tgbotapi.Message
 	if bot == nil {
 		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("Telegram Bot \u672a\u521d\u59cb\u5316")}
@@ -1176,7 +1195,7 @@ func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req model.BookReq
 	if abs.DefaultClient == nil {
 		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("ABS \u5ba2\u6237\u7aef\u672a\u521d\u59cb\u5316")}
 	}
-	if config.AppConfig == nil || config.AppConfig.NoticeGroupID == 0 {
+	if config.AppConfig == nil || target == 0 {
 		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("\u901a\u77e5\u7fa4\u672a\u914d\u7f6e")}
 	}
 	candidate.ItemID = strings.TrimSpace(candidate.ItemID)
@@ -1191,7 +1210,7 @@ func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req model.BookReq
 	caption := formatBookAnnouncementCaption(candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(req.ID)
 
 	if cover, coverErr := DownloadBookAnnouncementCover(abs.DefaultClient, candidate.ItemID); coverErr == nil {
-		photo := tgbotapi.NewPhoto(config.AppConfig.NoticeGroupID, tgbotapi.FileBytes{Name: "cover.jpg", Bytes: cover})
+		photo := tgbotapi.NewPhoto(target, tgbotapi.FileBytes{Name: "cover.jpg", Bytes: cover})
 		photo.Caption = caption
 		if sent, sendErr := telegram.SendNoAutoDelete(bot, photo); sendErr == nil {
 			return sent, nil
@@ -1204,7 +1223,7 @@ func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req model.BookReq
 		log.Printf("book announcement cover unavailable; falling back to text: req=%d item=%s err=%s", req.ID, textfmt.FormatPlainValue(candidate.ItemID), textfmt.FormatPlainError(coverErr))
 	}
 
-	msg := tgbotapi.NewMessage(config.AppConfig.NoticeGroupID, caption)
+	msg := tgbotapi.NewMessage(target, caption)
 	sent, err := telegram.SendNoAutoDelete(bot, msg)
 	if err != nil {
 		return zero, &bookAnnouncementPublishError{

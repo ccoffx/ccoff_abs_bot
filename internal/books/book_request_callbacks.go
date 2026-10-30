@@ -482,11 +482,10 @@ func HandleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		if req.CostPaid > 0 {
 			refundHint = fmt.Sprintf("取消后将退还用户 %d 积分。", req.CostPaid)
 		}
-		telegram.AnswerCallback(bot, cb.ID, "请发送取消原因")
+		telegram.AnswerCallback(bot, cb.ID, "请确认取消工单")
 		telegram.SendPlainText(bot, cb.From.ID, fmt.Sprintf(
-			"🚫 请发送求书工单 #%d 的取消原因。\n\n%s\n%s\n发送“"+textfmt.Copyable("取消")+"”可退出。",
+			"🚫 请确认取消求书工单 #%d。\n\n%s\n回复“确认取消求书”继续。\n发送“"+textfmt.Copyable("取消")+"”可退出。",
 			reqID,
-			storage.AdminReasonRequirementText,
 			refundHint,
 		))
 		return

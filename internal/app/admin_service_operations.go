@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"ccoff-abs-bot/internal/abs"
+	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/storage"
@@ -185,6 +186,23 @@ func completeOpenRegistrationReservationInTx(tx *gorm.DB, reservationID uint, us
 	if res.RowsAffected == 0 {
 		return errOpenRegistrationState
 	}
+	var reservation model.OpenRegistrationReservation
+	if err := tx.First(&reservation, reservationID).Error; err != nil {
+		return err
+	}
+	var campaign model.OpenRegistrationCampaign
+	if err := tx.Where("campaign_id = ?", reservation.CampaignID).First(&campaign).Error; err != nil {
+		return err
+	}
+	if campaign.Mode == openRegistrationModeQuota && campaign.Status == openRegistrationStatusActive {
+		var completed int64
+		if err := tx.Model(&model.OpenRegistrationReservation{}).Where("campaign_id = ? AND status = ?", campaign.CampaignID, openRegistrationReservationCompleted).Count(&completed).Error; err != nil {
+			return err
+		}
+		if completed >= int64(campaign.Quota) {
+			return tx.Model(&campaign).Updates(map[string]any{"status": openRegistrationStatusClosed, "closed_at": &now}).Error
+		}
+	}
 	return nil
 }
 
@@ -224,6 +242,10 @@ func createOpenRegistrationCampaign(actorID int64, mode string, value int, reaso
 		return model.OpenRegistrationCampaign{}, fmt.Errorf("OPEN_REGISTRATION_REASON_INVALID")
 	}
 	campaign := model.OpenRegistrationCampaign{CampaignID: "OPEN-" + security.GenerateRandomCode(12), Mode: mode, Status: openRegistrationStatusActive, CreatedBy: actorID, Reason: reason}
+	if config.AppConfig != nil {
+		campaign.AnnouncementChannelID = config.AppConfig.AnnouncementChannelID
+		campaign.AnnouncementGroupID = config.AppConfig.NoticeGroupID
+	}
 	if mode == openRegistrationModeQuota {
 		campaign.Quota = value
 	} else {
@@ -318,6 +340,9 @@ func createCompensationCampaign(actorID int64, points int, days int, announcemen
 		return model.CompensationCampaign{}, fmt.Errorf("COMPENSATION_NO_RECIPIENTS")
 	}
 	campaign := model.CompensationCampaign{CampaignID: "COMP-" + security.GenerateRandomCode(12), CreatedBy: actorID, Points: points, Days: days, Announcement: announcement, Status: compensationStatusQueued, RecipientCount: len(recipients), CreatedAtRun: now}
+	if config.AppConfig != nil {
+		campaign.AnnouncementChannelID = config.AppConfig.AnnouncementChannelID
+	}
 	grants := make([]model.CompensationGrant, 0, len(recipients))
 	for _, u := range recipients {
 		grants = append(grants, model.CompensationGrant{CampaignID: campaign.CampaignID, UserID: u.TelegramID, UserName: u.Username, Points: points, Days: days, Status: compensationGrantPending})
@@ -721,16 +746,9 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 			return true
 		}
 		session.SetTemp("open_reg_value", strconv.Itoa(v))
-		session.SetStep("WAITING_OPEN_REG_REASON")
-		telegram.UserSessions.Store(msg.From.ID, session)
-		telegram.SendPlainText(bot, msg.Chat.ID, "请输入本次开放注册原因（将写入审计，1-300 字）：")
-		return true
+		fallthrough
 	case "WAITING_OPEN_REG_REASON":
-		reason := strings.TrimSpace(text)
-		if reason == "" || len([]rune(reason)) > 300 {
-			telegram.SendPlainText(bot, msg.Chat.ID, "原因需为 1-300 字，请重新输入：")
-			return true
-		}
+		reason := storage.AutomaticAdminReason
 		session.SetTemp("open_reg_reason", reason)
 		session.SetStep("WAITING_OPEN_REG_CONFIRM")
 		telegram.UserSessions.Store(msg.From.ID, session)
@@ -753,6 +771,9 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 			return true
 		}
 		telegram.SendPlainText(bot, msg.Chat.ID, "✅ 开放注册已开启。\n活动编号："+campaign.CampaignID+"\n\n"+openRegistrationStatusText(time.Now()))
+		if config.AppConfig.AnnouncementChannelID == 0 {
+			telegram.SendPlainText(bot, msg.Chat.ID, "频道通知未启用；配置 ANNOUNCEMENT_CHANNEL_ID 后，新活动可自动公告。")
+		}
 		telegram.ClearSession(msg.From.ID)
 		return true
 	case "WAITING_OPEN_REG_CLOSE_CONFIRM":
@@ -798,8 +819,7 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 			telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("请输入每位用户统一补偿 ABS 天数（1-%d）：", compensationMaxDays))
 		} else {
 			session.SetTemp("comp_days", "0")
-			session.SetStep("WAITING_COMPENSATION_ANNOUNCEMENT")
-			telegram.SendPlainText(bot, msg.Chat.ID, "请输入事故播报说明（1-1000 字，将私发给所有用户）：")
+			return prepareCompensationConfirmation(bot, msg, session)
 		}
 		telegram.UserSessions.Store(msg.From.ID, session)
 		return true
@@ -810,28 +830,10 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 			return true
 		}
 		session.SetTemp("comp_days", strconv.Itoa(v))
-		session.SetStep("WAITING_COMPENSATION_ANNOUNCEMENT")
-		telegram.UserSessions.Store(msg.From.ID, session)
-		telegram.SendPlainText(bot, msg.Chat.ID, "请输入事故播报说明（1-1000 字，将私发给所有用户）：")
-		return true
+		return prepareCompensationConfirmation(bot, msg, session)
 	case "WAITING_COMPENSATION_ANNOUNCEMENT":
-		announcement := strings.TrimSpace(text)
-		if announcement == "" || len([]rune(announcement)) > 1000 {
-			telegram.SendPlainText(bot, msg.Chat.ID, "事故说明需为 1-1000 字，请重新输入：")
-			return true
-		}
-		var count int64
-		if err := storage.DB.Model(&model.User{}).Where("telegram_id <> ?", 0).Count(&count).Error; err != nil {
-			telegram.SendPlainText(bot, msg.Chat.ID, "❌ 用户数量读取失败，请稍后重试。")
-			return true
-		}
-		points, _ := strconv.Atoi(session.GetTemp("comp_points"))
-		days, _ := strconv.Atoi(session.GetTemp("comp_days"))
-		session.SetTemp("comp_announcement", announcement)
-		session.SetStep("WAITING_COMPENSATION_CONFIRM")
-		telegram.UserSessions.Store(msg.From.ID, session)
-		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 高危资产操作确认\n\n接收用户：%d\n每人积分：%d\n每人 ABS 天数：%d\n预计新增总积分：%d\n事故说明：%s\n\n补偿一旦开始不可自动撤销。\n请回复："+textfmt.Copyable("确认发放用户补偿"), count, points, days, count*int64(points), announcement))
-		return true
+		return prepareCompensationConfirmation(bot, msg, session)
+
 	case "WAITING_COMPENSATION_CONFIRM":
 		if text != "确认发放用户补偿" {
 			telegram.SendPlainText(bot, msg.Chat.ID, "请回复“"+textfmt.Copyable("确认发放用户补偿")+"”，或取消。")
@@ -846,9 +848,32 @@ func HandleAdminServiceOperations(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 			return true
 		}
 		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 补偿任务已进入队列。\n活动编号：%s\n接收用户：%d\n系统将逐人幂等发放并私聊通知，完成后回执。", campaign.CampaignID, campaign.RecipientCount))
+		if config.AppConfig.AnnouncementChannelID == 0 {
+			telegram.SendPlainText(bot, msg.Chat.ID, "补偿频道通知未启用；配置 ANNOUNCEMENT_CHANNEL_ID 后，新补偿任务可自动公告。")
+		}
 		telegram.ClearSession(msg.From.ID)
 		go dispatchPendingCompensations(bot)
 		return true
 	}
 	return false
+}
+
+// prepareCompensationConfirmation generates public copy from the chosen compensation standard.
+func prepareCompensationConfirmation(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *telegram.SessionState) bool {
+	announcement := "本次统一发放用户补偿，补偿标准及处理进度如下。"
+	var count int64
+	if err := storage.DB.Model(&model.User{}).Where("telegram_id <> ?", 0).Count(&count).Error; err != nil {
+		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 用户数量读取失败，请稍后重试。")
+		return true
+	}
+	points, _ := strconv.Atoi(session.GetTemp("comp_points"))
+	days, _ := strconv.Atoi(session.GetTemp("comp_days"))
+	if config.AppConfig.AnnouncementChannelID != 0 {
+		telegram.SendPlainText(bot, msg.Chat.ID, "频道公开说明预览：\n目标："+fmt.Sprint(config.AppConfig.AnnouncementChannelID)+"\n\n"+compensationAnnouncement(model.CompensationCampaign{Announcement: announcement, Points: points, Days: days}, false))
+	}
+	session.SetTemp("comp_announcement", announcement)
+	session.SetStep("WAITING_COMPENSATION_CONFIRM")
+	telegram.UserSessions.Store(msg.From.ID, session)
+	telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 高危资产操作确认\n\n接收用户：%d\n每人积分：%d\n每人 ABS 天数：%d\n预计新增总积分：%d\n事故说明：%s\n\n补偿一旦开始不可自动撤销。\n请回复："+textfmt.Copyable("确认发放用户补偿"), count, points, days, count*int64(points), announcement))
+	return true
 }

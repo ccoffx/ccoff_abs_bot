@@ -56,6 +56,8 @@ func ValidateAdminReason(text string) (string, bool) {
 }
 
 const (
+	// AutomaticAdminReason marks actions confirmed without a user-entered explanation.
+	AutomaticAdminReason       = "管理员确认操作（系统记录）"
 	AdminReasonRequirementText = "至少 5 个字，且不能包含换行、制表符或其他控制/分隔字符"
 	AdminReasonInvalidText     = "原因不符合要求，请输入" + AdminReasonRequirementText + "。"
 

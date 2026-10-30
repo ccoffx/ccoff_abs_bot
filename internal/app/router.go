@@ -39,10 +39,31 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	userID := msg.From.ID
 	chatID := msg.Chat.ID
 	text := strings.TrimSpace(msg.Text)
+	if joinVerification != nil && (len(msg.NewChatMembers) > 0 || msg.LeftChatMember != nil) {
+		return
+	}
+	if joinVerification != nil {
+		_, referral := account.ParseReferralStartPayload(text)
+		plainStart := msg.Chat.IsPrivate() && telegram.IsTelegramCommandText(text, "/start") && !referral && !activity.IsLotteryStart(text)
+		if !plainStart {
+			if ok, hint := joinVerification.Check(userID); !ok {
+				telegram.SendPlainText(bot, chatID, hint)
+				return
+			}
+		}
+	}
 
 	if msg.Chat.IsPrivate() {
 		if telegram.IsTelegramCommandText(text, "/start") {
 			telegram.ClearSession(userID)
+			if activity.IsLotteryStart(text) {
+				if config.AppConfig.NoticeGroupID != 0 && !telegram.IsUserInGroup(bot, userID, config.AppConfig.NoticeGroupID) {
+					telegram.SendPlainText(bot, chatID, "请先加入官方交流群再参与活动。")
+					return
+				}
+				activity.HandleLotteryStart(bot, msg, text)
+				return
+			}
 			if code, ok := account.ParseReferralStartPayload(text); ok {
 				if err := account.ValidateReferralCodeForStart(code, userID); err != nil {
 					if errors.Is(err, storage.ErrReferralSelfInvite) {
@@ -106,6 +127,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
+	if HandleChannelAnnouncementCommand(bot, msg, text) {
+		return
+	}
 	if books.HandleBookAnnouncementRecoveryCommand(bot, msg, text) {
 		return
 	}
@@ -861,9 +885,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					telegram.ReplyText(bot, chatID, "⚠️ 系统环境变量中尚未配置 `BACKUP_GROUP_ID`，无法发送。")
 					return
 				}
-				session.SetStep("WAITING_BACKUP_REASON")
-				telegram.ReplyText(bot, chatID, "📝 手动数据库备份会生成加密备份并发送到备份群组。\n请输入本次备份原因，"+storage.AdminReasonRequirementText+"：")
-				telegram.UserSessions.Store(userID, session)
+				prepareBackupConfirmation(bot, chatID, userID, session)
 				return
 			}
 			if strings.Contains(text, "授权") {
@@ -959,11 +981,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				time.Sleep(150 * time.Millisecond)
 			}
 
-			confirmMsg := "🚨 **以上为当前服务端检测出的全量遗孀名单**\n\n⚠️ *此操作将硬删除 ABS 服务端数据，不可逆！*\n\n请先输入本次清理原因，" + storage.AdminReasonRequirementText + "。"
-			telegram.ReplyText(bot, chatID, confirmMsg)
-
 			telegram.UserSessions.Store(userID, session)
-			return
 		}
 	}
 
@@ -1013,28 +1031,11 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		session.SetTemp("book_xmly_link", xmlyLink)
-		session.SetStep("WAITING_BOOK_USER_NOTE")
-		telegram.UserSessions.Store(userID, session)
-
-		telegram.SendPlainText(bot, chatID,
-			fmt.Sprintf(
-				"✅ 链接已记录。\n\n喜马拉雅链接：\n%s\n\n是否需要填写备注？\n例如："+textfmt.Copyable("想要全集")+"、"+textfmt.Copyable("缺少某几集")+"、"+textfmt.Copyable("指定版本等")+"。\n\n没有备注请发送："+textfmt.Copyable("跳过"),
-				xmlyLink,
-			),
-		)
+		session.SetTemp("book_user_note", "")
+		fallthrough
 
 	case "WAITING_BOOK_USER_NOTE":
-		userNote := strings.TrimSpace(text)
-		if userNote == "跳过" || userNote == "无" || userNote == "没有" {
-			userNote = ""
-		}
-
-		if normalizedNote, ok := books.ValidateBookRequestNote(userNote); !ok {
-			telegram.SendPlainText(bot, chatID, books.BookRequestNoteInvalidText)
-			return
-		} else {
-			userNote = normalizedNote
-		}
+		userNote := ""
 
 		session.SetTemp("book_user_note", userNote)
 		session.SetStep("WAITING_BOOK_CONFIRM")
@@ -1083,17 +1084,17 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		telegram.SendPlainText(bot, chatID, "请回复："+textfmt.Copyable("确认提交")+"、"+textfmt.Copyable("重新填写")+"，或取消。")
 
 	case "WAITING_BOOK_CANCEL_REASON":
+		if text != "确认取消求书" {
+			telegram.SendPlainText(bot, chatID, "请回复“确认取消求书”，或取消。")
+			return
+		}
 		if !books.IsBookRequestAdmin(userID) {
 			telegram.SendPlainText(bot, chatID, "❌ 权限不足。")
 			telegram.ClearSession(userID)
 			return
 		}
 
-		cancelReason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.SendPlainText(bot, chatID, "❌ "+storage.AdminReasonInvalidText)
-			return
-		}
+		cancelReason := storage.AutomaticAdminReason
 
 		reqIDRaw := session.GetTemp("book_cancel_req_id")
 		reqID64, err := strconv.ParseUint(reqIDRaw, 10, 64)
@@ -1460,9 +1461,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		session.SetTemp("invite_price_new", strconv.Itoa(price))
 		session.SetTemp("invite_price_old", strconv.Itoa(oldPrice))
-		session.SetStep("WAITING_SET_INVITE_PRICE_REASON")
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("📝 邀请码售价将从 `%d` 调整为 `%d` 积分。\n请输入本次调价原因，%s：", oldPrice, price, storage.AdminReasonRequirementText))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_SET_INVITE_PRICE_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -1470,11 +1469,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		price, err := strconv.Atoi(session.GetTemp("invite_price_new"))
 		if err != nil || price < 0 || price > 100000 {
@@ -1810,9 +1805,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		session.SetTemp("renew_price_new", strconv.Itoa(price))
 		session.SetTemp("renew_price_old", strconv.Itoa(oldPrice))
-		session.SetStep("WAITING_SET_RENEW_PRICE_REASON")
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("📝 续期卡售价将从 `%d` 调整为 `%d` 积分。\n请输入本次调价原因，%s：", oldPrice, price, storage.AdminReasonRequirementText))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_SET_RENEW_PRICE_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -1820,11 +1813,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		price, err := strconv.Atoi(session.GetTemp("renew_price_new"))
 		if err != nil || price < 0 || price > 100000 {
@@ -2347,9 +2336,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		session.SetTemp("promote_tgt_uid", strconv.FormatInt(tgtID, 10))
 		session.SetTemp("promote_tgt_username", tUser.Username)
-		session.SetStep("WAITING_PROMOTE_REASON")
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("📝 即将授权用户 `%s` / `%d` 为管理员。\n请输入授权原因，%s：", textfmt.EscapeMarkdown(tUser.Username), tgtID, storage.AdminReasonRequirementText))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_PROMOTE_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -2357,11 +2344,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		tgtID := session.GetTemp("promote_tgt_uid")
 		username := session.GetTemp("promote_tgt_username")
@@ -2482,9 +2465,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		session.SetTemp("whitelist_tgt_uid", strconv.FormatInt(tgtID, 10))
 		session.SetTemp("whitelist_tgt_username", tUser.Username)
-		session.SetStep("WAITING_WHITELIST_REASON")
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("📝 即将将用户 `%s` / `%d` 加入白名单。\n请输入设置原因，%s：", textfmt.EscapeMarkdown(tUser.Username), tgtID, storage.AdminReasonRequirementText))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_WHITELIST_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -2492,11 +2473,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		tgtID := session.GetTemp("whitelist_tgt_uid")
 		username := session.GetTemp("whitelist_tgt_username")
@@ -2581,12 +2558,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		session.SetTemp("server_lines_content", text)
-		session.SetStep("WAITING_SET_SERVER_LINES_REASON")
-		telegram.ReplyText(bot, chatID, fmt.Sprintf(
-			"📝 **线路配置预览**\n\n%s\n\n请输入本次更新原因，"+storage.AdminReasonRequirementText+"：",
-			textfmt.EscapeMarkdown(textfmt.TruncateRunes(text, 800)),
-		))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_SET_SERVER_LINES_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -2594,11 +2566,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		lines := session.GetTemp("server_lines_content")
 		if len([]rune(lines)) > 4000 {
@@ -2610,8 +2578,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		session.SetTemp("server_lines_reason", reason)
 		session.SetStep("WAITING_CONFIRM_SET_SERVER_LINES")
 		telegram.ReplyText(bot, chatID, fmt.Sprintf(
-			"⚠️ **线路配置二次确认**\n\n内容长度：`%d` 字\n原因：`%s`\n\n确认更新请回复：`确认设置线路`\n取消请回复：`取消`",
+			"⚠️ **线路配置二次确认**\n\n内容长度：`%d` 字\n\n内容预览：\n%s\n原因：`%s`\n\n确认更新请回复：`确认设置线路`\n取消请回复：`取消`",
 			len([]rune(lines)),
+			textfmt.EscapeMarkdown(textfmt.TruncateRunes(lines, 800)),
 			textfmt.EscapeMarkdown(reason),
 		))
 		telegram.UserSessions.Store(userID, session)
@@ -2655,29 +2624,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		telegram.ClearSession(userID)
 
 	case "WAITING_BACKUP_REASON":
-		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
-			telegram.ClearSession(userID)
-			return
-		}
-
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
-		if config.AppConfig == nil || config.AppConfig.BackupGroupID == 0 {
-			telegram.ReplyText(bot, chatID, "⚠️ 系统环境变量中尚未配置 `BACKUP_GROUP_ID`，无法发送。")
-			telegram.ClearSession(userID)
-			return
-		}
-
-		session.SetTemp("backup_reason", reason)
-		session.SetStep("WAITING_CONFIRM_BACKUP")
-		telegram.ReplyText(bot, chatID, fmt.Sprintf(
-			"⚠️ **手动备份二次确认**\n\n目标：备份群组\n原因：`%s`\n\n备份文件会使用 AES-GCM 加密后发送，请确认备份密钥已妥善保管。\n确认执行请回复：`确认备份`\n取消请回复：`取消`",
-			textfmt.EscapeMarkdown(reason),
-		))
-		telegram.UserSessions.Store(userID, session)
+		prepareBackupConfirmation(bot, chatID, userID, session)
 
 	case "WAITING_CONFIRM_BACKUP":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -2768,9 +2715,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		session.SetTemp("points_delta", strconv.Itoa(val))
-		session.SetStep("WAITING_MANAGE_POINTS_REASON")
-		telegram.ReplyText(bot, chatID, "📝 请输入本次调账原因，"+storage.AdminReasonRequirementText+"。\n例如：`活动奖励补发`、`异常积分回滚`。")
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_MANAGE_POINTS_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -2778,11 +2723,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		tID, err := strconv.ParseInt(session.GetTemp("tgt_uid"), 10, 64)
 		if err != nil || tID == 0 {
@@ -3721,9 +3662,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		session.SetTemp("invite_count", strconv.Itoa(count))
-		session.SetStep("WAITING_GEN_INVITE_REASON")
-		telegram.ReplyText(bot, chatID, "📝 请输入本次批量生成邀请码的原因，"+storage.AdminReasonRequirementText+"：")
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_GEN_INVITE_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -3731,11 +3670,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		count, err := strconv.Atoi(session.GetTemp("invite_count"))
 		if err != nil || count <= 0 || count > 100 {
@@ -3818,9 +3753,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		session.SetTemp("renew_count", strconv.Itoa(count))
-		session.SetStep("WAITING_GEN_RENEW_REASON")
-		telegram.ReplyText(bot, chatID, "📝 请输入本次批量生成续期卡的原因，"+storage.AdminReasonRequirementText+"：")
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_GEN_RENEW_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -3828,11 +3761,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		days, err := strconv.Atoi(session.GetTemp("days"))
 		if err != nil || days <= 0 || days > 365 {
@@ -3935,9 +3864,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		session.SetTemp("simulate_expire_tgt_uid", strconv.FormatInt(tgtID, 10))
 		session.SetTemp("simulate_expire_tgt_username", tUser.Username)
-		session.SetStep("WAITING_SIMULATE_EXPIRE_REASON")
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("📝 即将将用户 `%s` / `%d` 强制设为已过期。\n请输入操作原因，%s：", textfmt.EscapeMarkdown(tUser.Username), tgtID, storage.AdminReasonRequirementText))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_SIMULATE_EXPIRE_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -3945,11 +3872,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		tgtID := session.GetTemp("simulate_expire_tgt_uid")
 		username := session.GetTemp("simulate_expire_tgt_username")
@@ -4029,11 +3952,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		idsStr := session.GetTemp("widow_ids")
 		ids := strings.Split(idsStr, ",")
@@ -4257,10 +4176,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		session.SetTemp("suspend_new_status", fmt.Sprintf("%t", newSuspendStatus))
 		session.SetTemp("suspend_confirm_text", confirmText)
 		session.SetTemp("suspend_action_text", actionText)
-		session.SetStep("WAITING_SUSPEND_REASON")
-
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("📝 即将对用户 `%d` 执行【%s】。\n请输入操作原因，%s：", tgtID, actionText, storage.AdminReasonRequirementText))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_SUSPEND_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -4268,11 +4184,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		tgtID := session.GetTemp("suspend_tgt_uid")
 		username := session.GetTemp("suspend_tgt_username")
@@ -4440,10 +4352,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		session.SetTemp("delete_tgt_uid", strconv.FormatInt(tgtID, 10))
 		session.SetTemp("delete_tgt_username", tUser.Username)
-		session.SetStep("WAITING_FORCE_DELETE_REASON")
-
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("📝 即将物理删除用户 `%s` / `%d`。\n请输入删除原因，%s：", textfmt.EscapeMarkdown(tUser.Username), tgtID, storage.AdminReasonRequirementText))
-		telegram.UserSessions.Store(userID, session)
+		fallthrough
 
 	case "WAITING_FORCE_DELETE_REASON":
 		if !telegram.RequireSuperAdmin(bot, chatID, userID) {
@@ -4451,11 +4360,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.ReplyText(bot, chatID, storage.AdminReasonInvalidText)
-			return
-		}
+		reason := storage.AutomaticAdminReason
 
 		tgtID := session.GetTemp("delete_tgt_uid")
 		username := session.GetTemp("delete_tgt_username")
@@ -4627,4 +4532,27 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		telegram.ReplyText(bot, chatID, info)
 		telegram.ClearSession(userID)
 	}
+}
+
+func prepareBackupConfirmation(bot *tgbotapi.BotAPI, chatID, userID int64, session *telegram.SessionState) {
+	if !telegram.RequireSuperAdmin(bot, chatID, userID) {
+		telegram.ClearSession(userID)
+		return
+	}
+
+	reason := storage.AutomaticAdminReason
+	if config.AppConfig == nil || config.AppConfig.BackupGroupID == 0 {
+		telegram.ReplyText(bot, chatID, "⚠️ 系统环境变量中尚未配置 `BACKUP_GROUP_ID`，无法发送。")
+		telegram.ClearSession(userID)
+		return
+	}
+
+	session.SetTemp("backup_reason", reason)
+	session.SetStep("WAITING_CONFIRM_BACKUP")
+	telegram.ReplyText(bot, chatID, fmt.Sprintf(
+		"⚠️ **手动备份二次确认**\n\n目标：备份群组\n原因：`%s`\n\n备份文件会使用 AES-GCM 加密后发送，请确认备份密钥已妥善保管。\n确认执行请回复：`确认备份`\n取消请回复：`取消`",
+		textfmt.EscapeMarkdown(reason),
+	))
+	telegram.UserSessions.Store(userID, session)
+
 }

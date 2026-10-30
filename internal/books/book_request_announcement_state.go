@@ -69,6 +69,9 @@ func claimBookRequestAnnouncementDelivery(reqID uint, itemID string, targetChatI
 		default:
 			return fmt.Errorf("BOOK_ANNOUNCEMENT_STATUS_INVALID:%s", delivery.Status)
 		}
+		if delivery.TargetChatID != targetChatID {
+			return fmt.Errorf("公告目标与既有投递记录不一致，请恢复原目标后重试")
+		}
 		res := tx.Model(&model.BookRequestAnnouncementDelivery{}).
 			Where("request_id = ? AND status IN ?", reqID, []string{bookAnnouncementDeliveryPending, bookAnnouncementDeliveryFailed}).
 			Updates(map[string]interface{}{

@@ -62,15 +62,7 @@ func HandleCultivationAdminWriteCommand(bot *tgbotapi.BotAPI, message *tgbotapi.
 	session.SetStep("WAITING_CULTIVATION_ADMIN_WRITE_REASON")
 	telegram.UserSessions.Store(message.From.ID, session)
 
-	telegram.SendPlainText(
-		bot,
-		message.Chat.ID,
-		fmt.Sprintf(
-			("高危操作：该指令会修改全服斗气配置。\n\n待执行指令：\n"+textfmt.Copyable("%s")+"\n\n请输入本次变更原因，")+storage.AdminReasonRequirementText+"：",
-			textfmt.FormatPlainValue(normalizedText),
-		),
-	)
-	return true
+	return handleCultivationAdminWriteSession(bot, message, "", session)
 }
 
 func handleCultivationAdminWriteSession(bot *tgbotapi.BotAPI, message *tgbotapi.Message, text string, session *telegram.SessionState) bool {
@@ -82,11 +74,7 @@ func handleCultivationAdminWriteSession(bot *tgbotapi.BotAPI, message *tgbotapi.
 			return true
 		}
 
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.SendPlainText(bot, message.Chat.ID, storage.AdminReasonInvalidText)
-			return true
-		}
+		reason := storage.AutomaticAdminReason
 
 		pendingCommand := session.GetTemp("cultivation_admin_write_command")
 		if pendingCommand == "" || !isCultivationAdminWriteCommand(pendingCommand) {

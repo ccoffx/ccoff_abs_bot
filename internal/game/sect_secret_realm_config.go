@@ -414,8 +414,7 @@ func HandleSectSecretRealmAdminCommand(bot *tgbotapi.BotAPI, message *tgbotapi.M
 	session.SetTemp("sect_realm_config_command", normalizedText)
 	session.SetStep("WAITING_SECT_REALM_CONFIG_REASON")
 	telegram.UserSessions.Store(message.From.ID, session)
-	telegram.SendPlainText(bot, message.Chat.ID, fmt.Sprintf("高危操作：该指令会修改全服宗门秘境配置。\n\n待执行指令：\n"+textfmt.Copyable("%s")+"\n\n请输入本次变更原因，%s：", textfmt.FormatPlainValue(normalizedText), storage.AdminReasonRequirementText))
-	return true
+	return handleSectSecretRealmAdminSession(bot, message, "", session)
 }
 
 func handleSectSecretRealmAdminSession(bot *tgbotapi.BotAPI, message *tgbotapi.Message, text string, session *telegram.SessionState) bool {
@@ -426,11 +425,7 @@ func handleSectSecretRealmAdminSession(bot *tgbotapi.BotAPI, message *tgbotapi.M
 			telegram.ClearSession(message.From.ID)
 			return true
 		}
-		reason, ok := storage.ValidateAdminReason(text)
-		if !ok {
-			telegram.SendPlainText(bot, message.Chat.ID, storage.AdminReasonInvalidText)
-			return true
-		}
+		reason := storage.AutomaticAdminReason
 		pendingCommand := session.GetTemp("sect_realm_config_command")
 		if pendingCommand == "" || !isSectSecretRealmAdminWriteCommand(pendingCommand) {
 			telegram.SendPlainText(bot, message.Chat.ID, "宗门秘境配置写入会话状态异常，已中止。")

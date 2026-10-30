@@ -47,3 +47,9 @@
 - 包内测试随代码保留；`internal/app/` 的集成测试覆盖数据库新建与重启、备份、资产事务、并发领取和 Telegram 回调。
 - 用户操作说明见 [用户使用指南](user-guide.md)。
 - 自动回归、内置 ABS 模拟器和测试 Bot 操作见 [测试指南](testing.md)，镜像发布与运维见 [部署指南](deployment.md)。`internal/operations/` 提供不启动 Bot 的健康检查、SQLite 加密备份和恢复；`internal/buildinfo/` 保存构建与数据库兼容标识。
+
+
+`internal/joinverify/`：关注频道入群验证，包含 Telegram 管理接口、持久化验证状态机、成员事件队列、验证按钮和超时恢复；通过 `internal/app` 接入消息与按钮业务门禁。对应持久化模型位于 `internal/model/join_verification.go`。
+
+
+`internal/announcements/`：频道公告持久化投递、消息链接、群提醒、发送中断恢复和人工处置。`internal/app/channel_announcements.go` 接入注册/补偿状态及服务公告向导；`internal/activity/lottery_entry.go` 提供抽奖私聊深链接和二次确认。
