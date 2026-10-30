@@ -42,6 +42,14 @@ func lotteryJoinInput(activity model.LotteryActivity) string {
 	return fmt.Sprintf("参加抽奖 %d", activity.ID)
 }
 
+func lotteryUserActivityLabel(activityID uint) string {
+	var activity model.LotteryActivity
+	if err := storage.DB.Select("title").First(&activity, activityID).Error; err != nil {
+		return "抽奖"
+	}
+	return "抽奖《" + textfmt.LotteryDisplayText(activity.Title, 80, "-") + "》"
+}
+
 // Only called from an idle session. Existing command handlers retain priority.
 func handleLotteryKeyword(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) bool {
 	if validateLotteryJoinKeyword(text) != nil {

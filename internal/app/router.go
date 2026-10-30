@@ -28,8 +28,15 @@ import (
 	"ccoff-abs-bot/internal/textfmt"
 )
 
+// Channel posts, automatic discussion forwards and anonymous senders do not
+// identify a person whose membership or business session can be checked.
+func isInteractiveUserMessage(msg *tgbotapi.Message) bool {
+	return msg != nil && msg.Chat != nil && msg.From != nil &&
+		!msg.From.IsBot && msg.SenderChat == nil && !msg.IsAutomaticForward && msg.Chat.Type != "channel"
+}
+
 func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	if msg == nil || msg.Chat == nil || msg.From == nil {
+	if !isInteractiveUserMessage(msg) {
 		return
 	}
 
@@ -56,7 +63,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		plainStart := msg.Chat.IsPrivate() && telegram.IsTelegramCommandText(text, "/start") && !referral && !activity.IsLotteryStart(text)
 		if !plainStart {
 			if ok, hint := joinVerification.Check(userID); !ok {
-				telegram.SendPlainText(bot, chatID, hint)
+				sendJoinVerificationAccessMessage(bot, chatID, userID, hint)
 				return
 			}
 		}

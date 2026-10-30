@@ -286,6 +286,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 		return
 	}
 	if update.Message != nil {
+		if !isInteractiveUserMessage(update.Message) {
+			return
+		}
 		logIncomingMessage(update.Message)
 		if handlePrivateStartFastPath(bot, update.Message) {
 			return
@@ -330,6 +333,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			if joinVerification != nil {
 				if ok, hint := joinVerification.Check(cb.From.ID); !ok {
 					telegram.AnswerCallback(bot, cb.ID, hint)
+					if cb.Message != nil && cb.Message.Chat != nil {
+						sendJoinVerificationAccessMessage(bot, cb.Message.Chat.ID, cb.From.ID, hint)
+					}
 					return
 				}
 			}
@@ -372,6 +378,13 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			}
 			books.HandleBookRequestCallback(bot, cb)
 		}(update.CallbackQuery)
+	}
+}
+
+func sendJoinVerificationAccessMessage(bot *tgbotapi.BotAPI, chatID, userID int64, hint string) {
+	msg := joinVerification.AccessMessage(chatID, userID, hint)
+	if _, err := telegram.SendAutoDelete(bot, msg); err != nil {
+		log.Printf("发送验证入口失败: user=%d err=%s", userID, textfmt.FormatTelegramSendError(err))
 	}
 }
 

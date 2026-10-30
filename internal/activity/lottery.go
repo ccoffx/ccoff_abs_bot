@@ -272,7 +272,7 @@ func HandleLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text stri
 
 	switch {
 	case trimmed == "/lottery" || trimmed == "积分抽奖" || trimmed == "抽奖列表":
-		showActiveLotteries(bot, chatID)
+		showLotteryList(bot, chatID, role == "super_admin")
 		return true
 	case strings.HasPrefix(trimmed, "参加抽奖") || strings.HasPrefix(trimmed, "/join_lottery"):
 		handleJoinLotteryCommand(bot, msg, trimmed)
@@ -335,13 +335,21 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 			telegram.SendPlainText(bot, chatID, "❌ "+err.Error())
 			return
 		}
-		var count int64
-		if err := storage.DB.Model(&model.LotteryActivity{}).Where("join_keyword = ? AND status IN ?", text, []string{lotteryStatusActive, lotteryStatusDrawing}).Count(&count).Error; err != nil {
+		var existing model.LotteryActivity
+		err := storage.DB.Where("join_keyword = ? AND status IN ?", text, []string{lotteryStatusActive, lotteryStatusDrawing}).First(&existing).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			telegram.SendPlainText(bot, chatID, "❌ 参与口令校验失败，请稍后重试。")
 			return
 		}
-		if count > 0 {
-			telegram.SendPlainText(bot, chatID, "❌ 参与口令正在使用，请换一个口令。")
+		if err == nil {
+			message := fmt.Sprintf("❌ 参与口令正在使用：抽奖 #%d《%s》，状态：%s。\n请发送 %s 查看，或换一个口令。", existing.ID, textfmt.LotteryDisplayText(existing.Title, 80, "-"), lotteryStatusText(existing.Status), textfmt.Copyable(fmt.Sprintf("抽奖详情 %d", existing.ID)))
+			if existing.Status == lotteryStatusDrawing {
+				message += fmt.Sprintf("\n若长期停留在开奖中，可发送 %s 重试未完成的开奖。", textfmt.Copyable(fmt.Sprintf("强制开奖 %d", existing.ID)))
+			}
+			if existing.Status == lotteryStatusActive && existing.Mode == lotteryModeTime && existing.DrawAt != nil && !existing.DrawAt.After(time.Now()) {
+				message += "\n该活动已到开奖时间，但尚未完成开奖，仍占用口令。请检查开奖是否失败，或使用“强制开奖 活动ID”重试。"
+			}
+			telegram.SendPlainText(bot, chatID, message)
 			return
 		}
 		session.SetTemp("lottery_join_keyword", text)
@@ -758,6 +766,10 @@ func createLotteryActivityFromSession(msg *tgbotapi.Message, session *telegram.S
 }
 
 func showActiveLotteries(bot *tgbotapi.BotAPI, chatID int64) {
+	showLotteryList(bot, chatID, false)
+}
+
+func showLotteryList(bot *tgbotapi.BotAPI, chatID int64, showIDs bool) {
 	var activities []model.LotteryActivity
 	if err := storage.DB.Where("status IN ?", []string{lotteryStatusActive, lotteryStatusDrawn}).
 		Order("id desc").
@@ -776,7 +788,10 @@ func showActiveLotteries(bot *tgbotapi.BotAPI, chatID int64) {
 	for _, activity := range activities {
 		participantCount, participantErr := countLotteryParticipants(activity.ID)
 		statusText := lotteryStatusText(activity.Status)
-		b.WriteString(fmt.Sprintf("#%d %s\n", activity.ID, textfmt.LotteryDisplayText(activity.Title, 80, "-")))
+		if showIDs {
+			b.WriteString(fmt.Sprintf("#%d ", activity.ID))
+		}
+		b.WriteString(textfmt.LotteryDisplayText(activity.Title, 80, "-") + "\n")
 		b.WriteString(fmt.Sprintf("状态：%s\n", statusText))
 		if activity.Status == lotteryStatusActive {
 			if activity.Mode == lotteryModeCount {
@@ -919,7 +934,7 @@ func joinLotteryByID(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, id uint) {
 		return
 	}
 
-	successText := fmt.Sprintf("✅ 已成功参与抽奖 #%d，当前已成功参与 %d 人。", id, joinedCount)
+	successText := fmt.Sprintf("✅ 已成功参与%s，当前已成功参与 %d 人。", lotteryUserActivityLabel(id), joinedCount)
 	if !msg.Chat.IsPrivate() {
 		sendLotteryReplyPlainText(bot, msg, successText)
 	} else {
@@ -1027,7 +1042,7 @@ func joinLotteryActivity(activityID uint, tgUser *tgbotapi.User, sourceChatID in
 				userID,
 				-activity.EntryCost,
 				"lottery_entry_cost",
-				fmt.Sprintf("参与积分抽奖 #%d《%s》，消耗 %d 积分", activity.ID, lotteryPointDescriptionTitle(activity.Title), activity.EntryCost),
+				fmt.Sprintf("参与积分抽奖《%s》，消耗 %d 积分", lotteryPointDescriptionTitle(activity.Title), activity.EntryCost),
 				"lottery",
 				fmt.Sprintf("%d", activity.ID),
 			); err != nil {
@@ -1119,7 +1134,7 @@ func drawLotteryActivity(bot *tgbotapi.BotAPI, activityID uint, reason string, a
 
 	err := storage.RunFusionPoolLockedTransaction(func(tx *gorm.DB) error {
 		res := tx.Model(&model.LotteryActivity{}).
-			Where("id = ? AND status = ?", activityID, lotteryStatusActive).
+			Where("id = ? AND status IN ?", activityID, []string{lotteryStatusActive, lotteryStatusDrawing}).
 			Update("status", lotteryStatusDrawing)
 		if res.Error != nil {
 			return res.Error
@@ -1130,6 +1145,18 @@ func drawLotteryActivity(bot *tgbotapi.BotAPI, activityID uint, reason string, a
 
 		if err := tx.First(&activity, activityID).Error; err != nil {
 			return err
+		}
+		// A persisted drawing state can be left by older versions. Only retry
+		// draws without settlement evidence; never reroll an existing result.
+		if activity.DrawnAt != nil || activity.ClaimDeadlineAt != nil || activity.WinnersCount != 0 || activity.TotalEntryCost != 0 || activity.TotalRefundPoints != 0 || activity.FusionPoolPoints != 0 {
+			return fmt.Errorf("抽奖已有结算记录，请人工核查状态，不能重复开奖")
+		}
+		var existingWinners int64
+		if err := tx.Unscoped().Model(&model.LotteryWinner{}).Where("activity_id = ?", activityID).Count(&existingWinners).Error; err != nil {
+			return err
+		}
+		if existingWinners > 0 {
+			return fmt.Errorf("抽奖已有中奖记录，请人工核查状态，不能重复开奖")
 		}
 
 		var participants []model.LotteryParticipant
@@ -1287,7 +1314,7 @@ func lotteryClaimDeadline(activity model.LotteryActivity, now time.Time) time.Ti
 
 func lotteryResultText(activity model.LotteryActivity, participantCount int, winnerCount int, winners []lotteryDrawWinnerInfo) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("🎲 积分抽奖 #%d《%s》已开奖\n\n", activity.ID, textfmt.LotteryDisplayText(activity.Title, 80, "-")))
+	b.WriteString(fmt.Sprintf("🎲 积分抽奖《%s》已开奖\n\n", textfmt.LotteryDisplayText(activity.Title, 80, "-")))
 	b.WriteString(fmt.Sprintf("参与人数：%d\n", participantCount))
 	b.WriteString(fmt.Sprintf("中奖名额：%d\n", winnerCount))
 	if activity.TotalEntryCost > 0 {
@@ -1477,7 +1504,7 @@ func claimLotteryWinner(activity model.LotteryActivity, winner model.LotteryWinn
 				current.UserID,
 				current.Amount,
 				"lottery_reward",
-				fmt.Sprintf("积分抽奖 #%d《%s》中奖奖励", activity.ID, lotteryPointDescriptionTitle(activity.Title)),
+				fmt.Sprintf("积分抽奖《%s》中奖奖励", lotteryPointDescriptionTitle(activity.Title)),
 				"lottery",
 				fmt.Sprintf("%d", activity.ID),
 			); err != nil {
@@ -1994,7 +2021,7 @@ func cancelLotteryActivityWithFullRefund(activityID uint, actorID int64) (int, e
 				participant.UserID,
 				participant.EntryCost,
 				"lottery_cancel_refund",
-				fmt.Sprintf("积分抽奖 #%d《%s》取消，全额退还 %d 积分", activity.ID, lotteryPointDescriptionTitle(activity.Title), participant.EntryCost),
+				fmt.Sprintf("积分抽奖《%s》取消，全额退还 %d 积分", lotteryPointDescriptionTitle(activity.Title), participant.EntryCost),
 				"lottery",
 				fmt.Sprintf("%d", activity.ID),
 			); err != nil {
@@ -2101,7 +2128,7 @@ func StartLotteryScheduler(bot *tgbotapi.BotAPI) {
 func runLotterySchedulerTick(bot *tgbotapi.BotAPI) {
 	now := time.Now()
 	var dueActivities []model.LotteryActivity
-	if err := storage.DB.Where("status = ? AND mode = ? AND draw_at IS NOT NULL AND draw_at <= ?", lotteryStatusActive, lotteryModeTime, now).
+	if err := storage.DB.Where("status = ? OR (status = ? AND mode = ? AND draw_at IS NOT NULL AND draw_at <= ?)", lotteryStatusDrawing, lotteryStatusActive, lotteryModeTime, now).
 		Order("draw_at asc").
 		Limit(20).
 		Find(&dueActivities).Error; err != nil {

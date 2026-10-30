@@ -66,12 +66,12 @@ func claimAllLotteryRewards(bot *tgbotapi.BotAPI, chatID, userID int64) {
 		}
 		handled = true
 		if errors.Is(err, storage.ErrLotteryClaimExpired) {
-			telegram.SendPlainText(bot, chatID, fmt.Sprintf("⏳ 抽奖 #%d 的奖励已超过 24 小时领取期限，已失效。", winner.ActivityID))
+			telegram.SendPlainText(bot, chatID, fmt.Sprintf("⏳ %s的奖励已超过 24 小时领取期限，已失效。", lotteryUserActivityLabel(winner.ActivityID)))
 			continue
 		}
 		if err != nil {
 			log.Printf("抽奖领奖失败: activity=%d winner=%d user=%d err=%s", winner.ActivityID, winner.ID, userID, textfmt.FormatPlainError(err))
-			telegram.SendPlainText(bot, chatID, fmt.Sprintf("❌ 抽奖 #%d 的奖励暂时领取失败，已保留重试资格。请稍后发送 %s。", winner.ActivityID, textfmt.Copyable(lotteryClaimCommand)))
+			telegram.SendPlainText(bot, chatID, fmt.Sprintf("❌ %s的奖励暂时领取失败，已保留重试资格。请稍后发送 %s。", lotteryUserActivityLabel(winner.ActivityID), textfmt.Copyable(lotteryClaimCommand)))
 			continue
 		}
 		if err := sendLotteryPlainText(bot, chatID, reply); err != nil {

@@ -27,6 +27,7 @@ import (
 const CallbackPrefix = "joinverify:"
 const Timeout = 120 * time.Second
 const activeStates = "preparing,pending,restoring,kicking,unbanning"
+const accessHint = "⚠️ 使用本服务需要加入官方群、关注指定频道，并在 Bot 私聊中完成验证。"
 
 type Service struct {
 	db                        *gorm.DB
@@ -279,9 +280,57 @@ func (s *Service) Check(userID int64) (bool, string) {
 		return false, "⚠️ 关注状态暂时无法确认，请稍后重试。"
 	}
 	if !ok {
-		return false, "⚠️ 请先加入官方群，关注指定频道，并通过群内「去 Bot 验证」入口，在私聊中完成验证。"
+		return false, accessHint
 	}
 	return true, ""
+}
+
+// AccessMessage gives blocked messages and historic menu callbacks the same
+// actionable entry. It never creates a round or extends its deadline.
+func (s *Service) AccessMessage(chatID, userID int64, hint string) tgbotapi.MessageConfig {
+	msg := tgbotapi.NewMessage(chatID, hint)
+	if hint != accessHint {
+		return msg
+	}
+	unlock := s.lock(userID)
+	defer unlock()
+	r, err := s.record(userID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		msg.Text = "⚠️ 验证状态暂时无法读取，请稍后重试。"
+		return msg
+	}
+	if r.State == "pending" && r.PrivateEntry && s.now().Before(r.Deadline) {
+		msg.Text = fmt.Sprintf("⚠️ 请点击「去 Bot 验证」，在私聊中关注频道并完成验证。\n剩余 %d 秒，重新打开入口不会延长期限。", s.remaining(&r))
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("去 Bot 验证", "https://t.me/"+s.botUsername+"?start=jv_"+r.Round)))
+		return msg
+	}
+	if active(r.State) {
+		msg.Text = "⚠️ 本轮验证正在处理或已超时，请稍后重试；被移出群后可重新加入。"
+		return msg
+	}
+	if r.State == "manual" {
+		msg.Text = "⚠️ 群权限已由管理员调整，请联系管理员处理验证。"
+		return msg
+	}
+	var group struct {
+		Username   string `json:"username"`
+		InviteLink string `json:"invite_link"`
+	}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	if err := s.call("getChat", params(s.groupID, 0), &group); err == nil {
+		url := group.InviteLink
+		if group.Username != "" {
+			url = "https://t.me/" + group.Username
+		}
+		if url != "" {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL("加入官方群", url)))
+		}
+	}
+	msg.Text = "⚠️ 请先加入官方群，再按入群提示完成验证；若没有入群链接，请联系管理员获取。"
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL("前往关注频道", s.channelURL)))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	return msg
 }
 func (s *Service) ensure(userID int64, reason string) (bool, error) {
 	r, err := s.record(userID)

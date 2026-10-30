@@ -698,3 +698,57 @@ func TestPrivateCleanupRetriedAfterSuccess(t *testing.T) {
 		t.Fatal("private cleanup not retried")
 	}
 }
+
+func TestAccessMessageProvidesCurrentRoundWithoutExtendingDeadline(t *testing.T) {
+	s, _, now := fixture(t)
+	ok, hint := s.Check(1)
+	if ok {
+		t.Fatal("unverified user admitted")
+	}
+	r := record(t, s, 1)
+	*now = now.Add(30 * time.Second)
+	msg := s.AccessMessage(1, 1, hint)
+	keyboard, ok := msg.ReplyMarkup.(tgbotapi.InlineKeyboardMarkup)
+	if !ok || len(keyboard.InlineKeyboard) != 1 {
+		t.Fatalf("missing verification keyboard: %+v", msg)
+	}
+	button := keyboard.InlineKeyboard[0][0]
+	if button.URL == nil || *button.URL != "https://t.me/testbot?start=jv_"+r.Round || button.CallbackData != nil {
+		t.Fatalf("must open owner verification panel before confirmation: %+v", button)
+	}
+	if !strings.Contains(msg.Text, "90 秒") {
+		t.Fatalf("missing current countdown: %s", msg.Text)
+	}
+	if got := record(t, s, 1); got.Round != r.Round || !got.Deadline.Equal(r.Deadline) {
+		t.Fatalf("access message changed verification round: %+v", got)
+	}
+	*now = r.Deadline
+	msg = s.AccessMessage(1, 1, hint)
+	if msg.ReplyMarkup != nil || !strings.Contains(msg.Text, "超时") {
+		t.Fatalf("expired round must not offer a verification button: %+v", msg)
+	}
+}
+
+func TestAccessMessageDoesNotCreateRoundForNonmemberOrReadError(t *testing.T) {
+	s, f, _ := fixture(t)
+	delete(f.group, 1)
+	ok, hint := s.Check(1)
+	if ok {
+		t.Fatal("nonmember admitted")
+	}
+	msg := s.AccessMessage(1, 1, hint)
+	data, err := json.Marshal(msg.ReplyMarkup)
+	if err != nil || strings.Contains(string(data), "jv_") || !strings.Contains(string(data), "https://t.me/example") || !strings.Contains(msg.Text, "联系管理员") {
+		t.Fatalf("nonmember must get join guidance, not a nonexistent verification round: %+v %v", msg, err)
+	}
+	var count int64
+	if err := s.db.Model(&model.JoinVerification{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("nonmember access created a round: %d %v", count, err)
+	}
+	f.fail["getChatMember:-100"] = 1
+	_, hint = s.Check(1)
+	msg = s.AccessMessage(1, 1, hint)
+	if msg.ReplyMarkup != nil || !strings.Contains(msg.Text, "稍后重试") {
+		t.Fatalf("read errors must remain retryable: %+v", msg)
+	}
+}

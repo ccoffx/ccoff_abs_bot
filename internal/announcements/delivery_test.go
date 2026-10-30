@@ -29,6 +29,7 @@ type apiCapture struct {
 	failChannel, failGroup int
 	postAllowed            bool
 	channelKind            string
+	linkedChatID           int64
 }
 
 func announcementFixture(t *testing.T) (*tgbotapi.BotAPI, *apiCapture) {
@@ -64,7 +65,7 @@ func announcementFixture(t *testing.T) (*tgbotapi.BotAPI, *apiCapture) {
 		result := any(true)
 		switch method {
 		case "getChat":
-			result = map[string]any{"id": -100200, "type": cap.channelKind, "username": "public_channel"}
+			result = map[string]any{"id": -100200, "type": cap.channelKind, "username": "public_channel", "linked_chat_id": cap.linkedChatID}
 		case "getChatMember":
 			result = map[string]any{"status": "administrator", "can_post_messages": cap.postAllowed}
 		case "sendMessage":
@@ -171,6 +172,29 @@ func TestPublishAndReminderPersistIndependently(t *testing.T) {
 	Dispatch(bot)
 	if c.sends["-100200"] != 1 || loadDelivery(t, d.ID).TargetChatID != -100200 {
 		t.Fatal("queue replay changed destination or duplicated post")
+	}
+}
+
+func TestLinkedDiscussionGroupDoesNotReceiveDuplicateReminder(t *testing.T) {
+	for _, linked := range []int64{-100300, -100400} {
+		t.Run(strconv.FormatInt(linked, 10), func(t *testing.T) {
+			bot, c := announcementFixture(t)
+			c.linkedChatID = linked
+			d := queueTest(t, "linked:discussion", true)
+			Dispatch(bot)
+			Dispatch(bot)
+			r := loadDelivery(t, d.ID)
+			if r.State != "sent" || c.sends["-100200"] != 1 {
+				t.Fatal("channel publication missing or duplicated")
+			}
+			if linked == -100300 {
+				if r.ReminderState != "linked" || r.ReminderMessageID != 0 || c.sends["-100300"] != 0 {
+					t.Fatalf("linked group received an extra reminder: %+v", r)
+				}
+			} else if r.ReminderState != "sent" || c.sends["-100300"] != 1 {
+				t.Fatal("unlinked target group lost its reminder")
+			}
+		})
 	}
 }
 func TestUncertainSendRequiresExplicitResolution(t *testing.T) {

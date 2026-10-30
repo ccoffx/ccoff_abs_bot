@@ -28,6 +28,7 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	config.AppConfig.NoticeGroupID = -100
 	var mu sync.Mutex
 	muted, following := false, false
+	var privateVerificationEntries []string
 	acks := make(chan string, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -59,6 +60,9 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 		case "restrictChatMember":
 			muted = strings.Contains(r.Form.Get("permissions"), `"can_send_messages":false`)
 		case "sendMessage":
+			if r.Form.Get("chat_id") == "1" && strings.Contains(r.Form.Get("reply_markup"), "?start=jv_") {
+				privateVerificationEntries = append(privateVerificationEntries, r.Form.Get("reply_markup"))
+			}
 			result = map[string]any{"message_id": 123, "chat": map[string]any{"id": 1, "type": "private"}}
 		case "answerCallbackQuery":
 			acks <- r.Form.Get("text")
@@ -74,6 +78,25 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	joinVerification = joinverify.New(storage.DB, bot, -100, -200, 999, "https://t.me/example", nil, "testbot")
+	// Discussion forwards and chat identities must never become verification
+	// subjects or business commands, even when Telegram supplies a fake From.
+	for _, msg := range []*tgbotapi.Message{
+		{From: &tgbotapi.User{ID: 777000, IsBot: true}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
+		{From: &tgbotapi.User{ID: 1087968824}, SenderChat: &tgbotapi.Chat{ID: -200, Type: "channel"}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
+		{From: &tgbotapi.User{ID: 777000}, IsAutomaticForward: true, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
+		{From: &tgbotapi.User{ID: 1087968824}, SenderChat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
+	} {
+		jobs := make(chan telegramMessageJob, 1)
+		dispatchTelegramUpdate(bot, jobs, tgbotapi.Update{Message: msg})
+		if len(jobs) != 0 {
+			t.Fatal("non-user message entered business queue")
+		}
+		handleInteractiveMessage(bot, msg)
+	}
+	var nonUserRecords int64
+	if err := storage.DB.Model(&model.JoinVerification{}).Count(&nonUserRecords).Error; err != nil || nonUserRecords != 0 {
+		t.Fatalf("non-user message triggered verification: count=%d err=%v", nonUserRecords, err)
+	}
 	telegram.ClearSession(1)
 	defer telegram.ClearSession(1)
 	handleInteractiveMessage(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: "/start"})
@@ -97,6 +120,12 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	if telegram.GetSession(1).GetStep() != "IDLE" {
 		t.Fatal("unverified message entered business session")
 	}
+	mu.Lock()
+	entryCount := len(privateVerificationEntries)
+	mu.Unlock()
+	if entryCount != 2 {
+		t.Fatalf("blocked private messages must include verification buttons, got %d", entryCount)
+	}
 	send := func(data string, chatID int64) string {
 		t.Helper()
 		dispatchTelegramUpdate(bot, nil, tgbotapi.Update{CallbackQuery: &tgbotapi.CallbackQuery{ID: fmt.Sprintf("cb-%d", time.Now().UnixNano()), From: &tgbotapi.User{ID: 1}, Data: data, Message: &tgbotapi.Message{MessageID: 123, Chat: &tgbotapi.Chat{ID: chatID, Type: "private"}}}})
@@ -115,6 +144,12 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	}
 	if got := send("lottery_enter:1:1", 1); !strings.Contains(got, "验证") {
 		t.Fatalf("lottery confirmation bypassed follow gate: %s", got)
+	}
+	mu.Lock()
+	entryCount = len(privateVerificationEntries)
+	mu.Unlock()
+	if entryCount != 4 {
+		t.Fatalf("blocked historic callbacks must send verification buttons, got %d", entryCount)
 	}
 	mu.Lock()
 	following = true

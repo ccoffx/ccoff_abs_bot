@@ -317,3 +317,143 @@ func TestLotteryCreationPersistsKeywordWithoutClaimCode(t *testing.T) {
 		t.Fatalf("duplicate creation error: %v", err)
 	}
 }
+
+func TestLotteryKeywordWizardAfterActivityEnds(t *testing.T) {
+	for _, ending := range []string{"draw", "empty_draw", "cancel"} {
+		t.Run(ending, func(t *testing.T) {
+			db := setupKeywordDB(t)
+			bot, capture := newClaimBot(t)
+			lot := newKeywordLottery("秋日好运")
+			lot.Mode = lotteryModeTime
+			past := time.Now().Add(-time.Minute)
+			lot.DrawAt = &past
+			if err := db.Create(&lot).Error; err != nil {
+				t.Fatal(err)
+			}
+			msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}}
+			session := &telegram.SessionState{}
+			session.SetStep("WAITING_LOTTERY_JOIN_KEYWORD")
+			handleLotteryCreateStep(bot, msg, lot.JoinKeyword, session, "super_admin")
+			if session.GetStep() != "WAITING_LOTTERY_JOIN_KEYWORD" {
+				t.Fatal("overdue activity released keyword before completing draw")
+			}
+			messages := capture.snapshot()
+			last := messages[len(messages)-1].Text
+			for _, want := range []string{fmt.Sprintf("抽奖 #%d", lot.ID), "进行中", "尚未完成开奖"} {
+				if !strings.Contains(last, want) {
+					t.Fatalf("conflict message lacks %q: %s", want, last)
+				}
+			}
+			if ending == "draw" {
+				if err := db.Create(&model.LotteryParticipant{ActivityID: lot.ID, UserID: 101, JoinedAt: time.Now()}).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Create(&model.LotteryPrize{ActivityID: lot.ID, PrizeType: lotteryPrizePoints, Amount: 10, Quantity: 1}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if ending == "cancel" {
+				if _, err := cancelLotteryActivityWithFullRefund(lot.ID, 1); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := drawLotteryActivity(bot, lot.ID, "scheduled", 0); err != nil {
+				t.Fatal(err)
+			}
+			handleLotteryCreateStep(bot, msg, lot.JoinKeyword, session, "super_admin")
+			if session.GetStep() != "WAITING_LOTTERY_MODE" {
+				t.Fatal("ended activity still blocks keyword in wizard")
+			}
+			replacement := newKeywordLottery(lot.JoinKeyword)
+			if err := db.Transaction(func(tx *gorm.DB) error { return createLotteryActivityInTx(tx, &replacement) }); err != nil {
+				t.Fatalf("ended activity still blocks creation: %v", err)
+			}
+		})
+	}
+}
+
+func TestLotteryStuckDrawingRecovery(t *testing.T) {
+	for _, trigger := range []string{"manual", "scheduler_count", "scheduler_time"} {
+		t.Run(trigger, func(t *testing.T) {
+			db := setupKeywordDB(t)
+			bot, _ := newClaimBot(t)
+			lot := newKeywordLottery("恢复抽奖")
+			lot.Status = lotteryStatusDrawing
+			if trigger == "scheduler_time" {
+				lot.Mode = lotteryModeTime
+				past := time.Now().Add(-time.Minute)
+				lot.DrawAt = &past
+			}
+			if err := db.Create(&lot).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Create(&model.LotteryParticipant{ActivityID: lot.ID, UserID: 101, JoinedAt: time.Now()}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Create(&model.LotteryPrize{ActivityID: lot.ID, PrizeType: lotteryPrizePoints, Amount: 10, Quantity: 1}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if trigger == "manual" {
+				if err := drawLotteryActivity(bot, lot.ID, "manual", 1); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				runLotterySchedulerTick(bot)
+			}
+			if err := db.First(&lot, lot.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if lot.Status != lotteryStatusDrawn || lot.WinnersCount != 1 {
+				t.Fatalf("draw did not recover: %+v", lot)
+			}
+			if err := drawLotteryActivity(bot, lot.ID, "manual", 1); !errors.Is(err, storage.ErrLotteryNotActive) {
+				t.Fatalf("repeated draw: %v", err)
+			}
+			assertRewardCount(t, &model.LotteryWinner{}, 1)
+			replacement := newKeywordLottery(lot.JoinKeyword)
+			if err := createLotteryActivityInTx(db, &replacement); err != nil {
+				t.Fatalf("keyword not released: %v", err)
+			}
+		})
+	}
+}
+
+func TestLotteryStuckDrawingRejectsExistingResults(t *testing.T) {
+	for _, evidence := range []string{"drawn_at", "winner", "deleted_winner", "fusion_pool_points"} {
+		t.Run(evidence, func(t *testing.T) {
+			db := setupKeywordDB(t)
+			bot, _ := newClaimBot(t)
+			lot := newKeywordLottery("保护开奖结果")
+			lot.Status = lotteryStatusDrawing
+			if evidence == "drawn_at" {
+				now := time.Now()
+				lot.DrawnAt = &now
+			}
+			if evidence == "fusion_pool_points" {
+				lot.FusionPoolPoints = 1
+			}
+			if err := db.Create(&lot).Error; err != nil {
+				t.Fatal(err)
+			}
+			if evidence == "winner" || evidence == "deleted_winner" {
+				winner := model.LotteryWinner{ActivityID: lot.ID, UserID: 101, PrizeType: lotteryPrizePoints, Amount: 10}
+				if err := db.Create(&winner).Error; err != nil {
+					t.Fatal(err)
+				}
+				if evidence == "deleted_winner" {
+					if err := db.Delete(&winner).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := drawLotteryActivity(bot, lot.ID, "manual", 1); err == nil || !strings.Contains(err.Error(), "不能重复开奖") {
+				t.Fatalf("unsafe recovery accepted: %v", err)
+			}
+			if err := db.First(&lot, lot.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if lot.Status != lotteryStatusDrawing {
+				t.Fatalf("unsafe recovery changed status: %s", lot.Status)
+			}
+		})
+	}
+}

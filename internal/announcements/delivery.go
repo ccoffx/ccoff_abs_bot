@@ -355,6 +355,14 @@ func remind(bot *tgbotapi.BotAPI, d *model.AnnouncementDelivery) {
 		failReminder(bot, d, err, true)
 		return
 	}
+	// Telegram automatically forwards channel posts to their linked discussion
+	// group. A separate reminder there would duplicate the same announcement.
+	if chat.Type == "channel" && chat.LinkedChatID == d.ReminderGroupID {
+		if err := storage.DB.Model(d).Updates(map[string]any{"reminder_state": "linked", "last_error": ""}).Error; err != nil {
+			log.Printf("linked discussion reminder state: %s", textfmt.FormatPlainError(err))
+		}
+		return
+	}
 	link := MessageLink(d.TargetChatID, chat.UserName, d.MessageID)
 	if link == "" {
 		failReminder(bot, d, fmt.Errorf("cannot create channel message link"), true)
