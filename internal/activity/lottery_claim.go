@@ -1,0 +1,103 @@
+package activity
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/security"
+	"ccoff-abs-bot/internal/storage"
+	"ccoff-abs-bot/internal/telegram"
+	"ccoff-abs-bot/internal/textfmt"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"gorm.io/gorm"
+)
+
+var errLotteryAlreadyClaimed = errors.New("LOTTERY_ALREADY_CLAIMED")
+var lotteryClaimLocation = time.FixedZone("CST", 8*3600)
+
+func formatLotteryClaimDeadline(activity model.LotteryActivity) string {
+	if activity.ClaimDeadlineAt == nil {
+		return "未开奖"
+	}
+	return activity.ClaimDeadlineAt.In(lotteryClaimLocation).Format("2006-01-02 15:04:05") + "（北京时间）"
+}
+
+func claimAllLotteryRewards(bot *tgbotapi.BotAPI, chatID, userID int64) {
+	var winners []model.LotteryWinner
+	if err := storage.DB.Where("user_id = ? AND (status = ? OR (status = ? AND reward_delivered_at IS NULL))", userID, lotteryWinnerPending, lotteryWinnerClaimed).Order("id asc").Find(&winners).Error; err != nil {
+		telegram.SendPlainText(bot, chatID, "❌ 查询奖励失败，请稍后再次点击「领取奖励」按钮。")
+		return
+	}
+	handled := false
+	for _, winner := range winners {
+		// The transaction reloads the activity and winner to reject stale status,
+		// expiry, and concurrent claims. Each reward commits independently.
+		reply, err := claimLotteryWinner(model.LotteryActivity{Model: gorm.Model{ID: winner.ActivityID}}, winner)
+		if errors.Is(err, errLotteryAlreadyClaimed) {
+			continue
+		}
+		handled = true
+		if errors.Is(err, storage.ErrLotteryClaimExpired) {
+			telegram.SendPlainText(bot, chatID, fmt.Sprintf("⏳ %s的奖励已超过 24 小时领取期限，已失效。", lotteryUserActivityLabel(winner.ActivityID)))
+			continue
+		}
+		if err != nil {
+			log.Printf("抽奖领奖失败: activity=%d winner=%d user=%d err=%s", winner.ActivityID, winner.ID, userID, textfmt.FormatPlainError(err))
+			telegram.SendPlainText(bot, chatID, fmt.Sprintf("❌ %s的奖励暂时领取失败，已保留重试资格。请稍后再次点击「领取奖励」按钮。", lotteryUserActivityLabel(winner.ActivityID)))
+			continue
+		}
+		if err := sendLotteryPlainText(bot, chatID, reply); err != nil {
+			log.Printf("抽奖领取结果发送失败，保留原结果供重试: winner=%d user=%d err=%s", winner.ID, userID, textfmt.FormatTelegramSendError(err))
+			telegram.NotifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 抽奖 #%d 用户 %d 已领取奖励，但私聊发送失败。已加密保存领取结果，用户可再次点击「领取奖励」按钮重试。", winner.ActivityID, userID))
+			continue
+		}
+		deliveredAt := time.Now()
+		res := storage.DB.Model(&model.LotteryWinner{}).Where("id = ? AND user_id = ? AND status = ? AND reward_delivered_at IS NULL", winner.ID, userID, lotteryWinnerClaimed).Update("reward_delivered_at", &deliveredAt)
+		if res.Error != nil {
+			log.Printf("抽奖领取结果送达标记失败: winner=%d err=%s", winner.ID, textfmt.FormatPlainError(res.Error))
+		}
+	}
+	if !handled {
+		telegram.SendPlainText(bot, chatID, "当前没有待领取的抽奖奖励。已领取的奖励不会重复发放；奖励须在开奖后 24 小时内领取，逾期自动失效。")
+	}
+}
+
+// The persisted reply includes any newly generated code. Both the asset change
+// and this ciphertext commit together, so failed delivery never loses the code.
+func lotteryRewardAAD(winner model.LotteryWinner) []byte {
+	return []byte(fmt.Sprintf("activity=%d:winner=%d:user=%d", winner.ActivityID, winner.ID, winner.UserID))
+}
+func encryptLotteryRewardResult(reply string, winner model.LotteryWinner) (string, error) {
+	return security.EncryptSecretReceipt("lottery-reward-result", string(lotteryRewardAAD(winner)), reply)
+}
+func decryptLotteryRewardResult(winner model.LotteryWinner) (string, error) {
+	return security.DecryptSecretReceipt("lottery-reward-result", string(lotteryRewardAAD(winner)), winner.RewardResultEncrypted)
+}
+
+func expirePendingLotteryRewards(now time.Time) {
+	var lastID uint
+	for {
+		var winners []model.LotteryWinner
+		err := storage.DB.Model(&model.LotteryWinner{}).Select("lottery_winners.*").Joins("JOIN lottery_activities a ON a.id = lottery_winners.activity_id").Where("lottery_winners.status = ? AND a.status = ? AND a.deleted_at IS NULL AND a.claim_deadline_at <= ? AND lottery_winners.id > ?", lotteryWinnerPending, lotteryStatusDrawn, now, lastID).Order("lottery_winners.id asc").Limit(100).Find(&winners).Error
+		if err != nil {
+			log.Printf("查询过期抽奖奖励失败: %s", textfmt.FormatPlainError(err))
+			return
+		}
+		if len(winners) == 0 {
+			return
+		}
+		lastID = winners[len(winners)-1].ID
+		for _, winner := range winners {
+			err := storage.DB.Transaction(func(tx *gorm.DB) error {
+				_, err := expireLotteryWinnerInTx(tx, winner.ActivityID, winner.ID, winner.UserID, "24 hour claim deadline exceeded")
+				return err
+			})
+			if err != nil {
+				log.Printf("抽奖奖励过期处理失败: winner=%d err=%s", winner.ID, textfmt.FormatPlainError(err))
+			}
+		}
+	}
+}

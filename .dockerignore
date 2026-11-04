@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+!.env.test.example
+
+# Runtime data
+data/
+data-test/
+deploy-state/
+.release.env
+dist/
+backups/
+logs/
+tmp/
+reports/
+.tools/
+
+# SQLite files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Encrypted backups
+*.enc
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Build artifacts
+ccoff-abs-bot
+ccoff_abs_bot
+abs_bot
+bot
+*.out
+
+# Documentation / local agent settings
+docs/
+.claude/

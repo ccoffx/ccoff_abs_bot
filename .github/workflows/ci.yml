@@ -1,0 +1,239 @@
+name: Check and build candidate
+on:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+env:
+  CGO_ENABLED: "1"
+  GOFLAGS: -mod=readonly
+  GOTOOLCHAIN: local
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.10
+          cache: false
+      # setup-go's dependency-only cache key stops updating once go.sum is stable.
+      # Save each source snapshot so subsequent commits reuse compiled packages.
+      - name: Restore and update Go checks cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-checks-v1-${{ runner.os }}-${{ runner.arch }}-1.26.10-${{ hashFiles('go.mod', 'go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            go-checks-v1-${{ runner.os }}-${{ runner.arch }}-1.26.10-${{ hashFiles('go.mod', 'go.sum') }}-
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - name: Deployment failure and rollback rehearsal
+        run: python3 scripts/test_deploy.py
+      - name: Release promotion failure and retry rehearsal
+        run: python3 scripts/test_release.py
+      - name: Shell syntax
+        run: for file in deploy.sh scripts/*.sh; do bash -n "$file"; done
+  build:
+    # Build concurrently with checks; the bundle below gates release eligibility.
+    name: Native image build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+        id: builder
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reuse an existing immutable architecture image on retries
+        id: existing
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=$(mktemp); registry_error=$(mktemp)
+          if docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA-$ARCH" > "$manifest" 2> "$registry_error"; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "digest=$(awk '/^Digest:/ {print $2; exit}' "$manifest")" >> "$GITHUB_OUTPUT"
+          elif grep -Eqi 'manifest unknown|not found|NAME_UNKNOWN|MANIFEST_UNKNOWN' "$registry_error"; then
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          else
+            cat "$registry_error" >&2
+            exit 1
+          fi
+      # GHA layer caches do not include RUN --mount=type=cache contents.
+      # Restore the compiler cache separately for each native architecture.
+      - name: Restore and update Docker Go compiler cache
+        if: steps.existing.outputs.exists != 'true'
+        id: go-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/docker-go-build
+          key: docker-go-v1-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Dockerfile', 'go.mod', 'go.sum') }}-${{ hashFiles('main.go', 'internal/**/*.go') }}
+          restore-keys: |
+            docker-go-v1-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Dockerfile', 'go.mod', 'go.sum') }}-
+      - name: Inject and extract Docker Go compiler cache
+        if: steps.existing.outputs.exists != 'true'
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3
+        with:
+          builder: ${{ steps.builder.outputs.name }}
+          cache-map: '{"${{ runner.temp }}/docker-go-build": "/root/.cache/go-build"}'
+          scratch-dir: ${{ runner.temp }}/buildkit-cache-dance
+          skip-extraction: ${{ steps.go-cache.outputs.cache-hit }}
+      - name: Build native CGO image
+        if: steps.existing.outputs.exists != 'true'
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}-${{ matrix.arch }}
+          build-args: |
+            VERSION=sha-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+      - name: Record architecture image digest
+        env:
+          DIGEST: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p image-digests
+          printf '%s\n' "$DIGEST" > "image-digests/$ARCH.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ github.sha }}-${{ matrix.arch }}
+          path: image-digests/*.txt
+          retention-days: 7
+  candidate:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.manifest.outputs.image }}
+      digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-${{ github.sha }}-*
+          path: image-digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Merge native images into the immutable candidate
+        id: manifest
+        env:
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(printf 'ghcr.io/%s' "$REPO" | tr '[:upper:]' '[:lower:]')
+          amd64=$(cat image-digests/amd64.txt)
+          arm64=$(cat image-digests/arm64.txt)
+          for digest in "$amd64" "$arm64"; do
+            if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo 'Invalid architecture image digest' >&2
+              exit 1
+            fi
+          done
+          # The architecture tags and their inputs are immutable for this SHA.
+          # Reuse an assembled candidate on retries rather than rewriting it.
+          manifest=$(mktemp)
+          registry_error=$(mktemp)
+          trap 'rm -f "$manifest" "$registry_error"' EXIT
+          if docker buildx imagetools inspect "$image:sha-$GITHUB_SHA" > "$manifest" 2> "$registry_error"; then
+            echo 'Reusing the existing immutable candidate'
+          elif grep -Eqi 'manifest unknown|MANIFEST_UNKNOWN|: not found$' "$registry_error"; then
+            docker buildx imagetools create --tag "$image:sha-$GITHUB_SHA" "$image@$amd64" "$image@$arm64"
+            docker buildx imagetools inspect "$image:sha-$GITHUB_SHA" > "$manifest"
+          else
+            cat "$registry_error" >&2
+            exit 1
+          fi
+          digest=$(awk '/^Digest:/ {print $2; exit}' "$manifest")
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+  smoke:
+    name: Container maintenance smoke test (${{ matrix.platform }})
+    needs: candidate
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Separate runners prevent Docker's classic image store from loading two
+      # platform variants of the same manifest-list digest into one daemon.
+      - name: Container maintenance smoke test
+        env:
+          IMAGE: ${{ needs.candidate.outputs.image }}@${{ needs.candidate.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: ./scripts/image-smoke.sh "$IMAGE" "$PLATFORM"
+  bundle:
+    name: Package verified candidate
+    needs: [checks, candidate, smoke]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source-free deployment bundle
+        env:
+          IMAGE: ${{ needs.candidate.outputs.image }}
+          DIGEST: ${{ needs.candidate.outputs.digest }}
+        run: |
+          ./scripts/package-release.sh
+          jq -n --arg commit "$GITHUB_SHA" --arg image "$IMAGE@$DIGEST" '{commit:$commit,image:$image,schemaCompatibility:"1",coverage:"Mock ABS and Telegram group tests; real ABS compatibility and real group permissions are not verified."}' > dist/candidate.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ github.sha }}
+          path: dist/*
+          retention-days: 90

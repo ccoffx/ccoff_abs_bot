@@ -1,0 +1,34 @@
+name: ccoff-abs-bot-test
+services:
+  bot:
+    image: ${TEST_BOT_IMAGE:-ccoff-abs-bot:test}
+    build:
+      context: .
+      args:
+        VERSION: local-test
+        COMMIT: local
+    restart: "no"
+    env_file: .env.test
+    environment:
+      TZ: Asia/Shanghai
+      APP_ENV: test
+      ABS_MODE: mock
+      TEST_DATA_DIR: data-test
+      DATABASE_URL: data-test/bot_data.db
+      NOTICE_GROUP_ID: "0"
+      BACKUP_GROUP_ID: "0"
+    volumes:
+      - ./data-test:/app/data-test
+    read_only: true
+    tmpfs: /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]
+    mem_limit: 512m
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

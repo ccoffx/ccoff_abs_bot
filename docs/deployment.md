@@ -1,0 +1,247 @@
+# 镜像发布、部署与恢复
+
+正式设备只需 Linux x86_64、Bash、Docker Engine 与 Compose v2，以及能拉取 GHCR、访问 Telegram 和真实 ABS 的网络。开发和 AI 均留在 Mac。正式 Bot 使用 SQLite，保持单实例；更新允许短暂停机。
+
+## GitHub 首次配置与发布
+
+普通提交和 PR 不触发 GitHub Actions。推送指向 `main` 提交的 `vX.Y.Z` tag 后，`Publish tagged release` 先校验版本标签，再调用 `Check and build candidate` 执行普通测试、竞态检查、静态检查和部署脚本演练，同时在 amd64 和 arm64 原生运行器上并行构建各自的 GHCR 镜像，不经过 QEMU 模拟编译；随后合并为同一个多架构候选镜像，再在对应架构的独立原生运行器上执行容器维护冒烟测试。全部检查和两种架构冒烟测试均通过后才生成部署包，并自动创建同名 GitHub Release。
+
+检查缓存按 Go 版本、依赖和源码更新；镜像构建分别保存 Docker 层缓存和各架构的 Go 编译缓存，后续发版复用未变化的包，只重新编译受改动影响的包并链接带当前 SHA 的程序。首次构建或缓存被清理后需要完整编译。Docker 编译层只复制应用源码；版本镜像复用本次流程中已验证的候选镜像，不重复编译。
+
+镜像位置为 `ghcr.io/ccoffx/ccoff_abs_bot`。候选首次创建后，在 GitHub Packages 中确认可见性为 **Private**，授予仓库 Actions 对该包的写入权限。工作流使用自带 `GITHUB_TOKEN`，无需配置正式设备的 SSH 或 Bot/ABS 密钥。
+
+在 Mac 用独立测试 Bot 和本地源码或本地构建镜像验收待发布提交，完成当前结构首次建库和重启验证后，将提交推送到 `main`，再推送版本 tag，启动自动检查、构建和发布：
+
+```sh
+git push origin main
+./scripts/release.sh            # 自动取最新 tag 的下一个补丁版本，例如 v1.0.7
+# 需要指定大版本或小版本时：./scripts/release.sh v1.1.0
+```
+
+脚本要求工作区干净且本地 `main` 与 `origin/main` 一致，打印版本号和完整 SHA，然后创建并推送同名 Git tag。也可直接执行 `git tag -a v1.0.7 -m 'Release v1.0.7' && git push origin v1.0.7`。tag 推送成功只表示发布任务已触发；以 GitHub Actions 的 **Publish tagged release** 成功和同名 GitHub Release 为准。脚本不会自动提交代码或更新正式设备。
+
+版本号就是 tag 名；可用 `git tag --sort=-version:refname | head` 查看最近版本，正式设备用 `./deploy.sh status` 查看当前部署版本。保护发布版本时，请在 GitHub 仓库规则中禁止改写或删除 `v*` tag。
+
+发布工作流只接受指向主分支提交的 `vX.Y.Z` tag，检查和构建全部成功后，从同一次发布流程下载 digest 和部署包，复用已验证的镜像 manifest 创建版本镜像，并创建 GitHub Release。任何检查失败都会阻止创建 Release；可在 Actions 中重跑失败任务。已有不同 digest 的镜像版本拒绝覆盖。Release 附件包括：
+
+- `deployment.tar.gz`：部署脚本、Compose、配置模板和操作文档，不含应用源码。
+- `deployment.tar.gz.sha256`：部署包校验值。
+- `release.json`：版本、源码提交、固定镜像 digest、数据库兼容标识与验证边界。
+
+二进制内嵌的是候选 SHA；正式版本和 digest 记录在部署设备的 `.release.env` 与部署历史中。修改仓库名称或转移仓库时，同时调整脚本默认 `IMAGE_REPOSITORY`，或在运维环境显式设置该变量。
+
+## 从测试部署重置为首次正式部署
+
+以下流程仅用于丢弃上线前的测试数据。Bot 的账号绑定、积分、订单、活动和部署历史将重新开始；真实 ABS 中的账号及 Telegram 中已发送的消息不会随本地数据库重置而消失。
+
+若正式版本从 `v1.0.0` 重新开始，先在 GitHub 清理旧测试 Release、远端版本 tag 和 GHCR 包中对应的测试镜像版本，并清理开发机上的旧测试 tag。只删除 Release 不会删除镜像，同名旧镜像仍会使发布工作流因 digest 不同而拒绝覆盖。旧的更高版本 tag 也应清理，否则 `scripts/release.sh` 自动选版本时仍以旧测试版本为基准。将本次代码提交并推送到 `main` 后，使用 `./scripts/release.sh v1.0.0` 发版，等待 Actions 成功。
+
+在正式设备上先查看 Bot 的数据挂载目录与 Compose 工作目录，确认当前部署位置：
+
+```sh
+docker inspect ccoff_abs_bot --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+docker inspect ccoff_abs_bot --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}'
+```
+
+进入确认后的 Bot 部署目录，确保没有部署或备份任务同时运行，再停止并删除旧 Bot 容器，将数据和版本记录移出部署目录。下面保留 `.env` 并留存旧数据，不操作其他应用的容器：
+
+```sh
+(
+  set -eu
+  test -f deploy.sh
+  test -f docker-compose.yml
+  test -f .env
+  test ! -d deploy-state/.lock
+  docker stop ccoff_abs_bot
+  docker rm ccoff_abs_bot
+  archive_dir=$(mktemp -d "$PWD/../ccoff-abs-bot-before-reset.XXXXXX")
+  chmod 700 "$archive_dir"
+  cp -p .env "$archive_dir/.env"
+  for item in data deploy-state .release.env; do
+    if [ -e "$item" ]; then mv -- "$item" "$archive_dir/"; fi
+  done
+  printf '旧数据已归档到：%s\n' "$archive_dir"
+)
+```
+
+旧容器移除后，只清理这个 Bot 的旧版本镜像：
+
+```sh
+docker image ls --format '{{.Repository}}:{{.Tag}}' ghcr.io/ccoffx/ccoff_abs_bot |
+while IFS= read -r image; do
+  case "$image" in
+    ghcr.io/ccoffx/ccoff_abs_bot:v*)
+      docker image rm "$image"
+      ;;
+  esac
+done
+```
+
+下载新 `v1.0.0` Release 的部署包与校验文件，校验后解压到该部署目录（不替换 `.env`）；核对配置，再执行：
+
+```sh
+chmod 600 .env
+IMAGE_REPOSITORY=ghcr.io/ccoffx/ccoff_abs_bot ./deploy.sh update v1.0.0
+./deploy.sh status
+./deploy.sh logs
+```
+
+这会重新拉取镜像并创建空数据库。
+
+不强制删除正在使用的镜像；不使用全局 `docker system prune` 或 volume 清理。归档目录包含旧密钥和数据库，需妥善保管；确认不再需要后再单独删除。原来的外部备份目录设置保存在已归档的 `deploy-state/`，正式部署后需重新执行 `set-backup-destination`。
+
+## 正式设备首次安装
+
+从 Release 下载部署包和校验文件，放到同一目录，核对校验并解压到固定位置（例如 `/opt/ccoff-abs-bot`）。不要把新包覆盖到运行数据目录。
+
+部署目录需要当前运维用户具有写权限；创建 `/opt` 下的目录时，按设备权限使用 sudo 并授予该用户目录所有权。
+
+```sh
+sha256sum -c deployment.tar.gz.sha256
+mkdir -p /opt/ccoff-abs-bot
+tar -xzf deployment.tar.gz -C /opt/ccoff-abs-bot
+cd /opt/ccoff-abs-bot
+cp .env.example .env
+chmod 600 .env
+```
+
+填写正式 `.env`，保持 `APP_ENV=production`、`ABS_MODE=real`、`DATABASE_URL=data/bot_data.db`。部署脚本目前约定这个数据库路径；自定义路径需要同时调整脚本和挂载。`SECURITY_PEPPER` 与 `BACKUP_ENCRYPT_KEY` 使用两个不同的长期随机密钥，单独安全保存，后续更新保留原值。
+
+群聊中的 `签到`、`每日签到` 和其他中文指令属于普通群消息；Bot 需要能接收群内普通消息。将 Bot 设为群管理员，或在 BotFather 关闭隐私模式，并确认 `NOTICE_GROUP_ID` 配置正确。
+
+Compose 从宿主 `.env` 注入配置，应用容器以 UID 10001 运行；维护容器仅在执行维护命令时以 root 离线访问挂载文件。不要把 Bot/ABS 密钥写进镜像、版本控制或镜像仓库凭据中。
+
+私有镜像使用有 `read:packages` 权限的 GitHub 凭据登录一次：
+
+```sh
+docker login ghcr.io
+```
+
+首次上线时选定设备外副本目录。它可以是另一台设备提供的已挂载网络目录，备份工具本身不需要额外 Telegram 群：
+
+```sh
+./deploy.sh set-backup-destination /mnt/off-device-backup
+./deploy.sh update v1.0.0
+./deploy.sh status
+```
+
+指定目录必须已存在且可写。脚本要求它在部署目录以外；是否确实位于另一台设备由挂载配置保证。加密密钥及 `SECURITY_PEPPER` 也必须有独立安全副本，数据库备份不包含这些配置。
+
+## 日常更新与状态
+
+```sh
+./deploy.sh update v1.0.1
+./deploy.sh status
+./deploy.sh logs
+```
+
+更新先拉取镜像并固定 digest，再检查配置、数据库兼容标识及备份空间，随后停止旧实例、创建并校验加密一致性备份、启动新版本。备份会复制到已配置的外部目录；副本失败时返回错误，保留本地备份。
+
+最多等待 180 秒，要求进程存在、SQLite 可读并且最近 120 秒内成功完成过 Telegram 轮询。启动阶段文件不作为运行健康证明。网络持续不可用也会导致健康检查失败；Docker 的 `unless-stopped` 不会仅因为 unhealthy 自动重启容器。
+
+拉取或兼容检查失败时，原实例继续运行。停止旧实例之后失败，脚本保持现场并退出；启动检查失败时还会保存日志并停止新实例。它不会自动恢复数据库，也不会在新旧实例之间反复切换。查看 `status`、`deploy-state/history.tsv`、失败日志和最近备份，再选择恢复操作。
+
+操作通过目录锁互斥。进程被强制终止可能留下 `deploy-state/.lock`，确认没有维护任务运行后再手动移除。不要并行执行额外的 `docker compose up` 绕过此锁。
+
+## 每日加密备份
+
+```sh
+./deploy.sh backup
+```
+
+日常备份使用在线 `VACUUM INTO`，完整包含已提交的 WAL 数据，不要求停止 Bot。快照进行 SQLite 完整性校验后压缩、加密并解密自校验，持久保存在 `deploy-state/backups/`，再复制到已设置的副本位置。升级及恢复前也会额外备份。此方式不依赖 Telegram 备份群；群备份可作为额外副本。
+
+在 NAS 的任务计划或宿主机 crontab 配置每日执行。若宿主机时区为 Asia/Shanghai，可用以下示例（路径按实际修改）：
+
+```cron
+15 3 * * * cd /opt/ccoff-abs-bot && ./deploy.sh backup >> deploy-state/daily-backup.log 2>&1
+```
+
+这一步需要在设备首次安装时完成，更新镜像不会自动修改宿主机定时任务。核对任务日志与外部副本是否到达；定期在隔离目录演练解密恢复。脚本默认不自动删除历史备份，根据磁盘容量制定保留周期，日志也需由宿主机轮转。
+
+## 开启关注频道入群验证
+
+默认 `JOIN_VERIFY_ENABLED=false`。开启前，确认官方群是超级群，并将同一个 Bot 同时设为官方群和必关注频道的管理员：群内授予限制/封禁成员与删除消息权限，频道内须具有管理员身份。配置错误或启动时权限检查失败将停止启动。
+
+在正式 `.env` 中填写以下配置，再重新创建容器使环境变量生效：
+
+```dotenv
+NOTICE_GROUP_ID=-100123456789
+JOIN_VERIFY_ENABLED=true
+JOIN_VERIFY_CHANNEL_ID=-100987654321
+JOIN_VERIFY_CHANNEL_URL=https://t.me/your_channel
+```
+
+频道 ID 使用数字 ID，不使用 `@用户名`；链接可换为私有频道的 `https://t.me/+邀请链接`，确保该邀请链接有效且用户能够直接订阅。需要管理员批准的频道邀请申请不算已关注。请勿将私有邀请链接提交到仓库。
+
+新人未关注频道时入群禁言。群内共用一条「去 Bot 验证」提醒，多人入群时复用该入口，待验证人数最多每 30 秒更新一次；无人待验证后保留 1 分钟供下一批成员复用，再删除。持续有人待验证时，提醒每 1 小时轮换一次，避免超过 Telegram 的消息删除时限。任何成员都可点击同一入口，但 Bot 只会打开点击者自己的验证。本人进入 Bot 私聊，关注频道并点击「我已关注，验证」后放行。入群时已关注者直接通过。进入验证后，仅关注、打开私聊或使用业务功能均不会自动放行；120 秒内未完成私聊验证会被移出并解除入群封禁，可重新加入。验证后退订频道将再次禁言并给予 120 秒补关注及私聊验证期限。群主和 Telegram 群管理员免验证，听书账号白名单不豁免。老成员在使用业务消息或历史按钮时补验，不批量扫描。
+
+群提醒发送前会先记录发送意图。如果 Telegram 已收到消息但 Bot 未收到响应，无法判断消息是否已发出；此时 Bot 暂停自动重发，防止生成重复提醒。成员仍可在 Bot 私聊发送 `入群验证`。管理员应先停机检查群内提醒，删除可能已发出的消息，再将该群 `join_verification_prompts` 记录的 `send_state` 设为空字符串、`send_attempted_at` 设为 `NULL` 后重启。未确认旧消息已删除前不要重置该状态，否则可能发出第二条提醒。
+
+验证记录、本人确认状态、群与私聊消息 ID、待处理成员事件及操作阶段保存在 SQLite，重启后继续处理已授权的权限恢复；恢复期间再次退订会撤销确认，须重新点击验证，原期限不延长。Bot 使用自身用户名生成私聊链接，无需新增配置，也不会主动私信尚未启动 Bot 的用户。开启验证时启动不丢弃 Telegram 待处理更新；此前积压的业务消息也可能被接收。后台每 5 秒巡检，实际放行与移出仍受网络、队列和 Telegram 限流影响。成员状态查询失败时拒绝业务访问并稍后重试，不按退订误踢。操作失败最多每名用户每 10 分钟向超级管理员提醒一次；管理员人工修改待验证者权限后，该轮停止自动恢复和移出，需人工处理。
+
+Bot API 无法枚举全部群成员或频道订阅者。离线期间漏收的退订，依赖用户下次使用业务功能补查。业务访问每次实时查询关注状态，不复用原有群成员缓存。尚有待验证、解除禁言或解封任务时，应先处理完任务，再关闭功能、更换官方群/频道或回退到不支持验证的版本，以免遗留禁言或封禁；关闭开关本身不会解除已有的 Telegram 限制。
+
+独立私聊测试模式 `APP_ENV=test` 禁止配置正式群/频道或启用该功能。自动测试使用模拟 Telegram API；真实验收需用独立测试 Bot、测试超级群和测试频道，在隔离部署中使用 `APP_ENV=production` 与独立数据库、凭据，不复用正式配置。
+
+## 公告频道配置与异常处置
+
+在正式 `.env` 设置 `ANNOUNCEMENT_CHANNEL_ID=-100频道数字ID`，再重新创建容器使环境变量生效。默认 `0` 保留抽奖、新书原群公告；新增服务公告入口会提示先配置。公告频道与 `JOIN_VERIFY_CHANNEL_ID` 独立，可填同一频道 ID；公告配置本身不增加订阅门槛。
+
+Bot 必须是公告频道管理员并拥有发布消息权限，启动时检查失败会停止运行。抽奖沿用置顶策略；置顶权限不足只提示管理员，不阻断正文发布。开放注册、补偿完成时会编辑原公告，Bot 应能编辑自己的频道帖子。
+
+频道公告长期保留。抽奖开始及结果、开放注册开启及结束、维护/恢复发布后，在 `NOTICE_GROUP_ID` 发一条频道消息链接，沿用群消息 10 分钟自动清理策略；新书、补偿说明不向群重复提醒。公开频道使用公开消息链接，私有频道使用 `t.me/c/…` 链接，仅频道成员可访问。榜单及实时互动保留在官方群。
+
+抽奖和注册、补偿活动保存创建时的公告目标；新书保存管理员预览时的目标。修改频道配置后，已有活动和待处理投递继续使用保存的目标。公告任务每 5 秒扫描一次，真实发送时间受 Telegram 网络与限流影响。停止功能或更换频道时，先检查原目标中尚未完成的投递。
+
+已确认的发送失败最多自动尝试 3 次，间隔至少一分钟，之后由管理员决定重试。网络中断、进程在发送中退出等情况可能导致消息已发但回执未知，此时标记 `uncertain`，停止自动重发。频道正文与群提醒分别记录状态；提醒失败不会触发正文重发。启动会恢复未发送任务，将中断的新发操作转人工核查，编辑原文的任务可以安全重试。
+
+超级管理员在 Bot 私聊发送 `频道公告异常` 查看最近 20 条异常及投递 ID。逐条核对保存的目标、实际公告及消息 ID，然后使用以下指令并完成二次确认：
+
+- `频道公告已发 ID 消息ID`：确认结果不确定的正文确已发送，补登记消息位置。
+- `频道公告未发 ID`：人工确认结果不确定的正文确实未发，允许后台重新发送。
+- `频道公告重试 ID`：重试已经明确失败的正文。
+- `频道提醒已发 ID`：确认群提醒已经存在，仅补登记提醒完成。
+- `频道提醒重试 ID`：人工确认群提醒未发，单独重试提醒。
+
+完成核对后回复 `确认频道公告处置`；处置写入审计。新书继续使用已有的 `公告异常` 系列命令处理，以保存的新书公告目标为准。频道通知失败不撤销抽奖、注册或补偿结果；密码、卡密和个人到账明细仍仅私聊。
+
+`APP_ENV=test` 要求 `ANNOUNCEMENT_CHANNEL_ID=0`，不会启动频道公告后台任务，HTTP 边界仍禁止正式群/频道目的地。自动测试使用模拟 Telegram API；真实验收请使用独立 Bot、测试超级群和测试频道，检查权限、封面、深链接、置顶、私有频道链接和群提醒自动清理。
+
+## 运行期异火配置
+
+超级管理员可在 Bot 私聊发送 `查看异火配置` 查看当前参数，使用完整 JSON 提交变更：
+
+```text
+设置异火配置 {"boss_percent":1,"realm_percent":1,"scroll_percent":10,"prices":[2000,3000,4000,5000],"percents":[5,8,10,12]}
+```
+
+`prices` 与 `percents` 按黄、玄、地、天顺序填写；概率为百分数。二次确认后次日生效，已开启的活动使用开启时的规则。玩法与普通玩家操作见仓库中的 `docs/user-guide.md`。
+
+## 程序回退与数据恢复
+
+仅回退程序：
+
+```sh
+./deploy.sh rollback v1.0.0
+```
+
+目标必须是本设备曾成功运行过的版本，使用记录的原 digest，并与当前版本的数据库兼容标识一致。优先使用本地缓存镜像，无需联系镜像仓库；本地镜像已被清理时才重新拉取。回退前仍会备份；**它保留当前数据库，不抹掉升级后新增的积分、订单等数据**。兼容标识只能表示发布者确认的兼容组，必须由升级回归测试与发布检查共同保证。
+
+明确需要恢复历史数据时，从 `deploy-state/backups/` 选择文件名：
+
+```sh
+./deploy.sh restore 20261028T031500Z-daily-1234.enc --confirm-data-loss
+```
+
+命令先停止 Bot，保存当前数据库的新备份，再解密并校验选定备份、检查兼容标识、替换数据库并检查启动。没有 `--confirm-data-loss` 不执行恢复；密钥错误、文件损坏或不兼容时拒绝替换。
+
+恢复会丢失选定备份之后的本地数据；已经发生的真实 ABS 修改或 Telegram 通知无法通过 SQLite 恢复撤销，需要另行核对。恢复前备份失败时，脚本保留当前数据库且保持停机；若当前库已损坏，应先将整个 `data/` 留存到隔离目录，再走人工灾难恢复，不能删除现场硬跳过检查。
+
+当前项目尚未上线，数据库兼容组为 `1`，首次部署以当前模型创建数据库，不支持开发期旧结构及旧数据升级。已有表但缺少结构标识的数据库会被拒绝启动。开发期模型发生删除字段或语义调整后，使用新建测试数据库验收。兼容标识仍用于部署、备份恢复和版本回退检查；正式发布后，涉及已发布结构的破坏性变更再提供独立迁移方案，并同步调整兼容标识、升级测试和发布门禁。
+
+## 实际上线验证边界
+
+自动模拟测试不证明真实 ABS 的接口兼容性，也不完整证明 Telegram 群权限与展示。首次正式启动后检查 `/start`、管理面板、真实 ABS 连通性、基本账号状态和每日备份。涉及真实写入的验收使用专用测试账号，避免拿普通用户试操作。
+
+本项目脚本演练通过真实维护程序验证数据库和加密恢复；Docker 编排边界被模拟。实际镜像启动、双架构构建和容器冒烟检查由 GitHub 候选流水线执行，必须看到相应构建成功后才发布。

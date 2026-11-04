@@ -1,0 +1,39 @@
+services:
+  ccoff_abs_bot:
+    image: ${BOT_IMAGE:?Use ./deploy.sh update VERSION to select an immutable release}
+    platform: linux/amd64
+    container_name: ccoff_abs_bot
+    restart: unless-stopped
+
+    volumes:
+      - ./data:/app/data:rw
+
+    env_file:
+      - .env
+
+    environment:
+      - TZ=Asia/Shanghai
+
+    read_only: true
+    tmpfs:
+      - /tmp
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+
+    mem_limit: 512m
+    cpus: "1.0"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
