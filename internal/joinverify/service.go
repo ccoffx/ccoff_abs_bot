@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -43,6 +44,7 @@ type Service struct {
 	admins                    []int64
 	locks                     [64]sync.Mutex
 	promptMu                  sync.Mutex
+	pendingMessageID          atomic.Int64
 	unpersistedPromptID       int
 	unpersistedPromptCount    int64
 	unpersistedPromptSentAt   time.Time
@@ -161,7 +163,12 @@ func (s *Service) Sweep() {
 		if blocked[id] {
 			continue
 		}
-		if err := s.handleEvent(e); err != nil {
+		err := s.handleEvent(e)
+		if err == nil && e.Chat.ID == s.groupID && !e.NewChatMember.User.IsBot &&
+			!sdkPresent(e.OldChatMember) && sdkPresent(e.NewChatMember) {
+			err = s.requestSharedPromptRefresh()
+		}
+		if err != nil {
 			blocked[id] = true
 			func() {
 				unlock := s.lock(id)
@@ -691,6 +698,9 @@ func (s *Service) remaining(r *model.JoinVerification) int {
 func (s *Service) syncSharedPrompt() error {
 	s.promptMu.Lock()
 	defer s.promptMu.Unlock()
+	if err := s.flushGroupActivity(); err != nil {
+		return err
+	}
 	now := s.now()
 	var count int64
 	if err := s.db.Model(&model.JoinVerification{}).
@@ -705,6 +715,12 @@ func (s *Service) syncSharedPrompt() error {
 	}
 	if prompt.GroupID == 0 {
 		prompt.GroupID = s.groupID
+	}
+	if count == 0 && prompt.RefreshRequested {
+		prompt.RefreshRequested = false
+		if err := s.db.Save(&prompt).Error; err != nil {
+			return err
+		}
 	}
 	if prompt.MessageID == 0 && prompt.SendState != "" {
 		if s.unpersistedPromptID == 0 {
@@ -726,6 +742,9 @@ func (s *Service) syncSharedPrompt() error {
 		prompt.LastEditedAt = s.unpersistedPromptSentAt
 		prompt.SendState = ""
 		prompt.SendAttemptedAt = time.Time{}
+		if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: prompt.MessageID, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+			return err
+		}
 		if err := s.db.Save(&prompt).Error; err != nil {
 			return err
 		}
@@ -768,7 +787,23 @@ func (s *Service) syncSharedPrompt() error {
 		prompt.LastEditedAt = now
 		return s.db.Save(&prompt).Error
 	}
-	if old {
+	refresh := false
+	if prompt.RefreshRequested && prompt.MessageID != 0 {
+		var activity model.JoinVerificationGroupActivity
+		err := s.db.First(&activity, "group_id = ?", s.groupID).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		// No history (e.g. the first join after upgrading): refresh conservatively.
+		refresh = activity.LastMessageID == 0 || activity.LastMessageID > prompt.MessageID
+		if !refresh {
+			prompt.RefreshRequested = false
+			if err := s.db.Save(&prompt).Error; err != nil {
+				return err
+			}
+		}
+	}
+	if old || refresh {
 		if err := s.retireSharedPrompt(&prompt, now); err != nil {
 			return err
 		}
@@ -806,7 +841,7 @@ func (s *Service) sendSharedPrompt(prompt *model.JoinVerificationPrompt, q tgbot
 	// their own group message history by request ID.
 	res := s.db.Model(&model.JoinVerificationPrompt{}).
 		Where("group_id = ? AND message_id = 0 AND COALESCE(send_state, '') = ''", prompt.GroupID).
-		Updates(map[string]any{"send_state": "sending", "send_attempted_at": now})
+		Updates(map[string]any{"send_state": "sending", "send_attempted_at": now, "refresh_requested": false})
 	if res.Error != nil {
 		return res.Error
 	}
@@ -822,6 +857,9 @@ func (s *Service) sendSharedPrompt(prompt *model.JoinVerificationPrompt, q tgbot
 	}
 	prompt.SendState = "sending"
 	prompt.SendAttemptedAt = now
+	// The claimed send fulfills the current refresh request, even if saving its
+	// result later fails. A subsequent join can independently request a refresh.
+	prompt.RefreshRequested = false
 	var msg struct {
 		MessageID int `json:"message_id"`
 	}
@@ -850,6 +888,9 @@ func (s *Service) sendSharedPrompt(prompt *model.JoinVerificationPrompt, q tgbot
 	s.unpersistedPromptID = msg.MessageID
 	s.unpersistedPromptCount = count
 	s.unpersistedPromptSentAt = now
+	if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: msg.MessageID, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+		return err
+	}
 	prompt.MessageID = msg.MessageID
 	prompt.MessageCreatedAt = now
 	prompt.PendingCount = count
@@ -858,6 +899,7 @@ func (s *Service) sendSharedPrompt(prompt *model.JoinVerificationPrompt, q tgbot
 	prompt.LastRetireAttemptAt = time.Time{}
 	prompt.SendState = ""
 	prompt.SendAttemptedAt = time.Time{}
+	prompt.RefreshRequested = false
 	if err := s.db.Save(prompt).Error; err != nil {
 		return err
 	}

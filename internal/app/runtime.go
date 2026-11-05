@@ -39,10 +39,11 @@ type telegramMessageJob struct {
 }
 
 type telegramHTTPClient struct {
-	longPoll *http.Client
-	callback *http.Client
-	send     *http.Client
-	upload   *http.Client
+	longPoll       *http.Client
+	callback       *http.Client
+	send           *http.Client
+	upload         *http.Client
+	observeMessage func(*tgbotapi.Message) error
 }
 
 func newTelegramHTTPClient() *telegramHTTPClient {
@@ -66,6 +67,9 @@ func (c *telegramHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	start := time.Now()
 	client := c.clientForEndpoint(endpoint)
 	resp, err := client.Do(req)
+	if err == nil && resp != nil && c.observeMessage != nil && (strings.HasPrefix(endpoint, "send") || endpoint == "forwardMessage") {
+		resp.Body = &telegramMessageObservingBody{ReadCloser: resp.Body, observe: c.observeMessage}
+	}
 	duration := time.Since(start)
 	statusCode := 0
 	if resp != nil {
@@ -140,10 +144,11 @@ func run(loadConfig func()) {
 	game.StartABSCrossDaySessionBackfill()
 	books.StartBookLibraryEventCollector()
 
+	telegramClient := newTelegramHTTPClient()
 	bot, err := tgbotapi.NewBotAPIWithClient(
 		config.AppConfig.TgToken,
 		tgbotapi.APIEndpoint,
-		newTelegramHTTPClient(),
+		telegramClient,
 	)
 	if err != nil {
 		log.Panicf("🤖 Bot 启动失败: %s", textfmt.FormatTelegramSendError(err))
@@ -155,6 +160,10 @@ func run(loadConfig func()) {
 			admins = append(admins, id)
 		}
 		joinVerification = joinverify.New(storage.DB, bot, config.AppConfig.NoticeGroupID, config.AppConfig.JoinVerifyChannelID, bot.Self.ID, config.AppConfig.JoinVerifyChannelURL, admins, bot.Self.UserName)
+		telegramClient.observeMessage = func(msg *tgbotapi.Message) error {
+			joinVerification.QueueGroupMessage(msg)
+			return nil
+		}
 		if err := joinVerification.Validate(); err != nil {
 			log.Fatalf("入群验证配置或权限检查失败: %s", textfmt.FormatTelegramSendError(err))
 		}
@@ -288,6 +297,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 		return
 	}
 	if update.Message != nil {
+		if joinVerification != nil {
+			joinVerification.QueueGroupMessage(update.Message)
+		}
 		if handleGroupServiceMessage(bot, update.Message) {
 			return
 		}

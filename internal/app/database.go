@@ -50,6 +50,7 @@ func InitDB() {
 		&model.AnnouncementDelivery{},
 		&model.JoinVerification{},
 		&model.JoinVerificationPrompt{},
+		&model.JoinVerificationGroupActivity{},
 		&model.GroupReply{},
 		&model.JoinVerificationEvent{},
 		&model.User{},

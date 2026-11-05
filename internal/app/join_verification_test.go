@@ -20,7 +20,7 @@ import (
 
 func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	setupTreasureTestDB(t)
-	if err := storage.DB.AutoMigrate(&model.JoinVerification{}, &model.JoinVerificationEvent{}, &model.AuditLog{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.JoinVerification{}, &model.JoinVerificationPrompt{}, &model.JoinVerificationEvent{}, &model.JoinVerificationGroupActivity{}, &model.AuditLog{}); err != nil {
 		t.Fatal(err)
 	}
 	previous := joinVerification
@@ -80,12 +80,13 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	joinVerification = joinverify.New(storage.DB, bot, -100, -200, 999, "https://t.me/example", nil, "testbot")
 	// Discussion forwards and chat identities must never become verification
 	// subjects or business commands, even when Telegram supplies a fake From.
-	for _, msg := range []*tgbotapi.Message{
+	for i, msg := range []*tgbotapi.Message{
 		{From: &tgbotapi.User{ID: 777000, IsBot: true}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
 		{From: &tgbotapi.User{ID: 1087968824}, SenderChat: &tgbotapi.Chat{ID: -200, Type: "channel"}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
 		{From: &tgbotapi.User{ID: 777000}, IsAutomaticForward: true, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
 		{From: &tgbotapi.User{ID: 1087968824}, SenderChat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "积分抽奖"},
 	} {
+		msg.MessageID = i + 1
 		jobs := make(chan telegramMessageJob, 1)
 		dispatchTelegramUpdate(bot, jobs, tgbotapi.Update{Message: msg})
 		if len(jobs) != 0 {
@@ -93,7 +94,12 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 		}
 		handleInteractiveMessage(bot, msg)
 	}
+	joinVerification.Sweep()
 	var nonUserRecords int64
+	var activity model.JoinVerificationGroupActivity
+	if err := storage.DB.First(&activity, "group_id = ?", -100).Error; err != nil || activity.LastMessageID != 4 {
+		t.Fatalf("non-user messages did not update the group's message position: %+v err=%v", activity, err)
+	}
 	if err := storage.DB.Model(&model.JoinVerification{}).Count(&nonUserRecords).Error; err != nil || nonUserRecords != 0 {
 		t.Fatalf("non-user message triggered verification: count=%d err=%v", nonUserRecords, err)
 	}
@@ -177,5 +183,57 @@ func TestChannelVerificationGatesMessagesAndHistoricCallbacks(t *testing.T) {
 	handleInteractiveMessage(bot, start)
 	if got := send(joinverify.CallbackPrefix+record.Round, 1); !strings.Contains(got, "验证通过") {
 		t.Fatalf("verification callback could not bypass business gate: %s", got)
+	}
+}
+
+func TestGroupActivityDoesNotBlockPollingWhenDatabaseIsBusy(t *testing.T) {
+	setupTreasureTestDB(t)
+	if err := storage.DB.AutoMigrate(&model.JoinVerificationGroupActivity{}); err != nil {
+		t.Fatal(err)
+	}
+	previous := joinVerification
+	t.Cleanup(func() { joinVerification = previous })
+	joinVerification = joinverify.New(storage.DB, nil, -100, -200, 999, "https://t.me/example", nil, "testbot")
+	sqlDB, err := storage.DB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold the only connection: even a bounded synchronous write would delay
+	// polling. Neither the group observation nor the next private message waits.
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	jobs := make(chan telegramMessageJob, 2)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dispatchTelegramUpdate(nil, jobs, tgbotapi.Update{Message: &tgbotapi.Message{
+			MessageID: 10, From: &tgbotapi.User{ID: 777000, IsBot: true},
+			Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}, Text: "group traffic",
+		}})
+		dispatchTelegramUpdate(nil, jobs, tgbotapi.Update{Message: &tgbotapi.Message{
+			MessageID: 1, From: &tgbotapi.User{ID: 1},
+			Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: "注册账户",
+		}})
+	}()
+	blocked := false
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	// Release any synchronous implementation before cleaning up shared state.
+	<-done
+	if len(jobs) != 1 {
+		t.Fatalf("subsequent private message was not queued: %d", len(jobs))
+	}
+	(<-jobs).turn.finish()
+	if blocked {
+		t.Fatal("group activity tracking blocked polling on a busy database")
 	}
 }

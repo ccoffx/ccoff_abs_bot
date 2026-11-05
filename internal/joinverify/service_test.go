@@ -122,7 +122,7 @@ func fixture(t *testing.T) (*Service, *fakeAPI, *time.Time) {
 	}
 	sql.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sql.Close() })
-	if err = db.AutoMigrate(&model.JoinVerification{}, &model.JoinVerificationPrompt{}, &model.JoinVerificationEvent{}, &model.AuditLog{}, &model.AutoDeleteMsg{}); err != nil {
+	if err = db.AutoMigrate(&model.JoinVerification{}, &model.JoinVerificationPrompt{}, &model.JoinVerificationGroupActivity{}, &model.JoinVerificationEvent{}, &model.AuditLog{}, &model.AutoDeleteMsg{}); err != nil {
 		t.Fatal(err)
 	}
 	f := &fakeAPI{group: map[int64]member{1: {Status: "member"}, 999: {Status: "administrator", CanRestrictMembers: true, CanDeleteMessages: true}}, channel: map[int64]member{999: {Status: "administrator"}}, defaults: permissions{SendMessages: true, SendAudios: true, SendPhotos: true, SendPolls: true, InviteUsers: true}, calls: map[string]int{}, fail: map[string]int{}, lost: map[string]int{}}
@@ -552,6 +552,155 @@ func TestSharedPromptRotatesDuringContinuousArrivals(t *testing.T) {
 	}
 }
 
+func TestSharedPromptRefreshesOnlyOnJoinWhenBuried(t *testing.T) {
+	for _, subscribed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
+			s, f, now := fixture(t)
+			s.Check(1)
+			s.Sweep()
+			first := sharedPrompt(t, s)
+			deadline := record(t, s, 1).Deadline
+			// A later chat or photo buries the entry, but cannot trigger a resend.
+			f.messageID += 10
+			if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: f.messageID, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+				t.Fatal(err)
+			}
+			s.Sweep()
+			if f.calls["sendMessage"] != 1 || f.deleted != 0 {
+				t.Fatal("ordinary traffic refreshed the reminder without a join")
+			}
+			*now = now.Add(5 * time.Second)
+			for id := int64(2); id <= 5; id++ {
+				f.group[id] = member{Status: "member"}
+				if subscribed {
+					f.channel[id] = member{Status: "member"}
+				}
+				enqueue(t, s, event(int(id), s.groupID, id, id, "left", "member", *now))
+			}
+			s.Sweep()
+			next := sharedPrompt(t, s)
+			if next.MessageID <= first.MessageID || next.RefreshRequested || f.deleted != 1 || f.calls["sendMessage"] != 2 {
+				t.Fatalf("join burst did not replace the buried entry once: %+v", next)
+			}
+			if !record(t, s, 1).Deadline.Equal(deadline) {
+				t.Fatal("refresh extended an existing verification deadline")
+			}
+			// The request has been consumed: later chat alone cannot refresh again.
+			f.messageID++
+			if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: f.messageID, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+				t.Fatal(err)
+			}
+			s.Sweep()
+			if f.calls["sendMessage"] != 2 || f.deleted != 1 {
+				t.Fatal("a handled join caused repeated refreshes")
+			}
+		})
+	}
+}
+
+func TestSharedPromptBottomCheckSurvivesRestartAndIgnoresServiceMessages(t *testing.T) {
+	s, f, now := fixture(t)
+	s.Check(1)
+	s.Sweep()
+	first := sharedPrompt(t, s)
+	for _, msg := range []*tgbotapi.Message{
+		nil,
+		{MessageID: first.MessageID + 10, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}},
+		{MessageID: first.MessageID + 10, Chat: &tgbotapi.Chat{ID: -300, Type: "supergroup"}},
+		{MessageID: first.MessageID + 10, Chat: &tgbotapi.Chat{ID: s.groupID}, NewChatMembers: []tgbotapi.User{{ID: 2}}},
+		{MessageID: first.MessageID + 10, Chat: &tgbotapi.Chat{ID: s.groupID}, LeftChatMember: &tgbotapi.User{ID: 3}},
+		{MessageID: first.MessageID + 10, Chat: &tgbotapi.Chat{ID: s.groupID}, PinnedMessage: &tgbotapi.Message{MessageID: 123}},
+	} {
+		if err := s.ObserveGroupMessage(msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restarted := New(s.db, f, s.groupID, s.channelID, s.botID, s.channelURL, nil, s.botUsername)
+	restarted.now = s.now
+	f.group[2] = member{Status: "member"}
+	enqueue(t, restarted, event(2, s.groupID, 2, 2, "left", "member", *now))
+	restarted.Sweep()
+	if f.calls["sendMessage"] != 1 || f.deleted != 0 || sharedPrompt(t, s).MessageID != first.MessageID || sharedPrompt(t, s).RefreshRequested {
+		t.Fatal("bottommost entry was unnecessarily replaced after restart or service messages")
+	}
+	// Once consumed, a join must not cause a delayed refresh on ordinary traffic.
+	f.messageID += 20
+	if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: f.messageID, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+		t.Fatal(err)
+	}
+	restarted.Sweep()
+	if f.calls["sendMessage"] != 1 {
+		t.Fatal("bottom check was not consumed on the join")
+	}
+}
+
+func TestSharedPromptRefreshRetriesAfterRestartWithoutAnotherJoin(t *testing.T) {
+	s, f, now := fixture(t)
+	s.Check(1)
+	s.Sweep()
+	first := sharedPrompt(t, s)
+	f.messageID += 10
+	if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: f.messageID, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+		t.Fatal(err)
+	}
+	f.group[2] = member{Status: "member"}
+	enqueue(t, s, event(2, s.groupID, 2, 2, "left", "member", *now))
+	f.fail["deleteMessage"] = 1
+	s.Sweep()
+	if !sharedPrompt(t, s).RefreshRequested || sharedPrompt(t, s).MessageID != first.MessageID {
+		t.Fatal("failed refresh lost its durable intent or old reminder")
+	}
+	restarted := New(s.db, f, s.groupID, s.channelID, s.botID, s.channelURL, nil, s.botUsername)
+	restarted.now = s.now
+	restarted.Sweep()
+	if f.calls["deleteMessage"] != 1 || f.calls["sendMessage"] != 1 {
+		t.Fatal("restart bypassed cleanup retry backoff")
+	}
+	*now = now.Add(sharedPromptRetireRetryInterval)
+	restarted.Sweep()
+	if sharedPrompt(t, s).MessageID == first.MessageID || sharedPrompt(t, s).RefreshRequested || f.calls["sendMessage"] != 2 {
+		t.Fatal("failed refresh did not resume after restart")
+	}
+}
+
+func TestGroupMessageOrderDoesNotRegressOnDelayedObservation(t *testing.T) {
+	s, _, _ := fixture(t)
+	for _, id := range []int{50, 20, 40} {
+		if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: id, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var activity model.JoinVerificationGroupActivity
+	if err := s.db.First(&activity, "group_id = ?", s.groupID).Error; err != nil || activity.LastMessageID != 50 {
+		t.Fatalf("delayed update overwrote newer message order: %+v err=%v", activity, err)
+	}
+}
+
+func TestSharedPromptRefreshLostSendResponseDoesNotDuplicate(t *testing.T) {
+	s, f, now := fixture(t)
+	s.Check(1)
+	s.Sweep()
+	f.messageID += 10
+	if err := s.ObserveGroupMessage(&tgbotapi.Message{MessageID: f.messageID, Chat: &tgbotapi.Chat{ID: s.groupID}}); err != nil {
+		t.Fatal(err)
+	}
+	f.group[2] = member{Status: "member"}
+	enqueue(t, s, event(2, s.groupID, 2, 2, "left", "member", *now))
+	f.lost["sendMessage"] = 1
+	s.Sweep()
+	if sharedPrompt(t, s).SendState != "uncertain" || f.deleted != 1 {
+		t.Fatal("replacement send outcome was not recorded as uncertain")
+	}
+	restarted := New(s.db, f, s.groupID, s.channelID, s.botID, s.channelURL, nil, s.botUsername)
+	restarted.now = s.now
+	f.group[3] = member{Status: "member"}
+	enqueue(t, restarted, event(3, s.groupID, 3, 3, "left", "member", *now))
+	restarted.Sweep()
+	if f.calls["sendMessage"] != 2 {
+		t.Fatal("another join repeated an uncertain replacement send")
+	}
+}
+
 func TestSharedPromptRetireFailureRetriesAndTerminalErrorStops(t *testing.T) {
 	s, f, now := fixture(t)
 	s.Check(1)
@@ -662,6 +811,96 @@ func TestSharedPromptRecoversKnownMessageIDAfterSaveFailure(t *testing.T) {
 	recovered := sharedPrompt(t, s)
 	if recovered.MessageID == 0 || recovered.SendState != "" || f.calls["sendMessage"] != 1 {
 		t.Fatalf("known Telegram message was not recovered without resending: %+v", recovered)
+	}
+}
+
+func TestSharedPromptRecoveredReplacementConsumesOnlyItsRefresh(t *testing.T) {
+	for _, anotherJoin := range []bool{false, true} {
+		t.Run(strconv.FormatBool(anotherJoin), func(t *testing.T) {
+			s, f, now := fixture(t)
+			s.Check(1)
+			s.Sweep()
+			f.messageID += 10
+			s.QueueGroupMessage(&tgbotapi.Message{MessageID: f.messageID, Chat: &tgbotapi.Chat{ID: s.groupID}})
+			f.group[2] = member{Status: "member"}
+			enqueue(t, s, event(2, s.groupID, 2, 2, "left", "member", *now))
+			f.beforeCall = func(method string, _ tgbotapi.Params) {
+				if method == "sendMessage" {
+					if err := s.db.Exec(`CREATE TRIGGER fail_replacement_save BEFORE UPDATE ON join_verification_prompts
+						WHEN NEW.message_id <> 0 BEGIN SELECT RAISE(FAIL, 'simulated prompt save failure'); END`).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			s.Sweep()
+			if f.calls["sendMessage"] != 2 || s.unpersistedPromptID == 0 {
+				t.Fatal("replacement did not reach the failed confirmation write")
+			}
+			f.beforeCall = nil
+			if err := s.db.Exec("DROP TRIGGER fail_replacement_save").Error; err != nil {
+				t.Fatal(err)
+			}
+			f.messageID += 10
+			s.QueueGroupMessage(&tgbotapi.Message{MessageID: f.messageID, Chat: &tgbotapi.Chat{ID: s.groupID}})
+			if anotherJoin {
+				f.group[3] = member{Status: "member"}
+				enqueue(t, s, event(3, s.groupID, 3, 3, "left", "member", *now))
+			}
+			s.Sweep()
+			wantSends := 2
+			if anotherJoin {
+				wantSends++
+			}
+			if p := sharedPrompt(t, s); p.RefreshRequested || p.SendState != "" || f.calls["sendMessage"] != wantSends || f.deleted != wantSends-1 {
+				t.Fatalf("recovery repeated a consumed refresh or lost a new join: prompt=%+v sends=%d deletes=%d", p, f.calls["sendMessage"], f.deleted)
+			}
+		})
+	}
+}
+
+func TestQueuedGroupActivityRetriesWithoutLosingNewerMessages(t *testing.T) {
+	s, f, _ := fixture(t)
+	s.Check(1)
+	s.Sweep()
+	if err := s.db.Exec(`CREATE TRIGGER fail_activity_write BEFORE INSERT ON join_verification_group_activities
+		BEGIN SELECT RAISE(FAIL, 'simulated activity write failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int{50, 20, 40} {
+		s.QueueGroupMessage(&tgbotapi.Message{MessageID: id, Chat: &tgbotapi.Chat{ID: s.groupID}})
+	}
+	// Queue a newer message during the failed write; retrying 50 must retain 70.
+	if err := s.db.Callback().Create().Before("gorm:create").Register("test:observe_during_write", func(tx *gorm.DB) {
+		if _, ok := tx.Statement.Dest.(*model.JoinVerificationGroupActivity); ok {
+			s.QueueGroupMessage(&tgbotapi.Message{MessageID: 70, Chat: &tgbotapi.Chat{ID: s.groupID}})
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.syncSharedPrompt(); err == nil {
+		t.Fatal("activity write unexpectedly succeeded")
+	}
+	if err := s.db.Callback().Create().Remove("test:observe_during_write"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Exec("DROP TRIGGER fail_activity_write").Error; err != nil {
+		t.Fatal(err)
+	}
+	s.Sweep()
+	var activity model.JoinVerificationGroupActivity
+	if err := s.db.First(&activity, "group_id = ?", s.groupID).Error; err != nil || activity.LastMessageID != 70 {
+		t.Fatalf("failed observation was lost or overwrote newer traffic: %+v err=%v", activity, err)
+	}
+	if f.calls["sendMessage"] != 1 || f.deleted != 0 {
+		t.Fatal("retrying activity triggered a refresh without a join")
+	}
+	// With no further traffic, the successful observation is not written again.
+	if err := s.db.Exec(`CREATE TRIGGER reject_redundant_activity BEFORE INSERT ON join_verification_group_activities
+		BEGIN SELECT RAISE(FAIL, 'unexpected redundant activity write'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.syncSharedPrompt(); err != nil {
+		t.Fatal(err)
 	}
 }
 

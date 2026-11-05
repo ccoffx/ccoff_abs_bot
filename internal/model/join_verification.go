@@ -45,5 +45,13 @@ type JoinVerificationPrompt struct {
 	CloseByEdit         bool
 	SendState           string
 	SendAttemptedAt     time.Time
+	RefreshRequested    bool
 	UpdatedAt           time.Time
+}
+
+// Track message order separately so incoming messages cannot be overwritten by
+// a concurrent save of the shared verification prompt.
+type JoinVerificationGroupActivity struct {
+	GroupID       int64 `gorm:"primaryKey"`
+	LastMessageID int
 }
