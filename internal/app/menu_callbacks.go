@@ -123,7 +123,7 @@ func handleMenuCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 		telegram.AnswerCallback(bot, cb.ID, "请前往群内操作")
 		tip := "请前往官方群内发送对应指令。"
 		if parts[2] == "treasure" {
-			tip = "🗺 群内寻宝是限时积分小游戏。请在群内发送 发起寻宝，再点击原藏宝图下方的宝箱按钮参与。每箱消耗 3 积分，随机获得 0、2、5 或 10 积分，每人每局限开一次。"
+			tip = "🗺 群内寻宝是限时积分小游戏。请在群内发送 发起寻宝，再点击原藏宝图下方的宝箱按钮参与。每箱消耗 2 积分，每局含 10 分大奖，另有 0、1、2 分奖励，每人每局限开一次，结果在结算后统一揭晓。仅 10 分宝箱有万分之一概率额外开出未认主异火，需满足异火领取资格且池中有余火。每天不限局数，结算后可立即发起下一局。"
 		}
 		telegram.SendPlainText(bot, cb.Message.Chat.ID, tip)
 	default:

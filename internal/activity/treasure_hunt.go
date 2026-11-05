@@ -14,16 +14,15 @@ import (
 	"gorm.io/gorm"
 
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/textfmt"
 )
 
 const (
 	treasureBoxCount      = 9
-	treasureEntryCost     = 3
-	treasureDailyRounds   = 3
+	treasureEntryCost     = 2
 	treasureRoundDuration = time.Minute
-	treasureCooldown      = time.Minute
 	treasurePublishing    = "publishing"
 	TreasureActive        = "active"
 	TreasureClosed        = "closed"
@@ -31,18 +30,16 @@ const (
 )
 
 var (
-	treasureMutex         sync.Mutex
-	ErrTreasureBusy       = errors.New("本群已有寻宝局正在进行，请在原藏宝图开箱")
-	ErrTreasureDailyLimit = errors.New("本群今日已开满 3 局，请明天再来")
-	ErrTreasureCooldown   = errors.New("藏宝图正在整理，请在上一局结束 1 分钟后再发起")
-	ErrTreasureExpired    = errors.New("本局已结束，未扣除积分")
-	ErrTreasurePicked     = errors.New("你本局已经开过宝箱了，不会重复扣分")
-	ErrTreasureBoxTaken   = errors.New("这个宝箱已经被打开了，请选择其他宝箱")
-	ErrTreasurePanel      = errors.New("藏宝图已失效，请使用本群最新面板")
+	treasureMutex       sync.Mutex
+	ErrTreasureBusy     = errors.New("本群已有寻宝局正在进行，请在原藏宝图开箱")
+	ErrTreasureExpired  = errors.New("本局已结束，未扣除积分")
+	ErrTreasurePicked   = errors.New("你本局已经开过宝箱了，不会重复扣分")
+	ErrTreasureBoxTaken = errors.New("这个宝箱已经被打开了，请选择其他宝箱")
+	ErrTreasurePanel    = errors.New("藏宝图已失效，请使用本群最新面板")
 )
 
 func ShuffledTreasureRewards() ([]int, error) {
-	rewards := []int{0, 0, 0, 0, 2, 2, 2, 5, 10}
+	rewards := []int{0, 0, 0, 1, 1, 1, 2, 2, 10}
 	for i := len(rewards) - 1; i > 0; i-- {
 		n, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
 		if err != nil {
@@ -63,7 +60,11 @@ func TreasureRewards(round model.TreasureRound) ([]int, error) {
 	for _, reward := range rewards {
 		counts[reward]++
 	}
-	if len(rewards) != treasureBoxCount || counts[0] != 4 || counts[2] != 3 || counts[5] != 1 || counts[10] != 1 || round.EntryCost != treasureEntryCost {
+	current := round.EntryCost == treasureEntryCost && counts[0] == 3 && counts[1] == 3 && counts[2] == 2 && counts[10] == 1
+	// 已发布的旧局继续使用开局时保存的费用与奖励。
+	balancedLegacy := round.EntryCost == 2 && counts[0] == 1 && counts[1] == 3 && counts[2] == 3 && counts[3] == 1 && counts[5] == 1
+	legacy := (round.EntryCost == 2 || round.EntryCost == 3) && counts[0] == 4 && counts[2] == 3 && counts[5] == 1 && counts[10] == 1
+	if len(rewards) != treasureBoxCount || (!current && !balancedLegacy && !legacy) {
 		return nil, fmt.Errorf("TREASURE_REWARDS_INVALID")
 	}
 	return rewards, nil
@@ -85,26 +86,12 @@ func CreateTreasureRound(chatID int64, now time.Time) (model.TreasureRound, erro
 	treasureMutex.Lock()
 	defer treasureMutex.Unlock()
 	err = storage.DB.Transaction(func(tx *gorm.DB) error {
-		var active, today int64
+		var active int64
 		if err := tx.Model(&model.TreasureRound{}).Where("chat_id = ? AND status IN ?", chatID, []string{treasurePublishing, TreasureActive}).Count(&active).Error; err != nil {
 			return err
 		}
 		if active > 0 {
 			return ErrTreasureBusy
-		}
-		if err := tx.Model(&model.TreasureRound{}).Where("chat_id = ? AND day_key = ? AND status <> ?", chatID, round.DayKey, TreasureCancelled).Count(&today).Error; err != nil {
-			return err
-		}
-		if today >= treasureDailyRounds {
-			return ErrTreasureDailyLimit
-		}
-		var latest model.TreasureRound
-		if err := tx.Where("chat_id = ? AND status = ?", chatID, TreasureClosed).Order("id DESC").First(&latest).Error; err == nil {
-			if now.Before(latest.ClosedAt.Add(treasureCooldown)) {
-				return ErrTreasureCooldown
-			}
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
 		}
 		res := tx.Create(&round)
 		if res.Error != nil {
@@ -195,12 +182,15 @@ func PickTreasureBox(roundID uint, chatID int64, messageID, boxIndex int, user *
 	return pick, nil
 }
 
-// 到期或开满才结算；入池和结束状态原子提交，重启/重试不会重复入池。
+// 到期或开满才结算；异火发放、入池和结束状态原子提交，重启/重试不会重复抽取或发奖。
 func CloseTreasureRound(roundID uint, now time.Time) (bool, bool, error) {
 	treasureMutex.Lock()
 	defer treasureMutex.Unlock()
 	closed, burst := false, false
 	err := storage.RunFusionPoolLockedTransaction(func(tx *gorm.DB) error {
+		if err := spiritfire.Lock(tx); err != nil {
+			return err
+		}
 		var round model.TreasureRound
 		if err := tx.First(&round, roundID).Error; err != nil {
 			return err
@@ -214,6 +204,17 @@ func CloseTreasureRound(roundID uint, now time.Time) (bool, bool, error) {
 		}
 		if now.Before(round.ExpiresAt) && len(picks) < treasureBoxCount {
 			return nil
+		}
+		var fire model.SpiritFire
+		for _, pick := range picks {
+			if pick.Reward == 10 {
+				var err error
+				fire, err = spiritfire.AwardTreasureInTx(tx, pick, now)
+				if err != nil {
+					return err
+				}
+				break
+			}
 		}
 		net := 0
 		for _, pick := range picks {
@@ -231,7 +232,8 @@ func CloseTreasureRound(roundID uint, now time.Time) (bool, bool, error) {
 			}
 		}
 		res := tx.Model(&model.TreasureRound{}).Where("id = ? AND status = ?", roundID, TreasureActive).
-			Updates(map[string]interface{}{"status": TreasureClosed, "closed_at": now, "pool_injected": net, "pool_after": pool})
+			Updates(map[string]interface{}{"status": TreasureClosed, "closed_at": now, "pool_injected": net, "pool_after": pool,
+				"fire_id": fire.ID, "fire_name": fire.Name, "fire_owner_id": fire.OwnerID})
 		if res.Error != nil {
 			return res.Error
 		}

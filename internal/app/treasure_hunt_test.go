@@ -20,6 +20,7 @@ import (
 	"ccoff-abs-bot/internal/activity"
 	configpkg "ccoff-abs-bot/internal/config"
 	modelpkg "ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 )
 
@@ -43,6 +44,13 @@ func setupTreasureTestDB(t *testing.T) string {
 	if err := storage.DB.AutoMigrate(&modelpkg.TreasureRound{}, &modelpkg.TreasurePick{}, &modelpkg.User{}, &modelpkg.PointTransaction{}, &modelpkg.SystemConfig{}, &modelpkg.RedPacket{}, &modelpkg.AutoDeleteMsg{}, &modelpkg.SecurityAttemptLock{}); err != nil {
 		t.Fatal(err)
 	}
+	models := append(spiritfire.Models(), &modelpkg.Cultivation{}, &modelpkg.ListeningAbuseRecord{}, &modelpkg.AuditLog{})
+	if err := storage.DB.AutoMigrate(models...); err != nil {
+		t.Fatal(err)
+	}
+	if err := spiritfire.Initialize(storage.DB, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if err := storage.DB.Exec(`CREATE UNIQUE INDEX idx_treasure_active_chat ON treasure_rounds(chat_id) WHERE status IN ('publishing','active')`).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +72,7 @@ func newTreasureTestRound(t *testing.T, chatID int64) modelpkg.TreasureRound {
 		t.Fatal(err)
 	}
 	// 固定布局仅用于验证确切的积分守恒，生产使用密码学随机洗牌。
-	if err := storage.DB.Model(&round).Update("rewards_json", "[0,0,0,0,2,2,2,5,10]").Error; err != nil {
+	if err := storage.DB.Model(&round).Update("rewards_json", "[0,0,0,1,1,1,2,2,10]").Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := activity.ActivateTreasureRound(round.ID, 123, time.Now()); err != nil {
@@ -117,34 +125,78 @@ func treasureTestPool(t *testing.T) int {
 }
 
 func TestTreasureFullRoundConservationAndIdempotency(t *testing.T) {
-	setupTreasureTestDB(t)
-	round := newTreasureTestRound(t, -100)
-	rewards, err := activity.TreasureRewards(round)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for box, reward := range rewards {
-		pick := treasureTestPick(t, round, box, int64(box+1))
-		if pick.Reward != reward || treasureTestBalance(t, int64(box+1)) != 100-3+reward {
-			t.Fatalf("incorrect payout for box %d", box)
-		}
-	}
-	closed, burst, err := activity.CloseTreasureRound(round.ID, time.Now())
-	if err != nil || !closed || burst {
-		t.Fatalf("close = %v %v %v", closed, burst, err)
-	}
-	if treasureTestPool(t) != 6 {
-		t.Fatal("full round must put 6 points into fusion pool")
-	}
-	closed, burst, err = activity.CloseTreasureRound(round.ID, time.Now())
-	if err != nil || closed || burst || treasureTestPool(t) != 6 {
-		t.Fatal("duplicate settlement changed pool")
-	}
-	if _, err := activity.PickTreasureBox(round.ID, round.ChatID, 123, 0, &tgbotapi.User{ID: 10}); !errors.Is(err, activity.ErrTreasureExpired) {
-		t.Fatal(err)
-	}
-	if treasureTestCount(t, &modelpkg.TreasurePick{}) != 9 || treasureTestCount(t, &modelpkg.PointTransaction{}) != 14 {
-		t.Fatal("unexpected pick or ledger count")
+	for _, scenario := range []struct {
+		name       string
+		cost       int
+		rewards    string
+		summary    string
+		wantPool   int
+		wantLedger int64
+	}{
+		{"current", 2, "", "奖励：空箱×3、1分×3、2分×2、10分×1。", 101, 15},
+		{"legacyBalanced", 2, "[0,1,1,1,2,2,2,3,5]", "奖励：空箱×1、1分×3、2分×3、3分×1、5分×1。", 101, 17},
+		{"legacy3", 3, "[0,0,0,0,2,2,2,5,10]", "奖励：空箱×4、2分×3、5分×1、10分×1。", 106, 14},
+		{"legacy2", 2, "[0,0,0,0,2,2,2,5,10]", "奖励：空箱×4、2分×3、5分×1、10分×1。", 100, 14},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			setupTreasureTestDB(t)
+			if err := storage.DB.Create(&modelpkg.SystemConfig{Key: "fusion_pool_points", Value: "100"}).Error; err != nil {
+				t.Fatal(err)
+			}
+			round := newTreasureTestRound(t, -100)
+			if round.EntryCost != 2 {
+				t.Fatal("new rounds must cost 2 points")
+			}
+			if scenario.rewards != "" {
+				if err := storage.DB.Model(&round).Updates(map[string]interface{}{"entry_cost": scenario.cost, "rewards_json": scenario.rewards}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			rewards, err := activity.TreasureRewards(round)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for box, reward := range rewards {
+				pick := treasureTestPick(t, round, box, int64(box+1))
+				if pick.Cost != scenario.cost || pick.Reward != reward || treasureTestBalance(t, int64(box+1)) != 100-scenario.cost+reward {
+					t.Fatalf("incorrect payout for box %d", box)
+				}
+			}
+			closed, burst, err := activity.CloseTreasureRound(round.ID, time.Now())
+			if err != nil || !closed || burst {
+				t.Fatalf("close = %v %v %v", closed, burst, err)
+			}
+			if treasureTestPool(t) != scenario.wantPool {
+				t.Fatal("full round changed pool by an incorrect amount")
+			}
+			closed, burst, err = activity.CloseTreasureRound(round.ID, time.Now())
+			if err != nil || closed || burst || treasureTestPool(t) != scenario.wantPool {
+				t.Fatal("duplicate settlement changed pool")
+			}
+			if _, err := activity.PickTreasureBox(round.ID, round.ChatID, 123, 0, &tgbotapi.User{ID: 10}); !errors.Is(err, activity.ErrTreasureExpired) {
+				t.Fatal(err)
+			}
+			if treasureTestCount(t, &modelpkg.TreasurePick{}) != 9 || treasureTestCount(t, &modelpkg.PointTransaction{}) != scenario.wantLedger {
+				t.Fatal("unexpected pick or ledger count")
+			}
+			if err := storage.DB.First(&round, round.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			var picks []modelpkg.TreasurePick
+			if err := storage.DB.Where("round_id = ?", round.ID).Find(&picks).Error; err != nil {
+				t.Fatal(err)
+			}
+			panel, _, err := activity.RenderTreasurePanel(round, picks)
+			if err != nil || !strings.Contains(panel, fmt.Sprintf("每箱消耗 %d 积分", scenario.cost)) {
+				t.Fatal("panel lost the saved round cost", err)
+			}
+			if scenario.wantPool == 101 && (!strings.Contains(panel, "净回收 1 分") || strings.Contains(panel, "系统补贴")) {
+				t.Fatal("full round must recover 1 point")
+			}
+			if !strings.Contains(panel, scenario.summary) {
+				t.Fatal("panel did not preserve its reward distribution")
+			}
+		})
 	}
 }
 
@@ -157,7 +209,7 @@ func TestTreasureGuardsAndAtomicRollback(t *testing.T) {
 			var expected error
 			switch scenario {
 			case "insufficient funds":
-				if err := storage.DB.Model(&modelpkg.User{}).Where("telegram_id = ?", 1).Update("points", 2).Error; err != nil {
+				if err := storage.DB.Model(&modelpkg.User{}).Where("telegram_id = ?", 1).Update("points", 1).Error; err != nil {
 					t.Fatal(err)
 				}
 				expected = storage.ErrPointsNotEnough
@@ -231,7 +283,7 @@ func TestTreasureConcurrentClaims(t *testing.T) {
 				t.Fatal(err)
 			}
 			pick := picks[0]
-			if treasureTestBalance(t, pick.UserID) != 100-3+pick.Reward {
+			if treasureTestBalance(t, pick.UserID) != 100-round.EntryCost+pick.Reward {
 				t.Fatal("concurrent clicks caused extra charges")
 			}
 		})
@@ -242,7 +294,7 @@ func TestTreasurePartialSettlementAndPoolRollback(t *testing.T) {
 	for _, scenario := range []string{"loss", "subsidy", "pool burst", "settlement failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			setupTreasureTestDB(t)
-			if err := storage.DB.Create(&modelpkg.SystemConfig{Key: "fusion_pool_points", Value: "298"}).Error; err != nil {
+			if err := storage.DB.Create(&modelpkg.SystemConfig{Key: "fusion_pool_points", Value: "299"}).Error; err != nil {
 				t.Fatal(err)
 			}
 			round := newTreasureTestRound(t, -100)
@@ -259,7 +311,7 @@ func TestTreasurePartialSettlementAndPoolRollback(t *testing.T) {
 					t.Fatal(err)
 				}
 				closed, burst, err := activity.CloseTreasureRound(round.ID, round.ExpiresAt)
-				if err == nil || closed || burst || treasureTestPool(t) != 298 || treasureTestCount(t, &modelpkg.RedPacket{}) != 0 {
+				if err == nil || closed || burst || treasureTestPool(t) != 299 || treasureTestCount(t, &modelpkg.RedPacket{}) != 0 {
 					t.Fatal("failed settlement leaked pool changes or red packet")
 				}
 				if err := storage.DB.Exec("DROP TRIGGER fail_close").Error; err != nil {
@@ -271,7 +323,7 @@ func TestTreasurePartialSettlementAndPoolRollback(t *testing.T) {
 				t.Fatal(err)
 			}
 			if scenario == "subsidy" {
-				if burst || treasureTestPool(t) != 298 || treasureTestBalance(t, 1) != 107 {
+				if burst || treasureTestPool(t) != 299 || treasureTestBalance(t, 1) != 108 {
 					t.Fatal("subsidy deducted fusion pool")
 				}
 			} else if !burst || treasureTestPool(t) != 1 || treasureTestCount(t, &modelpkg.RedPacket{}) != 1 {
@@ -296,13 +348,13 @@ func TestTreasureRestartPreservesLayoutAndRewards(t *testing.T) {
 		t.Fatal("restart allowed second pick", err)
 	}
 	pick := treasureTestPick(t, round, 7, 2)
-	if pick.Reward != 5 || treasureTestBalance(t, 1) != 107 {
+	if pick.Reward != 2 || treasureTestBalance(t, 1) != 108 {
 		t.Fatal("restart redrew rewards or duplicated payout")
 	}
 	if closed, _, err := activity.CloseTreasureRound(round.ID, round.ExpiresAt); err != nil || !closed {
 		t.Fatal(err)
 	}
-	if treasureTestBalance(t, 2) != 102 {
+	if treasureTestBalance(t, 2) != 100 {
 		t.Fatal("restart settlement changed settled pick payout")
 	}
 }
@@ -320,11 +372,9 @@ func TestTreasureRoundLimitsAndPanelPrivacy(t *testing.T) {
 	if err := storage.DB.Model(&round).Updates(map[string]interface{}{"status": activity.TreasureClosed, "closed_at": start}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := activity.CreateTreasureRound(-100, start.Add(time.Second)); !errors.Is(err, activity.ErrTreasureCooldown) {
-		t.Fatal(err)
-	}
-	for i := 1; i < 3; i++ {
-		now := start.Add(time.Duration(i) * 2 * time.Minute)
+	for i := 1; i < 10; i++ {
+		// 结算完成的同一时刻就能发起下一局。
+		now := start
 		round, err = activity.CreateTreasureRound(-100, now)
 		if err != nil {
 			t.Fatal(err)
@@ -333,23 +383,23 @@ func TestTreasureRoundLimitsAndPanelPrivacy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := activity.CreateTreasureRound(-100, start.Add(6*time.Minute)); !errors.Is(err, activity.ErrTreasureDailyLimit) {
-		t.Fatal(err)
-	}
 	round, err = activity.CreateTreasureRound(-100, start.Add(11*time.Minute))
 	if err != nil || round.DayKey != "2026-10-28" {
-		t.Fatal("Beijing midnight did not reset quota", err)
+		t.Fatal("round could not be created after Beijing midnight", err)
 	}
 	text, markup, err := activity.RenderTreasurePanel(round, nil)
 	if err != nil || len(markup.InlineKeyboard) != 3 || strings.Contains(text, round.RewardsJSON) {
 		t.Fatal("invalid or leaking active panel", err)
+	}
+	if !strings.Contains(text, "每天不限局数") || strings.Contains(text, "最多 3 局") {
+		t.Fatal("panel still advertises a daily limit")
 	}
 	for _, row := range markup.InlineKeyboard {
 		if len(row) != 3 {
 			t.Fatal("panel is not 3x3")
 		}
 		for _, button := range row {
-			if !strings.Contains(button.Text, "3分") || len(*button.CallbackData) > 64 {
+			if !strings.Contains(button.Text, "2分") || len(*button.CallbackData) > 64 {
 				t.Fatal("invalid unopened box")
 			}
 		}
@@ -365,8 +415,18 @@ func TestTreasureRoundLimitsAndPanelPrivacy(t *testing.T) {
 			t.Fatal(err)
 		}
 		encoded, _ := json.Marshal(rewards)
-		if _, err := activity.TreasureRewards(modelpkg.TreasureRound{RewardsJSON: string(encoded), EntryCost: 3}); err != nil {
+		if _, err := activity.TreasureRewards(modelpkg.TreasureRound{RewardsJSON: string(encoded), EntryCost: 2}); err != nil {
 			t.Fatal("invalid shuffled reward distribution", err)
+		}
+		total, jackpots := 0, 0
+		for _, reward := range rewards {
+			total += reward
+			if reward == 10 {
+				jackpots++
+			}
+		}
+		if total != 17 || jackpots != 1 {
+			t.Fatalf("new rounds must pay 17 points with one 10 point jackpot, got total=%d jackpots=%d", total, jackpots)
 		}
 	}
 }

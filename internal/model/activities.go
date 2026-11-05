@@ -150,6 +150,9 @@ type TreasureRound struct {
 	ClosedAt     time.Time
 	PoolInjected int
 	PoolAfter    int
+	FireID       uint
+	FireName     string
+	FireOwnerID  int64
 }
 
 type TreasurePick struct {

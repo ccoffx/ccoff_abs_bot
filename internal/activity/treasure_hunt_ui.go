@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -22,13 +24,13 @@ import (
 var treasurePanelMutex sync.Mutex
 
 func treasureHuntErrorText(err error) string {
-	for _, expected := range []error{ErrTreasureBusy, ErrTreasureDailyLimit, ErrTreasureCooldown, ErrTreasureExpired, ErrTreasurePicked, ErrTreasureBoxTaken, ErrTreasurePanel} {
+	for _, expected := range []error{ErrTreasureBusy, ErrTreasureExpired, ErrTreasurePicked, ErrTreasureBoxTaken, ErrTreasurePanel} {
 		if errors.Is(err, expected) {
 			return expected.Error()
 		}
 	}
 	if errors.Is(err, storage.ErrPointsNotEnough) {
-		return "积分不足，开箱需要 3 积分；本次未扣分"
+		return "积分不足，无法支付本局开箱费用；本次未扣分"
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "本局不存在或面板已失效"
@@ -50,7 +52,26 @@ func RenderTreasurePanel(round model.TreasureRound, picks []model.TreasurePick) 
 		won += pick.Reward
 	}
 	var text strings.Builder
-	fmt.Fprintf(&text, "🗺 群内寻宝 #%d\n\n每人限开一箱，每箱消耗 %d 积分。\n奖励：空箱×4、2分×3、5分×1、10分×1。\n开箱即到账，有赚有亏，最多亏 3 分。\n", round.ID, round.EntryCost)
+	counts := make(map[int]int)
+	var amounts []int
+	for _, reward := range rewards {
+		if counts[reward] == 0 {
+			amounts = append(amounts, reward)
+		}
+		counts[reward]++
+	}
+	sort.Ints(amounts)
+	var labels []string
+	for _, amount := range amounts {
+		label := fmt.Sprintf("%d分×%d", amount, counts[amount])
+		if amount == 0 {
+			label = fmt.Sprintf("空箱×%d", counts[amount])
+		}
+		labels = append(labels, label)
+	}
+	fmt.Fprintf(&text, "🗺 群内寻宝 #%d\n\n每人限开一箱，每箱消耗 %d 积分。\n奖励：%s。\n有赚有亏，最多亏 %d 分；开箱结果在本局结算后统一揭晓。\n", round.ID, round.EntryCost, strings.Join(labels, "、"), round.EntryCost)
+	text.WriteString("每天不限局数，本局结算后可立即发起下一局。\n")
+	fmt.Fprintf(&text, "🔥 仅 10 分宝箱有 1/%d 概率额外开出未认主异火，结算时揭晓。\n需有效且未暂停的斗师及以上正式听书账号；异火池为空时不发放。\n", spiritfire.TreasureFireOneIn)
 	if round.Status == TreasureClosed {
 		fmt.Fprintf(&text, "\n🏁 本局已结束 · 已开 %d/9 箱\n总消耗 %d 分，总奖励 %d 分。\n净回收 %d 分已进入天道奖池。\n", len(picks), spent, won, round.PoolInjected)
 		if won > spent {
@@ -63,16 +84,34 @@ func RenderTreasurePanel(round model.TreasureRound, picks []model.TreasurePick) 
 		text.WriteString("\n🔎 寻宝记录\n")
 	}
 	for _, pick := range picks {
-		fmt.Fprintf(&text, "%d号 · %s：获得%d分（净%+d）\n", pick.BoxIndex+1, textfmt.LotteryDisplayText(pick.UserName, 24, "道友"), pick.Reward, pick.Reward-pick.Cost)
+		name := textfmt.LotteryDisplayText(pick.UserName, 24, "道友")
+		if round.Status == TreasureClosed {
+			fmt.Fprintf(&text, "%d号 · %s：获得%d分（净%+d）\n", pick.BoxIndex+1, name, pick.Reward, pick.Reward-pick.Cost)
+		} else {
+			fmt.Fprintf(&text, "%d号 · %s：已开箱，待揭晓\n", pick.BoxIndex+1, name)
+		}
+	}
+	if round.Status == TreasureClosed && round.FireID != 0 {
+		owner := fmt.Sprint(round.FireOwnerID)
+		for _, pick := range picks {
+			if pick.UserID == round.FireOwnerID {
+				owner = textfmt.LotteryDisplayText(pick.UserName, 24, "道友")
+				break
+			}
+		}
+		fmt.Fprintf(&text, "\n🔥 寻宝奇遇：%s 额外获得异火【%s】！\n", owner, textfmt.FormatPlainValue(round.FireName))
 	}
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 3)
 	for row := 0; row < 3; row++ {
 		buttons := make([]tgbotapi.InlineKeyboardButton, 0, 3)
 		for column := 0; column < 3; column++ {
 			index := row*3 + column
-			label := fmt.Sprintf("🎁 %d · 3分", index+1)
+			label := fmt.Sprintf("🎁 %d · %d分", index+1, round.EntryCost)
 			if pick, ok := opened[index]; ok {
-				label = fmt.Sprintf("%d号 ✓ %d分", index+1, pick.Reward)
+				label = fmt.Sprintf("%d号 ✓ 已开", index+1)
+				if round.Status == TreasureClosed {
+					label = fmt.Sprintf("%d号 ✓ %d分", index+1, pick.Reward)
+				}
 			} else if round.Status == TreasureClosed {
 				label = fmt.Sprintf("%d号 未开·%d分", index+1, rewards[index])
 			}
@@ -231,7 +270,7 @@ func HandleTreasureHuntCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery
 			return true
 		}
 	} else {
-		telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("获得 %d 分，消耗 %d 分，净变化 %+d 分", pick.Reward, pick.Cost, pick.Reward-pick.Cost))
+		telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("开箱成功，消耗 %d 分；结果将在本局结算后统一揭晓", pick.Cost))
 	}
 	if !finishTreasureRound(bot, uint(id), time.Now()) {
 		refreshTreasurePanel(bot, uint(id))
