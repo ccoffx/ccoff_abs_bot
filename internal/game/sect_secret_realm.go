@@ -2302,6 +2302,7 @@ func freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID string) (sectSecr
 }
 
 func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretRealmListeningSnapshot, error) {
+	fetchedAt := time.Now()
 	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
 	if err != nil {
 		return sectSecretRealmListeningSnapshot{}, err
@@ -2326,7 +2327,7 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		var u model.User
 		readErr := storage.DB.Select("telegram_id", "abs_user_id").Where("abs_user_id = ?", absUserID).First(&u).Error
 		if readErr == nil {
-			if err := recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, stats.Days, time.Now()); err == nil {
+			if err := recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, stats.Days, fetchedAt); err == nil {
 				// 秘境基线使用落库的累计净修为。
 				syncedEffectiveHours, ok := totalCultivationEffectiveHoursFromDailyStats(u.TelegramID, time.Now())
 				if !ok {

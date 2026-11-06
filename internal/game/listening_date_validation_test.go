@@ -15,7 +15,7 @@ func TestDailyListeningRecordsRejectInvalidAndFutureDates(t *testing.T) {
 		"2026-11-04": 86400,
 		"2026-02-30": 86400,
 		"total":      86400,
-	}, now)
+	}, now, now)
 	if len(records) != 2 {
 		t.Fatalf("invalid/future dates persisted: %+v", records)
 	}

@@ -1185,7 +1185,8 @@ func loadSectMemberRealmNames(members []model.SectMember) map[int64]string {
 
 func sectMemberListPageMarkup(page int, totalPages int) tgbotapi.InlineKeyboardMarkup {
 	if totalPages <= 1 {
-		return tgbotapi.InlineKeyboardMarkup{}
+		// Telegram requires an array even when there are no pagination buttons.
+		return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}}
 	}
 	row := make([]tgbotapi.InlineKeyboardButton, 0, 2)
 	if page > 1 {
@@ -3205,34 +3206,40 @@ func cappedListeningSeconds(seconds float64) float64 {
 }
 
 func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
-	adjustedDays, correctedDays := prepareDailyListeningDaysForRecord(userID, absUserID, days)
-	return recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt)
-}
-
-func prepareDailyListeningDaysForRecord(userID int64, absUserID string, days map[string]float64) (map[string]float64, map[string]bool) {
-	adjusted, corrected, _, err := prepareDailyListeningDaysChecked(userID, absUserID, days)
+	adjusted, corrected, _, err := prepareDailyListeningDaysChecked(userID, absUserID, days, fetchedAt)
 	if err != nil {
-		log.Printf("每日听书跨日修正失败，保留官方 days: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return days, nil
+		return err
 	}
-	return adjusted, corrected
+	return recordPreparedDailyListeningStats(userID, absUserID, adjusted, corrected, fetchedAt)
 }
 
-// Punitive scans must retry when correction data cannot be read or persisted;
-// ordinary listening views may still display the official ABS totals.
-func prepareDailyListeningDaysChecked(userID int64, absUserID string, days map[string]float64) (map[string]float64, map[string]bool, []absListeningSession, error) {
+// Do not replace an already corrected day with source-day totals when session
+// data is unavailable or comes from a different ABS snapshot.
+func prepareDailyListeningDaysChecked(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) (map[string]float64, map[string]bool, []absListeningSession, error) {
 	if days == nil || abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" {
 		return nil, nil, nil, fmt.Errorf("ABS_CROSS_DAY_NOT_READY")
 	}
-	sessions, err := fetchABSCrossDayListeningSessions(absUserID)
+	startedAt := time.Now()
+	snapshot, err := fetchABSCrossDayListeningSessions(absUserID)
+	sessions := snapshot.Sessions
 	if err != nil {
+		logDailyListeningObservation(userID, absUserID, days, nil, nil, sessions, startedAt, fetchedAt, err)
 		return nil, nil, nil, err
 	}
-	persistedSessions, err := persistAndLoadABSCrossDaySessions(userID, absUserID, days, sessions, time.Now())
+	persistedSessions, err := persistAndLoadABSCrossDaySessions(userID, absUserID, days, snapshot)
 	if err != nil {
+		logDailyListeningObservation(userID, absUserID, days, nil, nil, sessions, startedAt, fetchedAt, err)
 		return nil, nil, nil, err
+	}
+	if err := validateABSCrossDaySnapshot(days, persistedSessions); err != nil {
+		if scheduleErr := scheduleABSCrossDayReconciliation(userID, absUserID, days, snapshot, persistedSessions); scheduleErr != nil {
+			log.Printf("ABS cross-day reconciliation schedule failed: user=%d err=%s", userID, textfmt.FormatPlainError(scheduleErr))
+		}
+		logDailyListeningObservation(userID, absUserID, days, nil, nil, sessions, startedAt, fetchedAt, err)
+		return nil, nil, sessions, err
 	}
 	adjusted, corrected := rebalanceABSDaysForCrossDaySessions(days, persistedSessions)
+	logDailyListeningObservation(userID, absUserID, days, adjusted, corrected, sessions, startedAt, fetchedAt, nil)
 	if err := recordSectRetreatListeningSessions(userID, absUserID, sessions); err != nil {
 		return nil, nil, nil, err
 	}
@@ -3247,7 +3254,7 @@ func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[
 		fetchedAt = time.Now()
 	}
 
-	records := buildOfficialDailyListeningRecords(userID, absUserID, days, fetchedAt)
+	records := buildOfficialDailyListeningRecords(userID, absUserID, days, fetchedAt, time.Now())
 	for index := range records {
 		if correctedDays[records[index].DayKey] {
 			records[index].Source = dailyListeningCrossDaySource
@@ -3259,9 +3266,25 @@ func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[
 		return nil
 	}
 
+	var previous []model.DailyListeningStat
+	stale := false
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		if err := lockCurrentListeningBindingInTx(tx, userID, absUserID); err != nil {
 			return err
+		}
+		dayKeys := make([]string, 0, len(records))
+		for _, record := range records {
+			dayKeys = append(dayKeys, record.DayKey)
+		}
+		if err := tx.Where("user_id = ? AND day_key IN ?", userID, dayKeys).Find(&previous).Error; err != nil {
+			return err
+		}
+		// Compare instants in Go: SQLite text timestamps may have different offsets.
+		for _, old := range previous {
+			if old.AbsUserID == strings.TrimSpace(absUserID) && old.LastFetchedAt.After(fetchedAt) {
+				stale = true
+				return nil
+			}
 		}
 		res := tx.Clauses(dailyListeningStatOnConflict(time.Now())).Create(&records)
 		if res.Error != nil {
@@ -3276,15 +3299,22 @@ func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[
 		log.Printf("每日听书统计写入失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return err
 	}
+	logDailyListeningWrite(userID, absUserID, previous, records, fetchedAt, stale)
+	if stale {
+		return fmt.Errorf("DAILY_LISTENING_STATS_STALE_SNAPSHOT")
+	}
 	return nil
 }
 
-func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) []model.DailyListeningStat {
+func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map[string]float64, fetchedAt, recordedAt time.Time) []model.DailyListeningStat {
 	if userID == 0 {
 		return nil
 	}
 	if fetchedAt.IsZero() {
 		fetchedAt = time.Now()
+	}
+	if recordedAt.IsZero() {
+		recordedAt = fetchedAt
 	}
 
 	// Daily cultivation must use the exact Beijing calendar-day value reported by
@@ -3293,7 +3323,9 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 	// can multiply one refresh interval by every historical session returned.
 	rawOfficialByDay := make(map[string]float64, len(days)+1)
 	daySet := make(map[string]bool, len(days)+1)
-	todayKey := SectDayKey(fetchedAt)
+	// A request started before midnight may already contain the next day's data.
+	// Keep request start for ordering, but use the write date for calendar limits.
+	todayKey := SectDayKey(recordedAt)
 	for dayKey, rawSeconds := range days {
 		dayKey = strings.TrimSpace(dayKey)
 		if !validDailyListeningDayKey(dayKey) || dayKey > todayKey {
@@ -3444,6 +3476,13 @@ func RefreshDailyListeningStatsFromABS(userID int64, absUserID string) (map[stri
 }
 
 func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force bool, abuseDays ...string) (map[string]float64, bool) {
+	startedAt := time.Now()
+	outcome, failure := "not_ready", ""
+	statusCode := 0
+	var statsDuration time.Duration
+	defer func() {
+		logDailyListeningRefresh(userID, absUserID, force, startedAt, statsDuration, statusCode, outcome, failure)
+	}()
 	forAbuse := len(abuseDays) > 0
 	if storage.DB == nil || abs.DefaultClient == nil || userID == 0 || strings.TrimSpace(absUserID) == "" {
 		return nil, false
@@ -3451,12 +3490,17 @@ func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force boo
 
 	if !force && !forAbuse {
 		if days, ok := cachedDailyListeningDaysWithinTTL(userID, absUserID, time.Now()); ok {
+			outcome = "cache_hit"
 			return days, true
 		}
 	}
 
 	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
+	statsDuration = time.Since(startedAt)
+	statusCode = code
 	if err != nil || code != 200 {
+		outcome = "stats_request_failed"
+		failure = textfmt.FormatPlainError(err)
 		log.Printf("每日听书 ABS 统计读取失败: user=%d abs=%s code=%d err=%s", userID, textfmt.FormatPlainValue(absUserID), code, textfmt.FormatPlainError(err))
 		return nil, false
 	}
@@ -3465,26 +3509,42 @@ func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force boo
 		Days map[string]float64 `json:"days"`
 	}
 	if err := json.Unmarshal(body, &stats); err != nil {
+		outcome, failure = "stats_parse_failed", textfmt.FormatPlainError(err)
 		log.Printf("每日听书 ABS 统计解析失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return nil, false
 	}
 	if stats.Days == nil {
+		outcome = "stats_days_missing"
 		log.Printf("每日听书 ABS 统计缺少 days 明细: user=%d", userID)
 		return nil, false
 	}
 
-	fetchedAt := time.Now()
-	adjustedDays, correctedDays, sessions, correctionErr := prepareDailyListeningDaysChecked(userID, absUserID, stats.Days)
+	// Order concurrent responses by request start, so an older request cannot
+	// overwrite a more recent snapshot just because its response arrived later.
+	fetchedAt := startedAt
+	adjustedDays, correctedDays, sessions, correctionErr := prepareDailyListeningDaysChecked(userID, absUserID, stats.Days, fetchedAt)
 	if correctionErr != nil {
+		outcome, failure = "correction_failed", textfmt.FormatPlainError(correctionErr)
 		log.Printf("每日听书跨日修正失败: user=%d err=%s", userID, textfmt.FormatPlainError(correctionErr))
-		if forAbuse {
-			return nil, false
+		var mismatch *absCrossDaySnapshotMismatchError
+		if forAbuse && errors.As(correctionErr, &mismatch) && mismatch.OnlyMissingSourceDays {
+			// Penalties already use guaranteed session lower bounds independently
+			// of official day assignment. Preserve that behavior when days omits a
+			// source key, while leaving every daily cache row and timestamp intact.
+			if err := recordSectRetreatListeningSessions(userID, absUserID, sessions); err == nil {
+				outcome = "evidence_only"
+				return listeningAbuseProvenDays(sessions, abuseDays), true
+			} else {
+				failure = textfmt.FormatPlainError(err)
+			}
 		}
-		adjustedDays, correctedDays = stats.Days, nil
-	}
-	if err := recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt); err != nil {
 		return nil, false
 	}
+	if err := recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt); err != nil {
+		outcome, failure = "write_failed", textfmt.FormatPlainError(err)
+		return nil, false
+	}
+	outcome = "updated"
 	if forAbuse {
 		return listeningAbuseProvenDays(sessions, abuseDays), true
 	}
@@ -3492,6 +3552,10 @@ func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force boo
 }
 
 func refreshSectMembersDailyListeningStats(sectID int64, limit int) int {
+	return refreshSectMembersDailyListeningStatsWithOptions(sectID, limit, false)
+}
+
+func refreshSectMembersDailyListeningStatsWithOptions(sectID int64, limit int, force bool) int {
 	if storage.DB == nil || abs.DefaultClient == nil || sectID == 0 {
 		return 0
 	}
@@ -3512,7 +3576,7 @@ func refreshSectMembersDailyListeningStats(sectID int64, limit int) int {
 
 	success := 0
 	for _, u := range users {
-		if _, ok := RefreshDailyListeningStatsFromABS(u.TelegramID, u.AbsUserID); ok {
+		if _, ok := refreshDailyListeningStatsFromABS(u.TelegramID, u.AbsUserID, force); ok {
 			if _, syncOK := syncCultivationFromDailyListeningStats(u.TelegramID); !syncOK {
 				continue
 			}

@@ -75,7 +75,6 @@ func isDailyListeningStatCommandText(text string) bool {
 }
 
 func refreshUserDailyListeningAndCultivation(userID int64) (model.DailyListeningStat, float64, bool, error) {
-	now := time.Now()
 	var u model.User
 	if err := storage.DB.Select("telegram_id", "abs_user_id").Where("telegram_id = ?", userID).First(&u).Error; err != nil {
 		return model.DailyListeningStat{}, 0, false, err
@@ -84,7 +83,9 @@ func refreshUserDailyListeningAndCultivation(userID int64) (model.DailyListening
 		return model.DailyListeningStat{}, 0, false, storage.ErrAbsUserIDEmpty
 	}
 
-	if _, ok := RefreshDailyListeningStatsFromABS(userID, u.AbsUserID); !ok {
+	_, refreshOK := refreshDailyListeningStatsFromABS(userID, u.AbsUserID, true)
+	now := time.Now()
+	if !refreshOK {
 		if stat, cacheOK := getTodayDailyListeningStat(userID, now); cacheOK {
 			totalEffective, totalOK := totalCultivationEffectiveHoursFromDailyStats(userID, now)
 			if !totalOK {
@@ -262,7 +263,11 @@ func handleRefreshMyDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Messa
 		return
 	}
 
-	telegram.ReplyText(bot, msg.Chat.ID, formatDailyListeningStat("✅ 今日净修为已刷新", stat, totalEffective))
+	title := "✅ 今日净修为已刷新"
+	if errors.Is(err, storage.ErrAbsRefreshFailedUsingCache) {
+		title = "⚠️ 本次刷新失败，展示上次成功统计"
+	}
+	telegram.ReplyText(bot, msg.Chat.ID, formatDailyListeningStat(title, stat, totalEffective))
 }
 
 func handleRefreshSectDailyListeningStatsCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -287,7 +292,7 @@ func handleRefreshSectDailyListeningStatsCommand(bot *tgbotapi.BotAPI, msg *tgbo
 		return
 	}
 
-	count := refreshSectMembersDailyListeningStats(member.SectID, 100)
+	count := refreshSectMembersDailyListeningStatsWithOptions(member.SectID, 100, true)
 	telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已刷新本宗门 `%d` 名成员的每日净修为。", count))
 }
 

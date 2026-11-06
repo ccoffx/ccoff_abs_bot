@@ -33,6 +33,7 @@ const (
 	crossDayAdjustmentStatusAccepted         = "accepted"
 	crossDayAdjustmentStatusBounded          = "bounded"
 	crossDayAdjustmentStatusUncertain        = "uncertain"
+	crossDayAdjustmentStatusInvalidated      = "invalidated"
 	crossDayAdjustmentConfidenceEstimated    = "estimated"
 	crossDayAdjustmentConfidenceConservative = "conservative"
 	crossDayAdjustmentConfidenceUncertain    = "uncertain"
@@ -90,31 +91,41 @@ func parseABSListeningSession(raw map[string]interface{}, absUserID string) (abs
 	}, true
 }
 
-func fetchABSCrossDayListeningSessions(absUserID string) ([]absListeningSession, error) {
+type absListeningSessionSnapshot struct {
+	Sessions  []absListeningSession
+	StartedAt time.Time
+	Complete  bool
+}
+
+func fetchABSCrossDayListeningSessions(absUserID string) (absListeningSessionSnapshot, error) {
+	snapshot := absListeningSessionSnapshot{StartedAt: time.Now()}
 	if abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" {
-		return nil, fmt.Errorf("ABS \u4f1a\u8bdd\u8bfb\u53d6\u53c2\u6570\u4e0d\u5b8c\u6574")
+		return snapshot, fmt.Errorf("ABS \u4f1a\u8bdd\u8bfb\u53d6\u53c2\u6570\u4e0d\u5b8c\u6574")
 	}
 
 	sessions := make([]absListeningSession, 0, dailyListeningSessionPageSize)
 	seenSessionKeys := make(map[string]struct{}, dailyListeningSessionPageSize)
+	valid := true
 	for page := 0; page < dailyListeningSessionMaxPages; page++ {
 		body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningSessionsPath(absUserID, page, dailyListeningSessionPageSize), nil)
 		if err != nil {
-			return nil, err
+			return snapshot, err
 		}
 		if code != 200 {
-			return nil, &abs.AbsAPIError{Operation: "\u8bfb\u53d6 ABS \u7528\u6237\u4f1a\u8bdd\u5931\u8d25", StatusCode: code, Message: "\u54cd\u5e94: " + abs.AbsResponseSnippet(body)}
+			return snapshot, &abs.AbsAPIError{Operation: "\u8bfb\u53d6 ABS \u7528\u6237\u4f1a\u8bdd\u5931\u8d25", StatusCode: code, Message: "\u54cd\u5e94: " + abs.AbsResponseSnippet(body)}
 		}
 		rawSessions, err := parseABSSessionsPayload(body)
 		if err != nil {
-			return nil, err
+			return snapshot, err
 		}
 		for _, raw := range rawSessions {
 			if !absSessionBelongsToUser(raw, absUserID) {
+				valid = false
 				continue
 			}
 			session, ok := parseABSListeningSession(raw, absUserID)
 			if !ok {
+				valid = false
 				continue
 			}
 			key := strings.TrimSpace(session.SessionKey)
@@ -122,35 +133,44 @@ func fetchABSCrossDayListeningSessions(absUserID string) ([]absListeningSession,
 				continue
 			}
 			if _, exists := seenSessionKeys[key]; exists {
+				valid = false
 				continue
 			}
 			seenSessionKeys[key] = struct{}{}
 			sessions = append(sessions, session)
 		}
 		if len(rawSessions) < dailyListeningSessionPageSize {
+			snapshot.Complete = valid
 			break
 		}
 	}
-	return sessions, nil
+	snapshot.Sessions = sessions
+	return snapshot, nil
 }
 
-func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[string]float64, sessions []absListeningSession, observedAt time.Time) ([]absListeningSession, error) {
+func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[string]float64, snapshot absListeningSessionSnapshot) ([]absListeningSession, error) {
 	if storage.DB == nil {
 		return nil, fmt.Errorf("ABS_CROSS_DAY_DB_EMPTY")
 	}
 	if userID == 0 || strings.TrimSpace(absUserID) == "" {
 		return nil, fmt.Errorf("ABS_CROSS_DAY_USER_EMPTY")
 	}
-	if observedAt.IsZero() {
-		observedAt = time.Now()
+	if snapshot.StartedAt.IsZero() {
+		snapshot.StartedAt = time.Now()
 	}
 
-	observations, diagnostics := buildABSCrossDaySessionObservations(userID, absUserID, sessions, observedAt)
+	observations, diagnostics := buildABSCrossDaySessionObservations(userID, absUserID, snapshot.Sessions, snapshot.StartedAt)
 	if err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		if err := lockCurrentListeningBindingInTx(tx, userID, absUserID); err != nil {
 			return err
 		}
-		return upsertABSCrossDaySessionObservations(tx, observations)
+		if err := upsertABSCrossDaySessionObservations(tx, observations); err != nil {
+			return err
+		}
+		if snapshot.Complete {
+			return reconcileCompleteABSCrossDaySnapshotInTx(tx, userID, absUserID, days, snapshot)
+		}
+		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("persist ABS cross-day sessions: %w", err)
 	}
@@ -163,21 +183,12 @@ func persistAndLoadABSCrossDaySessions(userID int64, absUserID string, days map[
 		log.Printf("ABS cross-day session diagnostics: user=%d abs=%s %s", userID, textfmt.FormatPlainValue(absUserID), strings.Join(parts, ","))
 	}
 
-	sourceDays := make([]string, 0, len(days))
-	for dayKey := range days {
-		dayKey = strings.TrimSpace(dayKey)
-		if validDailyListeningDayKey(dayKey) {
-			sourceDays = append(sourceDays, dayKey)
-		}
-	}
-	if len(sourceDays) == 0 {
-		return nil, nil
-	}
-	sort.Strings(sourceDays)
+	// A missing source-day key must still be validated against known sessions.
+	// Invalidated rows retain the affected dates so obsolete allocations clear.
 	var stored []model.ABSCrossDaySessionAdjustment
 	if err := storage.DB.Where(
-		"user_id = ? AND abs_user_id = ? AND status IN ? AND algorithm_version = ? AND source_day IN ?",
-		userID, strings.TrimSpace(absUserID), []string{crossDayAdjustmentStatusAccepted, crossDayAdjustmentStatusBounded}, dailyListeningCrossDayAlgorithmVersion, sourceDays,
+		"user_id = ? AND abs_user_id = ? AND status IN ? AND algorithm_version = ?",
+		userID, strings.TrimSpace(absUserID), []string{crossDayAdjustmentStatusAccepted, crossDayAdjustmentStatusBounded, crossDayAdjustmentStatusInvalidated}, dailyListeningCrossDayAlgorithmVersion,
 	).Order("started_at ASC, session_key ASC").Find(&stored).Error; err != nil {
 		return nil, fmt.Errorf("load ABS cross-day sessions: %w", err)
 	}
@@ -211,7 +222,10 @@ func buildABSCrossDaySessionObservations(userID int64, absUserID string, session
 	for _, session := range sessions {
 		status, confidence, reason, tracked := classifyABSCrossDaySession(session)
 		if !tracked {
-			continue
+			if !session.HasListeningTime || session.StartedAt.IsZero() || session.UpdatedAt.IsZero() || !session.UpdatedAt.After(session.StartedAt) {
+				continue
+			}
+			status, confidence, reason = crossDayAdjustmentStatusInvalidated, crossDayAdjustmentConfidenceUncertain, "no_longer_cross_day"
 		}
 		allocationJSON := ""
 		switch status {
@@ -220,7 +234,9 @@ func buildABSCrossDaySessionObservations(userID int64, absUserID string, session
 		case crossDayAdjustmentStatusBounded:
 			allocationJSON = crossDaySessionMinimumAllocationJSON(session)
 		}
-		diagnostics[status+":"+reason]++
+		if tracked {
+			diagnostics[status+":"+reason]++
+		}
 		observations = append(observations, model.ABSCrossDaySessionAdjustment{
 			UserID:           userID,
 			AbsUserID:        strings.TrimSpace(absUserID),
@@ -247,13 +263,96 @@ func upsertABSCrossDaySessionObservations(tx *gorm.DB, observations []model.ABSC
 	if len(observations) == 0 {
 		return nil
 	}
+	// Callers hold the binding write lock. Do not let late HTTP responses replace
+	// newer session evidence; time.Time also handles mixed UTC/local offsets.
+	absIDs, keys := make([]string, 0), make([]string, 0, len(observations))
+	seenAbsIDs := make(map[string]bool)
+	for _, observation := range observations {
+		if !seenAbsIDs[observation.AbsUserID] {
+			absIDs = append(absIDs, observation.AbsUserID)
+			seenAbsIDs[observation.AbsUserID] = true
+		}
+		keys = append(keys, observation.SessionKey)
+	}
+	var previous []model.ABSCrossDaySessionAdjustment
+	if err := tx.Where("abs_user_id IN ? AND session_key IN ?", absIDs, keys).Find(&previous).Error; err != nil {
+		return err
+	}
+	byKey := make(map[string]model.ABSCrossDaySessionAdjustment, len(previous))
+	for _, old := range previous {
+		byKey[old.AbsUserID+"\x00"+old.SessionKey] = old
+	}
+	eligible := make([]model.ABSCrossDaySessionAdjustment, 0, len(observations))
+	for _, observation := range observations {
+		old, exists := byKey[observation.AbsUserID+"\x00"+observation.SessionKey]
+		if observation.Status == crossDayAdjustmentStatusInvalidated {
+			if !exists {
+				continue // Ordinary same-day sessions do not need ledger rows.
+			}
+			observation.SourceDay, observation.AllocationJSON = old.SourceDay, old.AllocationJSON
+		}
+		if exists && old.UserID == observation.UserID {
+			if old.Status == crossDayAdjustmentStatusInvalidated && observation.ObservedAt.Before(old.ObservedAt) {
+				continue
+			}
+			if old.SessionUpdatedAt.After(observation.SessionUpdatedAt) ||
+				(old.SessionUpdatedAt.Equal(observation.SessionUpdatedAt) && old.ObservedAt.After(observation.ObservedAt)) {
+				continue
+			}
+		}
+		eligible = append(eligible, observation)
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
 	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "abs_user_id"}, {Name: "session_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"user_id", "source_day", "started_at", "session_updated_at", "listening_seconds",
 			"allocation_json", "status", "confidence", "reason", "algorithm_version", "observed_at", "updated_at",
 		}),
-	}).CreateInBatches(&observations, 50).Error
+	}).CreateInBatches(&eligible, 50).Error
+}
+
+type absCrossDaySnapshotMismatchError struct {
+	Day                   string
+	StatsSeconds          float64
+	SessionSeconds        float64
+	OnlyMissingSourceDays bool
+}
+
+func (e *absCrossDaySnapshotMismatchError) Error() string {
+	return fmt.Sprintf("ABS_CROSS_DAY_SNAPSHOT_MISMATCH: day=%s stats_seconds=%.3f session_seconds=%.3f", e.Day, e.StatsSeconds, e.SessionSeconds)
+}
+
+func validateABSCrossDaySnapshot(days map[string]float64, sessions []absListeningSession) error {
+	totals := make(map[string]float64)
+	seen := make(map[string]bool)
+	for _, session := range sessions {
+		if session.CrossDayStatus == crossDayAdjustmentStatusInvalidated {
+			continue
+		}
+		if seen[session.SessionKey] {
+			continue
+		}
+		seen[session.SessionKey] = true
+		totals[session.DateKey] += session.ListeningSeconds
+	}
+	var mismatch *absCrossDaySnapshotMismatchError
+	for day, seconds := range totals {
+		if seconds > abs.PositiveListeningSeconds(days[day])+1e-6 {
+			if mismatch == nil {
+				mismatch = &absCrossDaySnapshotMismatchError{day, abs.PositiveListeningSeconds(days[day]), seconds, true}
+			}
+			if _, present := days[day]; present {
+				mismatch.OnlyMissingSourceDays = false
+			}
+		}
+	}
+	if mismatch != nil {
+		return mismatch
+	}
+	return nil
 }
 
 func classifyABSCrossDaySession(session absListeningSession) (status string, confidence string, reason string, tracked bool) {
@@ -350,6 +449,18 @@ func rebalanceABSDaysForCrossDaySessions(days map[string]float64, sessions []abs
 			continue
 		}
 		seenSessionKeys[sessionKey] = true
+
+		if session.CrossDayStatus == crossDayAdjustmentStatusInvalidated {
+			if _, exists := adjusted[session.DateKey]; !exists {
+				adjusted[session.DateKey] = 0
+			}
+			for day := range session.StoredAllocation {
+				if _, exists := adjusted[day]; !exists {
+					adjusted[day] = 0
+				}
+			}
+			continue
+		}
 
 		if session.CrossDayStatus == crossDayAdjustmentStatusBounded {
 			sourceDay := strings.TrimSpace(session.DateKey)

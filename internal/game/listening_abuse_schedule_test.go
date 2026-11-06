@@ -262,9 +262,9 @@ func TestListeningAbuseRetriesCrossDayCorrectionFailures(t *testing.T) {
 			if day, err := storage.GetSystemConfigStringChecked(storage.ListeningAbuseLastScanDayKey); err != nil || day != "" {
 				t.Fatalf("failed correction completed scan: %q, %v", day, err)
 			}
-			// Normal views retain the official fallback even while punitive scans wait.
-			if days, ok := RefreshDailyListeningStatsFromABS(1, "abs1"); !ok || days["2026-10-27"] != 57600 {
-				t.Fatalf("official fallback unavailable: %v, %t", days, ok)
+			// An uncorrected source-day total must not become a successful refresh.
+			if days, ok := RefreshDailyListeningStatsFromABS(1, "abs1"); ok {
+				t.Fatalf("failed correction accepted raw source-day totals: %v", days)
 			}
 			mu.Lock()
 			sessionsUnavailable = false

@@ -29,7 +29,7 @@ func RefreshAllDailyListeningStatsWithOptions(force bool) (int, int, int, error)
 				continue
 			}
 		}
-		if _, ok := RefreshDailyListeningStatsFromABS(u.TelegramID, u.AbsUserID); ok {
+		if _, ok := refreshDailyListeningStatsFromABS(u.TelegramID, u.AbsUserID, force); ok {
 			if _, syncOK := syncCultivationFromDailyListeningStats(u.TelegramID); !syncOK {
 				failed++
 				continue

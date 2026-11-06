@@ -26,6 +26,11 @@ type ABSCrossDaySessionScanCursor struct {
 	CompletedAt      *time.Time `gorm:"index"`
 	NextRetryAt      *time.Time `gorm:"index"`
 	LastErrorCode    string
+
+	// A repair scan confirms missing historical sessions without lifting the
+	// normal five-page request limit. Evidence and page advancement commit together.
+	ReconcileStartedAt    *time.Time
+	ReconcileEvidenceJSON string
 }
 
 func (ABSCrossDaySessionScanCursor) TableName() string {

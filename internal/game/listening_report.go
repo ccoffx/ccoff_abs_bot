@@ -21,6 +21,7 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 	// 1. 获取防作弊的真实听书时长与每日明细 (来自统计接口)
 	// ==========================================
 	statsEndpoint := abs.AbsUserListeningStatsPath(absUserID)
+	statsFetchedAt := time.Now()
 	statsBody, statsCode, statsErr := c.SendRequest("GET", statsEndpoint, nil)
 	if statsErr != nil {
 		log.Printf("⚠️ 听书报告 ABS 统计读取失败: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(statsErr))
@@ -37,6 +38,8 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 	var todayRawHours float64 = 0
 	spiritFireLine := ""
 	todayUnavailable := false
+	totalUnavailable := false
+	refreshNotice := ""
 	var statsDays map[string]float64
 
 	// 精准映射 ABS 的统计数据结构
@@ -102,30 +105,39 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 	// 👇 --- 核心新增：注入经过折算的斗气系统 --- 👇
 	var u model.User
 	if err := storage.DB.Where("abs_user_id = ?", absUserID).First(&u).Error; err == nil {
-		now := time.Now()
+		var recordErr error
 		if statsDays == nil {
-			log.Printf("⚠️ ABS 听书统计缺少 days 明细，跳过净修为同步: user=%d abs=%s", u.TelegramID, textfmt.FormatPlainValue(absUserID))
-			if cul := GetOrCreateCultivation(u.TelegramID); cul != nil {
+			recordErr = fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
+		} else {
+			recordErr = recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, statsDays, statsFetchedAt)
+		}
+		now := time.Now()
+		if recordErr == nil {
+			if syncedEffectiveTotalHours, ok := syncCultivationFromDailyListeningStatsAt(u.TelegramID, now); ok {
+				effectiveTotalHours = syncedEffectiveTotalHours
+			} else if cul := GetOrCreateCultivation(u.TelegramID); cul != nil {
 				effectiveTotalHours = cul.TotalAudioTime
 			}
+			if todayStat, ok, readErr := GetTodayDailyListeningStatChecked(u.TelegramID, now); readErr != nil {
+				todayUnavailable = true
+				spiritFireLine = "\n🔥 今日基础与异火修为读取失败，请稍后重试。"
+			} else if ok {
+				todayRawHours = abs.PositiveListeningSeconds(todayStat.RawSeconds) / 3600.0
+				todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + todayStat.SpiritFireHours
+				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-todayStat.SpiritFireHours, todayStat.SpiritFireHours)
+			}
 		} else {
-			if err := recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, statsDays, now); err == nil {
-				if syncedEffectiveTotalHours, ok := syncCultivationFromDailyListeningStatsAt(u.TelegramID, now); ok {
-					effectiveTotalHours = syncedEffectiveTotalHours
-				} else if cul := GetOrCreateCultivation(u.TelegramID); cul != nil {
-					effectiveTotalHours = cul.TotalAudioTime
-				}
-				if todayStat, ok, readErr := GetTodayDailyListeningStatChecked(u.TelegramID, now); readErr != nil {
-					todayUnavailable = true
-					spiritFireLine = "\n🔥 今日基础与异火修为读取失败，请稍后重试。"
-				} else if ok {
-					todayRawHours = abs.PositiveListeningSeconds(todayStat.RawSeconds) / 3600.0
-					todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + todayStat.SpiritFireHours
-					spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-todayStat.SpiritFireHours, todayStat.SpiritFireHours)
-				}
+			log.Printf("⚠️ 听书报告刷新失败，读取上次成功统计: user=%d abs=%s err=%s",
+				u.TelegramID, textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(recordErr))
+			if stat, total, ok := cachedDailyListeningReport(u.TelegramID, absUserID, now); ok {
+				effectiveTotalHours = total
+				todayRawHours = abs.PositiveListeningSeconds(stat.RawSeconds) / 3600
+				todayEffectiveHours = stat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + stat.SpiritFireHours
+				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-stat.SpiritFireHours, stat.SpiritFireHours)
+				refreshNotice = fmt.Sprintf("\n⚠️ 本次刷新失败，今日时长及修为使用上次成功统计（%s）。", stat.LastFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
 			} else {
-				log.Printf("⚠️ 听书报告每日统计写入失败，使用本次 ABS 数据降级展示: user=%d abs=%s err=%s",
-					u.TelegramID, textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
+				todayUnavailable, totalUnavailable = true, true
+				refreshNotice = "\n⚠️ 本次刷新失败，暂无可用的每日统计缓存，请稍后重试。"
 			}
 		}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -140,14 +152,32 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 
 	// 如果由于天道压制导致折算时长明显小于真实时长，我们在文案上给予反馈
 	suppressNotice := ""
-	if rawHours-effectiveTotalHours > 1.0 {
+	if refreshNotice == "" && rawHours-effectiveTotalHours > 1.0 {
 		suppressNotice = "\n*(⚠️ 天道法则感应：您的部分修炼涉嫌强行吸收灵气，转化率已受压制)*"
 	}
 
 	todayText := fmt.Sprintf("%.2f 小时", todayEffectiveHours)
+	todayRawText := fmt.Sprintf("%.2f 小时", todayRawHours)
+	totalText := fmt.Sprintf("%.2f 小时", effectiveTotalHours)
 	if todayUnavailable {
-		todayText = "读取失败"
+		todayText, todayRawText = "读取失败", "读取失败"
 	}
-	return fmt.Sprintf("📊 你的专属听书战绩\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %.2f 小时\n✨ 净修炼时长: %.2f 小时\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
-		rawHours, todayRawHours, effectiveTotalHours, todayText, spiritFireLine+suppressNotice, finishedCountText, listeningCountText)
+	if totalUnavailable {
+		totalText = "读取失败"
+	}
+	return fmt.Sprintf("📊 你的专属听书战绩%s\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %s\n✨ 净修炼时长: %s\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
+		refreshNotice, rawHours, todayRawText, totalText, todayText, spiritFireLine+suppressNotice, finishedCountText, listeningCountText)
+}
+
+func cachedDailyListeningReport(userID int64, absUserID string, now time.Time) (model.DailyListeningStat, float64, bool) {
+	stat, ok, err := GetTodayDailyListeningStatChecked(userID, now)
+	if err != nil || !ok || stat.AbsUserID != absUserID {
+		return model.DailyListeningStat{}, 0, false
+	}
+	var bindings int64
+	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ? AND abs_user_id = ?", userID, absUserID).Count(&bindings).Error; err != nil || bindings != 1 {
+		return model.DailyListeningStat{}, 0, false
+	}
+	total, ok := totalCultivationEffectiveHoursFromDailyStats(userID, now)
+	return stat, total, ok
 }
