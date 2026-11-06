@@ -178,6 +178,9 @@ func renderSuperAdminMenu(key string) (string, tgbotapi.InlineKeyboardMarkup) {
 		)
 	case "cards":
 		return "🎫 **【卡密续期】**", menuMarkup(
+			adminCmdRow("♻️ 卡密回收状态", "code_cashout_status"),
+			adminCmdRow("⏸ 关闭卡密回收", "code_cashout_disable"),
+			adminCmdRow("▶️ 开启卡密回收", "code_cashout_enable"),
 			adminCmdRow("🔑 生成邀请码", "gen_invite"),
 			adminCmdRow("💳 生成续期卡", "gen_renew"),
 			adminCmdRow("🏳️ 生成白名单卡", "gen_whitelist"),
@@ -226,6 +229,9 @@ func renderSuperAdminMenu(key string) (string, tgbotapi.InlineKeyboardMarkup) {
 		)
 	case "config":
 		return "⚙️ **【系统配置】**\n\n⚠️ 开放注册会改变开户注册边界，用户补偿会变更全体用户资产。", menuMarkup(
+			adminCmdRow("♻️ 卡密回收状态", "code_cashout_status"),
+			adminCmdRow("⏸ 关闭卡密回收", "code_cashout_disable"),
+			adminCmdRow("▶️ 开启卡密回收", "code_cashout_enable"),
 			adminCmdRow("🚪 开放注册", "open_registration"),
 			adminCmdRow("🛡 用户补偿", "user_compensation"),
 			adminCmdRow("📣 发布服务公告", "service_announcement"),
@@ -270,6 +276,9 @@ func adminMenuCommandText(key string) (command string, superOnly bool, ok bool) 
 		"channel_announcement_status": {"频道公告异常", true},
 		"invite_price":                {"邀请码价格", true},
 		"renew_price":                 {"续期卡价格", true},
+		"code_cashout_status":         {"卡密回收状态", true},
+		"code_cashout_disable":        {"关闭卡密回收", true},
+		"code_cashout_enable":         {"开启卡密回收", true},
 		"gen_invite":                  {"生成邀请码", true},
 		"gen_renew":                   {"生成续期卡", true},
 		"gen_whitelist":               {"生成白名单卡", true},

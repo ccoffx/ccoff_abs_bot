@@ -186,6 +186,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	role := storage.GetUserRole(userID)
 
+	if handleCodeCashoutAdminMessage(bot, msg, text, session) {
+		return
+	}
+
 	if HandleAdminServiceOperations(bot, msg, text, session, role) {
 		return
 	}
@@ -535,6 +539,11 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		if text == "卡密回收" || text == "回收卡密" {
+			if err := market.CheckCodeCashoutEnabled(storage.DB); err != nil {
+				sendCodeCashoutUnavailable(bot, msg, err)
+				telegram.ClearSession(userID)
+				return
+			}
 			if _, _, err := storage.EnsureUserWallet(msg.From); err != nil {
 				log.Printf("❌ 卡密回收钱包初始化失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 				telegram.SendPlainText(bot, chatID, "❌ 钱包初始化失败，请稍后重试。")
@@ -1583,6 +1592,11 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	case "WAITING_CODE_CASHOUT_INPUT":
 		quote, err := market.InspectCodeCashout(text, userID)
 		if err != nil {
+			if errors.Is(err, market.ErrCodeCashoutDisabled) {
+				sendCodeCashoutUnavailable(bot, msg, err)
+				telegram.ClearSession(userID)
+				return
+			}
 			if errors.Is(err, storage.ErrCodeOwnerMismatch) {
 				telegram.SendPlainText(bot, chatID, "❌ 该卡密仅限当前持有人使用、回收或上架。")
 				return
@@ -1627,6 +1641,8 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		awarded, err := market.ExecuteCodeCashout(userID, quote)
 		if err != nil {
 			switch {
+			case errors.Is(err, market.ErrCodeCashoutDisabled):
+				sendCodeCashoutUnavailable(bot, msg, err)
 			case errors.Is(err, storage.ErrCodeOwnerMismatch):
 				telegram.SendPlainText(bot, chatID, "❌ 该卡密仅限当前持有人回收，未发放积分。")
 			case errors.Is(err, market.ErrCodeCashoutInvalid):

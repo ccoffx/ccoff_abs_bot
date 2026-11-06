@@ -23,7 +23,7 @@ var (
 	errWhitelistCardInvalid = errors.New("白名单卡密无效或已被使用。")
 	errWhitelistCardAccount = errors.New("请先注册或绑定正式听书账号；体验账号请先使用邀请码转正。")
 	errWhitelistCardAlready = errors.New("您已经是白名单，无需再次兑换，卡密未消耗。")
-	errWhitelistCardAdmin   = errors.New("超级管理员不能兑换白名单卡，卡密未消耗。")
+	errWhitelistCardAdmin   = errors.New("超级管理员已享有账号到期及播放异常风控豁免，无需兑换白名单卡，卡密未消耗。")
 )
 
 func generateWhitelistCards(actorID int64, count int, reason string) ([]string, error) {

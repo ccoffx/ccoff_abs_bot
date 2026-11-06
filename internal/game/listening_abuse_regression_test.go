@@ -7,10 +7,106 @@ import (
 	"testing"
 	"time"
 
+	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/lifecycle"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
 )
+
+func TestListeningAbuseScanSkipsAllImmuneUsers(t *testing.T) {
+	setupListeningAbuseScheduleDB(t)
+	previousConfig := config.AppConfig
+	config.AppConfig = &config.Config{AdminIDs: map[int64]bool{1: true}}
+	t.Cleanup(func() { config.AppConfig = previousConfig })
+	for _, u := range []model.User{
+		{TelegramID: 1, Username: "configured", AbsUserID: "abs1", Role: "user", Status: "active"},
+		{TelegramID: 2, Username: "stored", AbsUserID: "abs2", Role: "super_admin", Status: "active"},
+		{TelegramID: 3, Username: "whitelisted", AbsUserID: "abs3", Role: "user", Status: "active", IsWhitelist: true},
+	} {
+		if err := storage.DB.Create(&u).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var calls atomic.Int64
+	bossEvidenceServer(t, func(w http.ResponseWriter, req *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	warnings, freezes, _, err := scanListeningAbuseForDay(nil, "2026-11-02", time.Now())
+	if err != nil || warnings != 0 || freezes != 0 || calls.Load() != 0 {
+		t.Fatalf("immune users reached scan: warnings=%d freezes=%d calls=%d err=%v", warnings, freezes, calls.Load(), err)
+	}
+}
+
+func TestListeningAbuseRechecksImmunityBeforeWarningAndFreeze(t *testing.T) {
+	for _, immunity := range []string{"configured", "stored", "whitelist"} {
+		t.Run(immunity, func(t *testing.T) {
+			setupListeningAbuseScheduleDB(t)
+			previousConfig := config.AppConfig
+			config.AppConfig = &config.Config{AdminIDs: map[int64]bool{}}
+			t.Cleanup(func() { config.AppConfig = previousConfig })
+			u := model.User{TelegramID: 1, Username: "promoted", AbsUserID: "abs1", Role: "user", Status: "active"}
+			if err := storage.DB.Create(&u).Error; err != nil {
+				t.Fatal(err)
+			}
+			// Keep the ordinary-user snapshot that a scan took before immunity
+			// was granted. Both penalty paths must check the current identity.
+			switch immunity {
+			case "configured":
+				config.AppConfig.AdminIDs[u.TelegramID] = true
+			case "stored":
+				if err := storage.DB.Model(&u).Update("role", "super_admin").Error; err != nil {
+					t.Fatal(err)
+				}
+				u.Role = "user"
+			case "whitelist":
+				if err := storage.DB.Model(&u).Update("is_whitelist", true).Error; err != nil {
+					t.Fatal(err)
+				}
+				u.IsWhitelist = false
+			}
+			var calls atomic.Int64
+			bossEvidenceServer(t, func(w http.ResponseWriter, req *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusServiceUnavailable)
+			})
+			now := time.Now()
+			if warned, err := createListeningAbuseWarning(nil, u, "2026-11-02", 20, now); err != nil || warned {
+				t.Fatalf("immune user warned: warned=%t err=%v", warned, err)
+			}
+			if frozen, err := startListeningAbuseFreeze(nil, u, "2026-11-02", "2026-11-01", 20, 20, now); err != nil || frozen {
+				t.Fatalf("immune user frozen: frozen=%t err=%v", frozen, err)
+			}
+			for _, table := range []any{&model.ListeningAbuseRecord{}, &model.AuditLog{}} {
+				var count int64
+				if err := storage.DB.Model(table).Count(&count).Error; err != nil || count != 0 {
+					t.Fatalf("immune user left penalty records: table=%T count=%d err=%v", table, count, err)
+				}
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("immune user reached ABS mutation: calls=%d", calls.Load())
+			}
+		})
+	}
+}
+
+func TestListeningAbuseWarningStillAppliesToOrdinaryUsersAndAdmins(t *testing.T) {
+	for _, role := range []string{"user", "admin"} {
+		t.Run(role, func(t *testing.T) {
+			setupListeningAbuseScheduleDB(t)
+			previousConfig := config.AppConfig
+			config.AppConfig = &config.Config{}
+			t.Cleanup(func() { config.AppConfig = previousConfig })
+			u := model.User{TelegramID: 1, Username: role, AbsUserID: "abs1", Role: role, Status: "active"}
+			if err := storage.DB.Create(&u).Error; err != nil {
+				t.Fatal(err)
+			}
+			if warned, err := createListeningAbuseWarning(nil, u, "2026-11-02", 20, time.Now()); err != nil || !warned {
+				t.Fatalf("ordinary %s escaped warning: warned=%t err=%v", role, warned, err)
+			}
+		})
+	}
+}
 
 func dueListeningAbuseFreezeFixture(t *testing.T) (model.User, model.ListeningAbuseRecord) {
 	t.Helper()

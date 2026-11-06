@@ -16,6 +16,28 @@ import (
 
 const codeCashoutPercent = 60
 
+const CodeCashoutEnabledKey = "code_cashout_enabled"
+
+// CheckCodeCashoutEnabled reads persisted state without caching. Call it inside
+// the cashout transaction as well so an earlier quote cannot bypass a closure.
+func CheckCodeCashoutEnabled(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("CODE_CASHOUT_DB_UNAVAILABLE")
+	}
+	enabled, err := storage.GetConfigIntFromDBChecked(db, CodeCashoutEnabledKey, 1)
+	if err != nil {
+		return err
+	}
+	switch enabled {
+	case 0:
+		return ErrCodeCashoutDisabled
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("CODE_CASHOUT_CONFIG_INVALID")
+	}
+}
+
 type CodeCashoutQuote struct {
 	Kind     string
 	RecordID uint
@@ -34,6 +56,9 @@ func InspectCodeCashout(rawCode string, userID int64) (CodeCashoutQuote, error) 
 
 	var quote CodeCashoutQuote
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := CheckCodeCashoutEnabled(tx); err != nil {
+			return err
+		}
 		var invite model.InviteCode
 		if err := tx.Where("code_hash = ? AND is_used = ? AND cashed_out_at IS NULL", codeHash, false).First(&invite).Error; err == nil {
 			if err := storage.CheckCodeOwnership(invite.Source, invite.OwnerUserID, userID); err != nil {
@@ -129,6 +154,9 @@ func ExecuteCodeCashout(userID int64, quote CodeCashoutQuote) (int, error) {
 
 	awarded := 0
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := CheckCodeCashoutEnabled(tx); err != nil {
+			return err
+		}
 		currentPoints := 0
 		now := time.Now()
 		switch quote.Kind {

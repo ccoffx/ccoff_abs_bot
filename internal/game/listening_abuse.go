@@ -161,7 +161,7 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, now time.Time
 	skipped := 0
 	pending := 0
 	for _, u := range users {
-		if u.IsSuspended || storage.IsUserExpiredAt(u, now) {
+		if storage.IsSuperAdminUser(u) || u.IsSuspended || storage.IsUserExpiredAt(u, now) {
 			skipped++
 			continue
 		}
@@ -256,6 +256,18 @@ func createListeningAbuseWarning(bot *tgbotapi.BotAPI, u model.User, dayKey stri
 	}
 
 	if err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		// Recheck immunity under the writer lock in case the role or whitelist
+		// changed while ABS statistics were being fetched.
+		if err := tx.Exec("UPDATE users SET id = id WHERE telegram_id = ?", u.TelegramID).Error; err != nil {
+			return err
+		}
+		var current model.User
+		if err := tx.First(&current, "telegram_id = ?", u.TelegramID).Error; err != nil {
+			return err
+		}
+		if current.IsWhitelist || storage.IsSuperAdminUser(current) {
+			return nil
+		}
 		created, err := createListeningAbuseRecordInTx(tx, &record)
 		if err != nil {
 			return err
@@ -307,7 +319,7 @@ func startListeningAbuseFreeze(bot *tgbotapi.BotAPI, u model.User, dayKey string
 		if err := tx.First(&current, "telegram_id = ?", u.TelegramID).Error; err != nil {
 			return err
 		}
-		if current.AbsUserID != u.AbsUserID || current.Status != "active" || current.IsSuspended || current.AdminSuspended || current.IsWhitelist || current.Role == "super_admin" || storage.IsUserExpiredAt(current, now) {
+		if current.AbsUserID != u.AbsUserID || current.Status != "active" || current.IsSuspended || current.AdminSuspended || current.IsWhitelist || storage.IsSuperAdminUser(current) || storage.IsUserExpiredAt(current, now) {
 			return nil
 		}
 		var claims int64
