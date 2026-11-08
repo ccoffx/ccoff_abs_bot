@@ -31,7 +31,7 @@ func Render(chatID, userID int64, ranking bool) (string, tgbotapi.InlineKeyboard
 			return err
 		}
 		fmt.Fprintf(&b, "🏅 %s · %s\n\n", map[bool]string{false: "我的称号", true: "称号榜"}[ranking], textfmt.LotteryDisplayText(group.Name, 40, "交流群"))
-		b.WriteString("境界称号默认佩戴，不限持有人数。榜首称号全服唯一，避雷称号每群唯一；并列保留原持有者。\n\n")
+		b.WriteString("境界称号默认佩戴，不限持有人数。榜首称号全服唯一，猜阵称号群内唯一；并列保留原持有者。\n\n")
 		var equipment model.TitleEquipment
 		if !ranking {
 			err := tx.Where("chat_id = ? AND user_id = ?", chatID, userID).First(&equipment).Error
@@ -131,74 +131,33 @@ func Render(chatID, userID int64, ranking bool) (string, tgbotapi.InlineKeyboard
 		return "", tgbotapi.InlineKeyboardMarkup{}, err
 	}
 	if !ranking {
-		b.WriteString("每群仅佩戴一个称号；称号失效时回到境界称号。普通成员同步群标签，管理员保留原头衔。\n")
+		b.WriteString("同时仅佩戴一个称号，失效时恢复境界。普通成员同步群标签，管理员同步头衔；受 Telegram 权限限制时会显示原因。\n")
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("恢复默认称号", fmt.Sprintf("titles:clear:%d", chatID)), tgbotapi.NewInlineKeyboardButtonData("称号榜", fmt.Sprintf("titles:rank:%d", chatID))))
 	} else {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("我的称号", fmt.Sprintf("titles:view:%d", chatID))))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("选择交流群", "titles:groups:0")))
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("返回我的档案", "menu:profile")))
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...), nil
 }
 
-func renderGroups(userID int64, page int) (string, tgbotapi.InlineKeyboardMarkup, error) {
-	const size = 8
-	if page < 0 || page > 10000 {
-		page = 0
+var errGroupNotConfigured = errors.New("尚未配置交流群，请联系管理员")
+
+func defaultGroupID() int64 {
+	if config.AppConfig == nil {
+		return 0
 	}
-	var groups []model.TitleGroup
-	err := storage.DB.Where("chat_id IN (SELECT chat_id FROM title_members WHERE user_id = ?)", userID).Order("chat_id").Offset(page * size).Limit(size + 1).Find(&groups).Error
-	if err != nil {
+	return config.AppConfig.NoticeGroupID
+}
+
+func renderDefaultGroup(userID int64, ranking bool) (string, tgbotapi.InlineKeyboardMarkup, error) {
+	chatID := defaultGroupID()
+	if chatID >= 0 {
+		return "", tgbotapi.InlineKeyboardMarkup{}, errGroupNotConfigured
+	}
+	if err := TrackMember(chatID, "", userID); err != nil {
 		return "", tgbotapi.InlineKeyboardMarkup{}, err
 	}
-	var realmTitle string
-	var available bool
-	var honors strings.Builder
-	err = Transaction(func(tx *gorm.DB) error {
-		if err := refreshRankTitlesInTx(tx, time.Now()); err != nil {
-			return err
-		}
-		var err error
-		realmTitle, available, err = RealmTitleInTx(tx, userID)
-		if err != nil {
-			return err
-		}
-		return renderRankTitlesInTx(tx, &honors, nil, 0, userID, false)
-	})
-	if err != nil {
-		return "", tgbotapi.InlineKeyboardMarkup{}, err
-	}
-	text := "🏅 我的称号\n\n"
-	if available {
-		text += "📿 境界称号：" + realmTitle + "（账号自带，默认佩戴）\n\n"
-	} else {
-		text += "绑定听书账号后可获得默认境界称号。\n\n"
-	}
-	text += honors.String()
-	if len(groups) == 0 {
-		text += "暂无本页的群记录；在机器人所在群发言后即可管理本群佩戴。"
-	} else {
-		text += "请选择交流群，查看各来源称号并切换佩戴。"
-	}
-	var rows [][]tgbotapi.InlineKeyboardButton
-	for i, group := range groups {
-		if i == size {
-			break
-		}
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(textfmt.LotteryDisplayText(group.Name, 30, "交流群"), fmt.Sprintf("titles:view:%d", group.ChatID))))
-	}
-	var nav []tgbotapi.InlineKeyboardButton
-	if page > 0 {
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("上一页", fmt.Sprintf("titles:groups:%d", page-1)))
-	}
-	if len(groups) > size {
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("下一页", fmt.Sprintf("titles:groups:%d", page+1)))
-	}
-	if len(nav) > 0 {
-		rows = append(rows, nav)
-	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("返回我的档案", "menu:profile")))
-	return text, tgbotapi.NewInlineKeyboardMarkup(rows...), nil
+	return Render(chatID, userID, ranking)
 }
 
 func sendPanel(bot *tgbotapi.BotAPI, chatID int64, messageID int, text string, markup tgbotapi.InlineKeyboardMarkup) {
@@ -243,13 +202,7 @@ func HandleCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) boo
 		telegram.SendPlainText(bot, msg.Chat.ID, out)
 		return true
 	}
-	if config.AppConfig != nil && config.AppConfig.NoticeGroupID < 0 {
-		if err := TrackMember(config.AppConfig.NoticeGroupID, "", msg.From.ID); err != nil {
-			telegram.SendPlainText(bot, msg.Chat.ID, errorText(err))
-			return true
-		}
-	}
-	out, markup, err := renderGroups(msg.From.ID, 0)
+	out, markup, err := renderDefaultGroup(msg.From.ID, text == "称号榜")
 	if err != nil {
 		telegram.SendPlainText(bot, msg.Chat.ID, errorText(err))
 		return true
@@ -267,23 +220,23 @@ func HandleCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 		return true
 	}
 	parts := strings.Split(cb.Data, ":")
-	if len(parts) < 3 {
+	if len(parts) < 2 {
 		telegram.AnswerCallback(bot, cb.ID, "称号面板已失效")
 		return true
 	}
 	var out string
 	var markup tgbotapi.InlineKeyboardMarkup
 	var err error
-	if parts[1] == "groups" && len(parts) == 3 {
-		page, parseErr := strconv.Atoi(parts[2])
-		if parseErr != nil {
-			telegram.AnswerCallback(bot, cb.ID, "页码无效")
+	if (parts[1] == "home" && len(parts) == 2) || (parts[1] == "groups" && len(parts) == 3) {
+		// 旧提醒和已发出的选群按钮也直接进入唯一交流群。
+		out, markup, err = renderDefaultGroup(cb.From.ID, false)
+	} else {
+		if len(parts) < 3 {
+			telegram.AnswerCallback(bot, cb.ID, "称号面板已失效")
 			return true
 		}
-		out, markup, err = renderGroups(cb.From.ID, page)
-	} else {
 		chatID, parseErr := strconv.ParseInt(parts[2], 10, 64)
-		if parseErr != nil || chatID >= 0 {
+		if parseErr != nil || chatID >= 0 || chatID != defaultGroupID() {
 			telegram.AnswerCallback(bot, cb.ID, "交流群无效")
 			return true
 		}
@@ -291,7 +244,7 @@ func HandleCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 		var member model.TitleMember
 		if memberErr := storage.DB.Where("chat_id = ? AND user_id = ?", chatID, cb.From.ID).Take(&member).Error; memberErr != nil {
 			if errors.Is(memberErr, gorm.ErrRecordNotFound) {
-				telegram.AnswerCallback(bot, cb.ID, "请先在该交流群发言，再从「我的称号」选择该群")
+				telegram.AnswerCallback(bot, cb.ID, "请先打开「我的档案 → 我的称号」")
 			} else {
 				telegram.AnswerCallback(bot, cb.ID, errorText(memberErr))
 			}

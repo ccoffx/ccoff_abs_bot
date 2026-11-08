@@ -186,15 +186,32 @@ func recordBackupPinStateWriteFailure(bot *tgbotapi.BotAPI, key string, err erro
 	NotifySuperAdminsPlain(bot, fmt.Sprintf("备份消息置顶已执行，但置顶状态写入失败，请人工核查。\n\n配置：%s\n错误：%s", textfmt.FormatPlainValue(key), textfmt.FormatPlainError(err)))
 }
 
-func NotifySuperAdminsPlain(bot *tgbotapi.BotAPI, text string) {
+// NotifySuperAdminsPlain reports whether every configured recipient was queued.
+// This is an enqueue receipt, not confirmation of Telegram delivery.
+func NotifySuperAdminsPlain(bot *tgbotapi.BotAPI, text string) bool {
 	if bot == nil || config.AppConfig == nil {
-		return
+		return false
 	}
 
+	allQueued := len(config.AppConfig.AdminIDs) > 0
 	for adminID := range config.AppConfig.AdminIDs {
-		msg := tgbotapi.NewMessage(adminID, text)
-		if !EnqueueNoAutoDelete(bot, msg, "super_admin_notice", telegramAsyncPriorityHigh, "") {
-			log.Printf("⚠️ 通知管理员入队失败: admin=%d", adminID)
+		if !NotifySuperAdminPlain(bot, adminID, text) {
+			allQueued = false
 		}
 	}
+	return allQueued
+}
+
+// NotifySuperAdminPlain queues one configured administrator's notification.
+// True confirms enqueue only, not Telegram delivery.
+func NotifySuperAdminPlain(bot *tgbotapi.BotAPI, adminID int64, text string) bool {
+	if bot == nil || config.AppConfig == nil || !config.AppConfig.AdminIDs[adminID] {
+		return false
+	}
+	msg := tgbotapi.NewMessage(adminID, text)
+	if !EnqueueNoAutoDelete(bot, msg, "super_admin_notice", telegramAsyncPriorityHigh, "") {
+		log.Printf("⚠️ 通知管理员入队失败: admin=%d", adminID)
+		return false
+	}
+	return true
 }

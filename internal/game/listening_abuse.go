@@ -1,6 +1,7 @@
 package game
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -24,12 +25,34 @@ import (
 var listeningAbuseMu sync.Mutex
 
 const listeningAbuseRetryInterval = 5 * time.Minute
+const listeningAbuseFailureNoticeInterval = time.Hour
+
+type listeningAbuseFailureNotice struct {
+	Day        string              `json:"day"`
+	Error      string              `json:"error"`
+	At         time.Time           `json:"at,omitzero"` // Legacy all-recipient receipt.
+	Recipients map[int64]time.Time `json:"recipients,omitempty"`
+}
+
+type listeningAbuseFailureNotices struct {
+	Notices []listeningAbuseFailureNotice `json:"notices"`
+}
 
 func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
+	started := time.Now()
+	runListeningAbuseMonitorIfNeeded(bot, func() time.Time {
+		return now.Add(time.Since(started))
+	}, func(adminID int64, text string) bool {
+		return telegram.NotifySuperAdminPlain(bot, adminID, text)
+	})
+}
+
+func runListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, currentTime func() time.Time, enqueue func(int64, string) bool) {
 	if !listeningAbuseMu.TryLock() {
 		return
 	}
 	defer listeningAbuseMu.Unlock()
+	now := currentTime()
 
 	releaseDueListeningAbuseFreezes(bot, now)
 
@@ -67,7 +90,9 @@ func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 	if err != nil {
 		storage.SetSystemConfigError(storage.ListeningAbuseLastErrorKey, err)
 		log.Printf("listening abuse scan failed: day=%s err=%s", textfmt.FormatPlainValue(scanDay), textfmt.FormatPlainError(err))
-		telegram.NotifySuperAdminsPlain(bot, fmt.Sprintf("播放异常巡检失败\n\n日期: %s\n错误: %s", textfmt.FormatPlainValue(scanDay), textfmt.FormatPlainError(err)))
+		// Scanning all accounts may take a long time. The hourly notice
+		// interval starts when the failure is queued, not when scanning began.
+		notifyListeningAbuseScanFailure(scanDay, err, currentTime(), enqueue)
 		return
 	}
 
@@ -83,7 +108,86 @@ func RunListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 		recordListeningAbuseStateWriteFailure(bot, storage.ListeningAbuseLastErrorKey, err)
 		return
 	}
+	if err := storage.SetSystemConfigStringChecked(storage.ListeningAbuseFailureNoticeKey, ""); err != nil {
+		log.Printf("播放异常巡检告警去重状态清理失败: err=%s", textfmt.FormatPlainError(err))
+	}
 	log.Printf("listening abuse scan finished: day=%s warnings=%d freezes=%d skipped=%d", textfmt.FormatPlainValue(scanDay), warnings, freezes, skipped)
+}
+
+// Called under listeningAbuseMu. Persist receipts per recipient so a partially
+// full queue does not turn retries into duplicate messages for other admins.
+func notifyListeningAbuseScanFailure(day string, scanErr error, now time.Time, enqueue func(int64, string) bool) {
+	if config.AppConfig == nil || enqueue == nil {
+		return
+	}
+	failure := textfmt.FormatPlainError(scanErr)
+	raw, err := storage.GetSystemConfigStringChecked(storage.ListeningAbuseFailureNoticeKey)
+	if err != nil {
+		log.Printf("播放异常巡检告警去重状态读取失败: err=%s", textfmt.FormatPlainError(err))
+	}
+	var state listeningAbuseFailureNotices
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &state); err != nil {
+			state = listeningAbuseFailureNotices{}
+		} else if state.Notices == nil {
+			// Both earlier formats stored only the latest error, with either an
+			// all-recipient timestamp or individual recipient receipts.
+			var legacy listeningAbuseFailureNotice
+			if json.Unmarshal([]byte(raw), &legacy) == nil && legacy.Day != "" {
+				state.Notices = append(state.Notices, legacy)
+			}
+		}
+	}
+	previous := listeningAbuseFailureNotice{Day: day, Error: failure, Recipients: make(map[int64]time.Time)}
+	retained := make([]listeningAbuseFailureNotice, 0, len(state.Notices)+1)
+	for _, notice := range state.Notices {
+		if notice.Recipients == nil {
+			notice.Recipients = make(map[int64]time.Time)
+			// Earlier versions wrote At only after every admin was queued.
+			if !notice.At.IsZero() {
+				for adminID := range config.AppConfig.AdminIDs {
+					notice.Recipients[adminID] = notice.At
+				}
+			}
+		}
+		notice.At = time.Time{}
+		for adminID, at := range notice.Recipients {
+			if at.IsZero() || now.Sub(at) >= listeningAbuseFailureNoticeInterval {
+				delete(notice.Recipients, adminID)
+			}
+		}
+		if notice.Day == day && notice.Error == failure {
+			previous = notice
+		} else if len(notice.Recipients) > 0 {
+			retained = append(retained, notice)
+		}
+	}
+	text := fmt.Sprintf("播放异常巡检失败\n\n日期: %s\n错误: %s\n\n系统每 5 分钟自动重试；同一天的相同错误每小时最多提醒一次。", textfmt.FormatPlainValue(day), failure)
+	changed := false
+	for adminID := range config.AppConfig.AdminIDs {
+		if at := previous.Recipients[adminID]; !at.IsZero() {
+			if age := now.Sub(at); age >= 0 && age < listeningAbuseFailureNoticeInterval {
+				continue
+			}
+		}
+		if enqueue(adminID, text) {
+			previous.Recipients[adminID] = now
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	// Keep all unexpired errors, rather than only the last one. Changing
+	// pending-user counts can otherwise bypass the throttle on every retry.
+	state.Notices = append(retained, previous)
+	encoded, err := json.Marshal(state)
+	if err == nil {
+		err = storage.SetSystemConfigStringChecked(storage.ListeningAbuseFailureNoticeKey, string(encoded))
+	}
+	if err != nil {
+		log.Printf("播放异常巡检告警去重状态写入失败: err=%s", textfmt.FormatPlainError(err))
+	}
 }
 
 func nextListeningAbuseScanDay(lastDay, targetDay string) (string, error) {

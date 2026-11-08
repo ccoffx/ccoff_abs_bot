@@ -302,6 +302,9 @@ func RefreshDefaults() error {
 }
 
 func errorText(err error) string {
+	if errors.Is(err, errGroupNotConfigured) {
+		return errGroupNotConfigured.Error()
+	}
 	if errors.Is(err, ErrNotHeld) {
 		return ErrNotHeld.Error()
 	}

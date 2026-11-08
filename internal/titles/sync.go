@@ -23,6 +23,7 @@ func SyncTags(bot *tgbotapi.BotAPI, now time.Time) {
 	// 网络同步串行，避免同一成员旧版本的请求覆盖新版本。
 	tagSyncMutex.Lock()
 	defer tagSyncMutex.Unlock()
+	ProcessMemberUpdates(now.Add(time.Since(started)))
 	var pending []model.TitleEquipment
 	current := now.Add(time.Since(started))
 	const dueCondition = "version > synced_version AND next_sync_at <= ? AND (rate_limit_until IS NULL OR rate_limit_until <= ?)"
@@ -43,50 +44,77 @@ func SyncTags(bot *tgbotapi.BotAPI, now time.Time) {
 		}
 		desired := equipment.DesiredTag
 		query := storage.DB.Model(&model.TitleEquipment{}).Where("chat_id = ? AND user_id = ?", equipment.ChatID, equipment.UserID)
-		var unconfirmed []string
-		if equipment.UnconfirmedTagsJSON != "" {
-			if err := json.Unmarshal([]byte(equipment.UnconfirmedTagsJSON), &unconfirmed); err != nil {
-				log.Printf("⚠️ 读取称号同步意图失败: %s", textfmt.FormatPlainError(err))
+		owned := make(map[string][]string)
+		if equipment.OwnedTagsJSON != "" {
+			if err := json.Unmarshal([]byte(equipment.OwnedTagsJSON), &owned); err != nil {
+				log.Printf("⚠️ 读取称号字段写入记录失败: %s", textfmt.FormatPlainError(err))
 				continue
+			}
+			if owned == nil {
+				log.Printf("⚠️ 称号字段写入记录为空对象，已跳过同步: chat=%d user=%d", equipment.ChatID, equipment.UserID)
+				continue
+			}
+		} else {
+			// Deployed legacy versions wrote only ordinary member tags. Their
+			// untyped receipts must never claim an administrator's custom_title.
+			var unconfirmed []string
+			if equipment.UnconfirmedTagsJSON != "" {
+				if err := json.Unmarshal([]byte(equipment.UnconfirmedTagsJSON), &unconfirmed); err != nil {
+					log.Printf("⚠️ 读取称号同步意图失败: %s", textfmt.FormatPlainError(err))
+					continue
+				}
+			}
+			for _, tag := range append(unconfirmed, equipment.AppliedTag, equipment.AttemptedTag) {
+				if tag != "" {
+					owned["tag"] = append(owned["tag"], tag)
+				}
 			}
 		}
-		// 发送前持久化意图。外部成功后本地确认失败时，撤下操作仍能识别该标签。
-		if desired != "" {
-			for _, candidate := range []string{equipment.AttemptedTag, desired} {
-				found := candidate == ""
-				for _, tag := range unconfirmed {
-					found = found || tag == candidate
-				}
-				if !found {
-					unconfirmed = append(unconfirmed, candidate)
-				}
+		// Persist intent only after getChatMember resolves the correct field.
+		// Retain other fields' receipts across role changes and failed requests.
+		beforeWrite := func(field string) error {
+			if desired == "" {
+				return nil // A cleanup already has a durable receipt to match.
 			}
-			encoded, err := json.Marshal(unconfirmed)
+			found := false
+			for _, tag := range owned[field] {
+				found = found || tag == desired
+			}
+			if !found {
+				owned[field] = append(owned[field], desired)
+			}
+			encoded, err := json.Marshal(owned)
 			if err != nil {
-				log.Printf("⚠️ 编码称号同步意图失败: %s", textfmt.FormatPlainError(err))
-				continue
+				return err
 			}
-			if err := query.Updates(map[string]any{"attempted_tag": desired, "unconfirmed_tags_json": string(encoded)}).Error; err != nil {
-				log.Printf("⚠️ 保存称号同步意图失败: %s", textfmt.FormatPlainError(err))
-				continue
-			}
-			equipment.AttemptedTag = desired
+			return query.Updates(map[string]any{"attempted_tag": desired, "owned_tags_json": string(encoded)}).Error
 		}
 		var err error
-		if desired != "" || equipment.AppliedTag != "" || equipment.AttemptedTag != "" || len(unconfirmed) > 0 {
-			previous := append(unconfirmed, equipment.AppliedTag, equipment.AttemptedTag)
-			err = telegram.SyncRegularMemberTag(bot, equipment.ChatID, equipment.UserID, desired, previous...)
+		var field string
+		if desired != "" || len(owned) > 0 {
+			field, err = telegram.SyncMemberTitle(bot, equipment.ChatID, equipment.UserID, desired, owned, beforeWrite)
 		}
 		if err == nil {
+			if field != "" {
+				delete(owned, field)
+				if desired != "" {
+					owned[field] = []string{desired}
+				}
+			}
+			encoded, encodeErr := json.Marshal(owned)
+			if encodeErr != nil {
+				log.Printf("⚠️ 编码称号字段写入记录失败: %s", textfmt.FormatPlainError(encodeErr))
+				continue
+			}
 			// 即使期望版本在请求期间变化，也记录实际写入结果；新版仍保持待同步。
-			if updateErr := query.Updates(map[string]any{"synced_version": equipment.Version, "applied_tag": desired, "attempted_tag": "", "unconfirmed_tags_json": "", "sync_hint": "", "next_sync_at": time.Time{}}).Error; updateErr != nil {
+			if updateErr := query.Updates(map[string]any{"synced_version": equipment.Version, "applied_tag": desired, "attempted_tag": "", "unconfirmed_tags_json": "", "owned_tags_json": string(encoded), "sync_hint": "", "next_sync_at": time.Time{}}).Error; updateErr != nil {
 				log.Printf("⚠️ 保存称号同步结果失败: %s", textfmt.FormatPlainError(updateErr))
 			}
 			continue
 		}
-		hint := "群标签同步未完成，请确认机器人拥有管理成员标签权限；后台会重试"
+		hint := "群称号同步未完成，请确认机器人拥有管理成员标签或相应管理员头衔的权限；后台会重试"
 		delay := time.Minute
-		if errors.Is(err, telegram.ErrMemberTagAdministrator) {
+		if errors.Is(err, telegram.ErrMemberTitleOwner) || errors.Is(err, telegram.ErrMemberTitleAdminUneditable) {
 			hint = err.Error()
 			delay = time.Hour
 		}

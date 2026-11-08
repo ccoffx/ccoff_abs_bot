@@ -12,6 +12,16 @@ type TitleMember struct {
 	UserID int64 `gorm:"primaryKey;autoIncrement:false"`
 }
 
+// TitleMemberSyncRequest coalesces identity changes into a durable resync intent.
+// Version prevents an in-flight worker from deleting a newer event.
+type TitleMemberSyncRequest struct {
+	ChatID        int64 `gorm:"primaryKey;autoIncrement:false"`
+	UserID        int64 `gorm:"primaryKey;autoIncrement:false"`
+	GroupName     string
+	Version       int64
+	NextAttemptAt time.Time `gorm:"index"`
+}
+
 // RankTitleHolder 的主键确保每个榜首称号全服只有一个持有者。
 // SubjectID 记录宗门，宗门并列时保留原第一宗门，宗主变更仍转移称号。
 type RankTitleHolder struct {
@@ -47,9 +57,12 @@ type TitleEquipment struct {
 	SyncedVersion int64
 	AppliedTag    string
 	AttemptedTag  string
-	// 保留所有尚未确认的写入意图，避免连续失败覆盖较早的外部成功记录。
+	// 兼容旧版普通成员标签的写入意图；新版按字段使用 OwnedTagsJSON。
 	UnconfirmedTagsJSON string
-	NextSyncAt          time.Time
+	// 按 Telegram 字段保存已确认和可能成功的写入，防止身份切换后
+	// 用普通成员标签的记录误删管理员手动头衔（或反过来）。
+	OwnedTagsJSON string
+	NextSyncAt    time.Time
 	// 服务端限流独立于佩戴版本，切换称号与重启都不能跳过等待。
 	RateLimitUntil time.Time
 	SyncHint       string

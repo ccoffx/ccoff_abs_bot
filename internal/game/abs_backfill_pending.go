@@ -19,6 +19,11 @@ func mergeABSBackfillObservations(pending, page []model.ABSCrossDaySessionAdjust
 	indices := make(map[string]int)
 	for _, rows := range [][]model.ABSCrossDaySessionAdjustment{pending, page} {
 		for _, row := range rows {
+			// Older scanners may have persisted unknown durations as uncertain
+			// zeroes. They must not replace valid pending evidence during merge.
+			if unknownABSListeningDuration(row) {
+				continue
+			}
 			key := row.AbsUserID + "\x00" + row.SessionKey
 			if i, ok := indices[key]; ok {
 				old := result[i]

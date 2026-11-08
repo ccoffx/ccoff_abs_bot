@@ -45,9 +45,12 @@ type absListeningSession struct {
 	SessionKey       string
 	ListeningSeconds float64
 	HasListeningTime bool
-	DateKey          string
-	StartedAt        time.Time
-	UpdatedAt        time.Time
+	// ABS may return null for a session that never reported playback. Keep it
+	// distinct from missing/malformed values and from an explicit zero correction.
+	ListeningTimeNull bool
+	DateKey           string
+	StartedAt         time.Time
+	UpdatedAt         time.Time
 
 	// Persisted cross-day metadata is populated only when loading an observed
 	// adjustment from SQLite. Bounded allocations contain mathematically
@@ -77,7 +80,8 @@ func parseABSListeningSession(raw map[string]interface{}, absUserID string) (abs
 	}
 	startedAt, hasStart := timeValue(raw["startedAt"])
 	updatedAt, hasUpdate := timeValue(raw["updatedAt"])
-	listeningSeconds, hasListeningTime := raw["timeListening"].(float64)
+	listeningValue, hasListeningField := raw["timeListening"]
+	listeningSeconds, hasListeningTime := listeningValue.(float64)
 	dateKey, _ := raw["date"].(string)
 
 	if !hasListeningTime && !hasStart && !hasUpdate {
@@ -85,12 +89,13 @@ func parseABSListeningSession(raw map[string]interface{}, absUserID string) (abs
 	}
 
 	return absListeningSession{
-		SessionKey:       textfmt.FormatPlainValue(sessionKey),
-		ListeningSeconds: listeningSeconds,
-		HasListeningTime: hasListeningTime,
-		DateKey:          dateKey,
-		StartedAt:        startedAt,
-		UpdatedAt:        updatedAt,
+		SessionKey:        textfmt.FormatPlainValue(sessionKey),
+		ListeningSeconds:  listeningSeconds,
+		HasListeningTime:  hasListeningTime,
+		ListeningTimeNull: hasListeningField && listeningValue == nil,
+		DateKey:           dateKey,
+		StartedAt:         startedAt,
+		UpdatedAt:         updatedAt,
 	}, true
 }
 
@@ -230,6 +235,12 @@ func buildABSCrossDaySessionObservations(userID int64, absUserID string, session
 	observations := make([]model.ABSCrossDaySessionAdjustment, 0, len(sessions))
 	diagnostics := make(map[string]int)
 	for _, session := range sessions {
+		// A cross-day session with unknown playback would otherwise classify
+		// as uncertain and persist the float zero value over known playback.
+		// Explicit null proves presence only; it is never a duration correction.
+		if session.ListeningTimeNull {
+			continue
+		}
 		status, confidence, reason, tracked := classifyABSCrossDaySession(session)
 		if session.SessionKey != "" && session.HasListeningTime && session.ListeningSeconds == 0 {
 			// An explicit zero is a correction, not an absent observation. Retain
@@ -299,6 +310,10 @@ func upsertABSCrossDaySessionObservations(tx *gorm.DB, observations []model.ABSC
 	}).CreateInBatches(&eligible, 50).Error
 }
 
+func unknownABSListeningDuration(observation model.ABSCrossDaySessionAdjustment) bool {
+	return observation.Status == crossDayAdjustmentStatusUncertain && observation.Reason == "listening_invalid"
+}
+
 // Shared by normal upserts and progressive scans so deferred corrections retain
 // exactly the same version and tombstone ordering as foreground observations.
 func prepareABSCrossDaySessionObservationsInTx(tx *gorm.DB, observations []model.ABSCrossDaySessionAdjustment) ([]model.ABSCrossDaySessionAdjustment, []model.ABSCrossDaySessionAdjustment, error) {
@@ -323,6 +338,11 @@ func prepareABSCrossDaySessionObservationsInTx(tx *gorm.DB, observations []model
 	}
 	eligible := make([]model.ABSCrossDaySessionAdjustment, 0, len(observations))
 	for _, observation := range observations {
+		// Missing/malformed durations, including legacy deferred nulls, are
+		// not evidence of a reduction. Explicit zero uses a deleted tombstone.
+		if unknownABSListeningDuration(observation) {
+			continue
+		}
 		old, exists := byKey[observation.AbsUserID+"\x00"+observation.SessionKey]
 		if observation.Status == crossDayAdjustmentStatusInvalidated {
 			if !exists {

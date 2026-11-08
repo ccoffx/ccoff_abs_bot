@@ -114,6 +114,7 @@ func InitDB() {
 		&model.TitleEquipment{},
 		&model.TitleGroup{},
 		&model.TitleMember{},
+		&model.TitleMemberSyncRequest{},
 		&model.RankTitleHolder{},
 		&model.RankTitleHistory{},
 		&model.BookRequest{},

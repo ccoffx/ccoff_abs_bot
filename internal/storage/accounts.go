@@ -100,6 +100,7 @@ const (
 	ListeningAbuseLastScanAtKey    = "listening_abuse_last_scan_at"
 	ListeningAbuseLastAttemptAtKey = "listening_abuse_last_attempt_at"
 	ListeningAbuseLastErrorKey     = "listening_abuse_last_error"
+	ListeningAbuseFailureNoticeKey = "listening_abuse_failure_notice"
 )
 
 func IsUserExpiredAt(u model.User, now time.Time) bool {

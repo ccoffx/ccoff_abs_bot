@@ -38,6 +38,12 @@ func (e *absCrossDayReconciliationEvidence) observe(sessions []absListeningSessi
 	for _, session := range sessions {
 		delete(e.MissingSessions, session.SessionKey)
 		day := strings.TrimSpace(session.DateKey)
+		// ABS excludes explicit null durations from listening-stats. Such a
+		// session proves its ID is present but contributes no playback. Do not
+		// treat it as a zero correction of an already known positive session.
+		if session.ListeningTimeNull && validDailyListeningDayKey(day) {
+			continue
+		}
 		if !session.HasListeningTime || !validDailyListeningDayKey(day) || session.ListeningSeconds < 0 || math.IsNaN(session.ListeningSeconds) || math.IsInf(session.ListeningSeconds, 0) {
 			e.Valid = false
 			continue

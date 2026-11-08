@@ -3,6 +3,7 @@ package realm
 
 import (
 	"fmt"
+	"strings"
 
 	"ccoff-abs-bot/internal/model"
 )
@@ -58,7 +59,10 @@ func Format(major, minor int, majorName, minorName string) string {
 	if majorName == "" {
 		majorName = Defaults()[major].TitleName
 	}
-	if minorName == "" {
+	// 小境界编号已采用段/星/转/阶语义，旧配置中的阶段文案不能
+	// 覆盖当前称呼。称号页直读数据库与斗气页读取缓存均走此处。
+	switch strings.TrimSpace(minorName) {
+	case "", "前期", "初期", "中期", "后期", "圆满", "大圆满":
 		minorName = MinorName(major, minor)
 	}
 	switch major {

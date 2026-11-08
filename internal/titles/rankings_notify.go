@@ -57,8 +57,8 @@ func notifyRankTitles(bot *tgbotapi.BotAPI, currentTime func() time.Time) {
 			continue
 		}
 		period := rankTitlePeriodText(h.TitleKey, h.PeriodKey)
-		msg := tgbotapi.NewMessage(h.UserID, fmt.Sprintf("🎉 获得榜首称号：%s %s\n%s\n%s的荣誉已记入档案。当前持有时，可在「我的档案 → 我的称号」选择交流群佩戴。每群仅佩戴一个称号，获得新称号不会替换当前选择；失去后恢复境界称号。\n\n当前归属以称号页面为准。", d.Emoji, d.Name, period, d.Description))
-		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("查看并佩戴称号", "titles:groups:0")))
+		msg := tgbotapi.NewMessage(h.UserID, fmt.Sprintf("🎉 获得榜首称号：%s %s\n%s\n%s的荣誉已记入档案。当前持有时，可在「我的档案 → 我的称号」直接佩戴。交流群同时仅佩戴一个称号，获得新称号不会替换当前选择；失去后恢复境界称号。\n\n当前归属以称号页面为准。", d.Emoji, d.Name, period, d.Description))
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("查看并佩戴称号", "titles:home")))
 		_, err := telegram.SendNoAutoDelete(bot, msg)
 		state := "sent"
 		next := time.Time{}

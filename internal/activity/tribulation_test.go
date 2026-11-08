@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/titles"
@@ -37,10 +38,11 @@ func openTribulationTestDB(t *testing.T, path string) *gorm.DB {
 func setupTribulationTestDB(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "tribulation.db")
-	previous := storage.DB
+	previous, previousConfig := storage.DB, config.AppConfig
 	storage.DB = openTribulationTestDB(t, path)
-	t.Cleanup(func() { storage.DB = previous })
-	if err := storage.DB.AutoMigrate(&model.TribulationRound{}, &model.TribulationEntry{}, &model.TribulationTitleStat{}, &model.TribulationTitleHolder{}, &model.TribulationTitleHistory{}, &model.TitleEquipment{}, &model.TitleGroup{}, &model.TitleMember{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.Sect{}, &model.Cultivation{}, &model.User{}, &model.PointTransaction{}, &model.AutoDeleteMsg{}); err != nil {
+	config.AppConfig = &config.Config{NoticeGroupID: -100}
+	t.Cleanup(func() { storage.DB = previous; config.AppConfig = previousConfig })
+	if err := storage.DB.AutoMigrate(&model.TribulationRound{}, &model.TribulationEntry{}, &model.TribulationTitleStat{}, &model.TribulationTitleHolder{}, &model.TribulationTitleHistory{}, &model.TitleEquipment{}, &model.TitleGroup{}, &model.TitleMember{}, &model.TitleMemberSyncRequest{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.Sect{}, &model.Cultivation{}, &model.User{}, &model.PointTransaction{}, &model.AutoDeleteMsg{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.AutoMigrate(&model.DailyListeningStat{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {

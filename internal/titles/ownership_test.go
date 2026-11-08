@@ -32,7 +32,7 @@ func setupTitleTestDB(t *testing.T) {
 	storage.DB = db
 	config.AppConfig = &config.Config{NoticeGroupID: -100}
 	t.Cleanup(func() { storage.DB = oldDB; config.AppConfig = oldConfig; _ = sqlDB.Close() })
-	if err := db.AutoMigrate(&model.User{}, &model.Cultivation{}, &model.CultivationRealmConfig{}, &model.CultivationMinorRealmConfig{}, &model.TitleGroup{}, &model.TitleMember{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.Sect{}, &model.TitleEquipment{}, &model.TribulationTitleHolder{}, &model.TribulationTitleHistory{}, &model.TribulationTitleStat{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Cultivation{}, &model.CultivationRealmConfig{}, &model.CultivationMinorRealmConfig{}, &model.TitleGroup{}, &model.TitleMember{}, &model.TitleMemberSyncRequest{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.Sect{}, &model.TitleEquipment{}, &model.TribulationTitleHolder{}, &model.TribulationTitleHistory{}, &model.TribulationTitleStat{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(&model.DailyListeningStat{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
@@ -112,7 +112,7 @@ func TestAccountRealmTitlesExistWithoutPlayingAndFollowRealm(t *testing.T) {
 	if !found {
 		t.Fatal("realm title cannot be worn")
 	}
-	root, _, err := renderGroups(1, 0)
+	root, _, err := renderDefaultGroup(1, false)
 	if err != nil || !strings.Contains(root, "境界称号") || !strings.Contains(root, "斗尊巅峰十转") {
 		t.Fatal("default profile still depends on game participation", root, err)
 	}
@@ -227,5 +227,61 @@ func TestGameTitleLeaderboardKeepsIncumbentFirstOnTiedCounts(t *testing.T) {
 	}
 	if !strings.Contains(out, "现任：现任道友 · 5 次\n1. 现任道友 · 5 次\n2. 挑战者 · 5 次") {
 		t.Fatal("game title leaderboard disagrees with the tied incumbent", out)
+	}
+}
+
+func TestRealmTitleIgnoresObsoleteStageNames(t *testing.T) {
+	for _, tc := range []struct {
+		major, minor int
+		old, want    string
+	}{
+		{0, 2, "前期", "斗之气二段"},
+		{2, 1, "初期", "一星斗师"},
+		{2, 2, "中期", "二星斗师"},
+		{2, 3, "后期", "三星斗师"},
+		{2, 4, "圆满", "四星斗师"},
+		{9, 4, "大圆满", "斗尊巅峰四转"},
+		{10, 2, "中期", "中阶半圣"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			setupTitleTestDB(t)
+			if err := storage.DB.Model(&model.Cultivation{}).Where("user_id = ?", 1).Updates(map[string]any{"major_realm": tc.major, "minor_realm": tc.minor}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.Model(&model.CultivationMinorRealmConfig{}).Where("major_realm = ? AND minor_realm = ?", tc.major, tc.minor).Update("name", tc.old).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := TrackMember(-100, "交流群", 1); err != nil {
+				t.Fatal(err)
+			}
+			// 已入队的旧标签也应在默认称号巡检时更新。
+			if err := storage.DB.Model(&model.TitleEquipment{}).Where("chat_id = ? AND user_id = ?", -100, 1).Update("desired_tag", tc.old).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := RefreshDefaults(); err != nil {
+				t.Fatal(err)
+			}
+			if e := titleTestEquipment(t, -100, 1); e.DesiredTag != tc.want {
+				t.Fatalf("queued title = %q, want %q", e.DesiredTag, tc.want)
+			}
+			out, markup, err := renderDefaultGroup(1, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out, "当前境界："+tc.want) || !strings.Contains(out, "当前佩戴：📿 "+tc.want) || strings.Contains(out, tc.old) {
+				t.Fatal("profile kept obsolete name", out)
+			}
+			found := false
+			for _, row := range markup.InlineKeyboard {
+				for _, b := range row {
+					if b.Text == "佩戴 · "+tc.want {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Fatal("equipment button has inconsistent stage name", markup)
+			}
+		})
 	}
 }

@@ -26,8 +26,12 @@ type tribulationTelegramFixture struct {
 	failPublish, failTag bool
 	editError            string
 	tags                 map[int64]string
+	customTitles         map[int64]string
+	editableAdmins       map[int64]bool
+	setAdminTitles       int
 	statuses             map[int64]string
 	edits, answers       []string
+	panels, markups      []string
 	setTags              int
 	tagAttempts          int
 	tagRetryAfter        int
@@ -39,7 +43,7 @@ type tribulationTelegramFixture struct {
 
 func newTribulationTelegramFixture(t *testing.T) *tribulationTelegramFixture {
 	t.Helper()
-	f := &tribulationTelegramFixture{tags: map[int64]string{}, statuses: map[int64]string{}}
+	f := &tribulationTelegramFixture{tags: map[int64]string{}, customTitles: map[int64]string{}, editableAdmins: map[int64]bool{}, statuses: map[int64]string{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Error(err)
@@ -53,6 +57,8 @@ func newTribulationTelegramFixture(t *testing.T) *tribulationTelegramFixture {
 		case "getMe":
 			result = map[string]any{"id": 99, "is_bot": true, "first_name": "TestBot", "username": "test_bot"}
 		case "sendMessage":
+			f.panels = append(f.panels, r.Form.Get("text"))
+			f.markups = append(f.markups, r.Form.Get("reply_markup"))
 			if f.failPublish && r.Form.Get("reply_markup") != "" {
 				f.mu.Unlock()
 				fmt.Fprint(w, `{"ok":false,"error_code":403,"description":"forbidden"}`)
@@ -86,8 +92,8 @@ func newTribulationTelegramFixture(t *testing.T) *tribulationTelegramFixture {
 			if status == "" {
 				status = "member"
 			}
-			result = map[string]any{"user": map[string]any{"id": id, "first_name": "user"}, "status": status, "tag": f.tags[id]}
-		case "setChatMemberTag":
+			result = map[string]any{"user": map[string]any{"id": id, "first_name": "user"}, "status": status, "tag": f.tags[id], "custom_title": f.customTitles[id], "can_be_edited": f.editableAdmins[id]}
+		case "setChatMemberTag", "setChatAdministratorCustomTitle":
 			f.tagAttempts++
 			if f.tagRetryAfter > 0 {
 				retryAfter := f.tagRetryAfter
@@ -106,8 +112,19 @@ func newTribulationTelegramFixture(t *testing.T) *tribulationTelegramFixture {
 				return
 			}
 			id, _ := strconv.ParseInt(r.Form.Get("user_id"), 10, 64)
-			f.tags[id] = r.Form.Get("tag")
-			f.setTags++
+			if method == "setChatAdministratorCustomTitle" {
+				if f.statuses[id] != "administrator" || !f.editableAdmins[id] {
+					t.Error("attempted to edit an inaccessible administrator")
+				}
+				f.customTitles[id] = r.Form.Get("custom_title")
+				f.setAdminTitles++
+			} else {
+				if f.statuses[id] == "administrator" || f.statuses[id] == "creator" {
+					t.Error("used regular member tag API for an administrator")
+				}
+				f.tags[id] = r.Form.Get("tag")
+				f.setTags++
+			}
 			hook = f.afterSet
 			f.afterSet = nil
 		default:
@@ -437,60 +454,75 @@ func TestTitleCallbacksRejectForeignGroup(t *testing.T) {
 }
 
 func TestRealmTitleNativeTagLifecycleWithoutPlaying(t *testing.T) {
-	setupTribulationTestDB(t)
-	previous := config.AppConfig
-	config.AppConfig = &config.Config{}
-	t.Cleanup(func() { config.AppConfig = previous })
-	if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.CultivationRealmConfig{}, &model.CultivationMinorRealmConfig{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", "bound-account").Error; err != nil {
-		t.Fatal(err)
-	}
-	f := newTribulationTelegramFixture(t)
-	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup", Title: "新群"}}
-	if !titles.HandleCommand(f.bot, msg, "称号榜") {
-		t.Fatal("first-use title command not handled")
-	}
-	if _, _, err := titles.Render(-100, 1, false); err != nil {
-		t.Fatal("group titles still require game participation", err)
-	}
-	assertTag := func(want string) {
-		t.Helper()
-		titles.SyncTags(f.bot, time.Now())
-		f.mu.Lock()
-		got := f.tags[1]
-		f.mu.Unlock()
-		if got != want {
-			t.Fatalf("native tag = %q, want %q", got, want)
-		}
-	}
-	assertTag("斗之气一段")
-	if err := storage.DB.Create(&model.Cultivation{UserID: 1, MajorRealm: 9, MinorRealm: 10}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := titles.RefreshDefaults(); err != nil {
-		t.Fatal(err)
-	}
-	assertTag("斗尊巅峰十转")
-	seedTribulationTestTitle(t, 1, "escape")
-	if err := titles.Equip(-100, 1, "escape"); err != nil {
-		t.Fatal(err)
-	}
-	assertTag("临阵脱身")
-	if err := titles.Equip(-100, 1, ""); err != nil {
-		t.Fatal(err)
-	}
-	assertTag("斗尊巅峰十转")
-	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("status", "unbound").Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := titles.RefreshDefaults(); err != nil {
-		t.Fatal(err)
-	}
-	assertTag("")
-	if tribulationTestCount(t, &model.TribulationRound{}) != 0 {
-		t.Fatal("default titles created game records")
+	for _, status := range []string{"member", "administrator"} {
+		t.Run(status, func(t *testing.T) {
+			setupTribulationTestDB(t)
+			previous := config.AppConfig
+			config.AppConfig = &config.Config{}
+			t.Cleanup(func() { config.AppConfig = previous })
+			if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.CultivationRealmConfig{}, &model.CultivationMinorRealmConfig{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", "bound-account").Error; err != nil {
+				t.Fatal(err)
+			}
+			f := newTribulationTelegramFixture(t)
+			f.statuses[1] = status
+			f.editableAdmins[1] = status == "administrator"
+			f.customTitles[1] = "原管理员头衔"
+			msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup", Title: "新群"}}
+			if !titles.HandleCommand(f.bot, msg, "称号榜") {
+				t.Fatal("first-use title command not handled")
+			}
+			if _, _, err := titles.Render(-100, 1, false); err != nil {
+				t.Fatal("group titles still require game participation", err)
+			}
+			assertTag := func(want string) {
+				t.Helper()
+				titles.SyncTags(f.bot, time.Now())
+				f.mu.Lock()
+				got := f.tags[1]
+				if status == "administrator" {
+					got = f.customTitles[1]
+					if f.setTags != 0 {
+						t.Fatal("administrator used member tag API")
+					}
+				} else if f.setAdminTitles != 0 {
+					t.Fatal("member used administrator title API")
+				}
+				f.mu.Unlock()
+				if got != want {
+					t.Fatalf("native tag = %q, want %q", got, want)
+				}
+			}
+			assertTag("斗之气一段")
+			if err := storage.DB.Create(&model.Cultivation{UserID: 1, MajorRealm: 9, MinorRealm: 10}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := titles.RefreshDefaults(); err != nil {
+				t.Fatal(err)
+			}
+			assertTag("斗尊巅峰十转")
+			seedTribulationTestTitle(t, 1, "escape")
+			if err := titles.Equip(-100, 1, "escape"); err != nil {
+				t.Fatal(err)
+			}
+			assertTag("临阵脱身")
+			if err := titles.Equip(-100, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+			assertTag("斗尊巅峰十转")
+			if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("status", "unbound").Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := titles.RefreshDefaults(); err != nil {
+				t.Fatal(err)
+			}
+			assertTag("")
+			if tribulationTestCount(t, &model.TribulationRound{}) != 0 {
+				t.Fatal("default titles created game records")
+			}
+		})
 	}
 }
 
@@ -539,7 +571,7 @@ func TestTribulationTagRetriesRevocationAndAdministratorPreservation(t *testing.
 	seedTribulationTestTitle(t, 2, "steadfast")
 	f.mu.Lock()
 	f.statuses[2] = "administrator"
-	f.tags[2] = "群管理"
+	f.customTitles[2] = "群管理"
 	before := f.setTags
 	f.mu.Unlock()
 	if err := titles.Equip(-100, 2, "steadfast"); err != nil {
@@ -547,7 +579,7 @@ func TestTribulationTagRetriesRevocationAndAdministratorPreservation(t *testing.
 	}
 	titles.SyncTags(f.bot, now.Add(4*time.Minute))
 	f.mu.Lock()
-	tag = f.tags[2]
+	tag = f.customTitles[2]
 	after := f.setTags
 	f.mu.Unlock()
 	if tag != "群管理" || after != before {
@@ -557,7 +589,7 @@ func TestTribulationTagRetriesRevocationAndAdministratorPreservation(t *testing.
 	if err := storage.DB.First(&adminEquipment, "chat_id = ? AND user_id = ?", -100, 2).Error; err != nil {
 		t.Fatal(err)
 	}
-	if adminEquipment.TitleKey != "steadfast" || !strings.Contains(adminEquipment.SyncHint, "管理员保留") {
+	if adminEquipment.TitleKey != "steadfast" || !strings.Contains(adminEquipment.SyncHint, "无权修改") {
 		t.Fatal("admin profile title unavailable")
 	}
 }
@@ -852,5 +884,286 @@ func TestTribulationPanelsBoundedAndPrivateTitleControls(t *testing.T) {
 	titles.HandleCallback(f.bot, cb)
 	if tribulationTestCount(t, &model.TitleEquipment{}) != 1 {
 		t.Fatal("owner could not equip")
+	}
+}
+
+func TestTitlePageOpensDefaultGroupDirectly(t *testing.T) {
+	setupTribulationTestDB(t)
+	f := newTribulationTelegramFixture(t)
+	seedTribulationTestTitle(t, 1, "escape")
+	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}}
+	for _, command := range []string{"我的称号", "称号榜"} {
+		if !titles.HandleCommand(f.bot, msg, command) {
+			t.Fatal("command not handled")
+		}
+		f.mu.Lock()
+		out, markup := f.panels[len(f.panels)-1], f.markups[len(f.markups)-1]
+		f.mu.Unlock()
+		if !strings.Contains(out, command) || !strings.Contains(out, "天雷猜阵") || strings.Contains(out, "请选择交流群") || strings.Contains(markup, "选择交流群") {
+			t.Fatal("single-group command still needs group selection", command, out, markup)
+		}
+		if command == "我的称号" && !strings.Contains(markup, "titles:equip:-100:escape") {
+			t.Fatal("direct page cannot equip title", markup)
+		}
+	}
+	for _, data := range []string{"titles:home", "titles:groups:0"} {
+		cb := &tgbotapi.CallbackQuery{ID: data, From: msg.From, Message: &tgbotapi.Message{MessageID: 123, Chat: msg.Chat}, Data: data}
+		f.mu.Lock()
+		before := len(f.edits)
+		f.mu.Unlock()
+		titles.HandleCallback(f.bot, cb)
+		f.mu.Lock()
+		edits := append([]string(nil), f.edits...)
+		f.mu.Unlock()
+		if len(edits) != before+1 || !strings.Contains(edits[len(edits)-1], "天雷猜阵") || strings.Contains(edits[len(edits)-1], "请选择交流群") {
+			t.Fatal("notice or old entry did not open default group", data, edits)
+		}
+	}
+}
+
+func TestTitleSyncReportsAdministratorAndOwnerLimits(t *testing.T) {
+	for _, tc := range []struct{ status, current, hint string }{
+		{"administrator", "群管理", "无权修改"},
+		{"creator", "群主", "群主头衔"},
+		{"administrator", "斗之气一段", ""},
+		{"creator", "斗之气一段", ""},
+	} {
+		t.Run(tc.status+"/"+tc.current, func(t *testing.T) {
+			setupTribulationTestDB(t)
+			if err := storage.DB.AutoMigrate(&model.CultivationRealmConfig{}, &model.CultivationMinorRealmConfig{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", "bound").Error; err != nil {
+				t.Fatal(err)
+			}
+			f := newTribulationTelegramFixture(t)
+			f.statuses[1], f.customTitles[1] = tc.status, tc.current
+			if err := titles.RefreshDefaults(); err != nil {
+				t.Fatal(err)
+			}
+			titles.SyncTags(f.bot, time.Now())
+			var e model.TitleEquipment
+			if err := storage.DB.First(&e, "chat_id = ? AND user_id = ?", -100, 1).Error; err != nil {
+				t.Fatal(err)
+			}
+			f.mu.Lock()
+			writes := f.setTags + f.setAdminTitles
+			current := f.customTitles[1]
+			f.mu.Unlock()
+			if writes != 0 || current != tc.current {
+				t.Fatal("inaccessible title was modified")
+			}
+			if tc.hint == "" {
+				if e.Version != e.SyncedVersion || e.SyncHint != "" {
+					t.Fatal("already matching title was not confirmed", e)
+				}
+			} else if e.Version <= e.SyncedVersion || !strings.Contains(e.SyncHint, tc.hint) {
+				t.Fatal("permission restriction hidden or falsely marked as synced", e)
+			}
+		})
+	}
+}
+
+func TestMemberRoleChangeResyncsSelectedTitle(t *testing.T) {
+	setupTribulationTestDB(t)
+	f := newTribulationTelegramFixture(t)
+	seedTribulationTestTitle(t, 1, "escape")
+	if err := titles.Equip(-100, 1, "escape"); err != nil {
+		t.Fatal(err)
+	}
+	titles.SyncTags(f.bot, time.Now())
+	user := &tgbotapi.User{ID: 1}
+	member := tgbotapi.ChatMember{User: user, Status: "member"}
+	admin := tgbotapi.ChatMember{User: user, Status: "administrator", CanBeEdited: true}
+	update := &tgbotapi.ChatMemberUpdated{Chat: tgbotapi.Chat{ID: -100, Type: "supergroup"}, OldChatMember: member, NewChatMember: admin}
+	f.mu.Lock()
+	f.statuses[1], f.editableAdmins[1], f.customTitles[1] = "administrator", true, "群管理"
+	f.mu.Unlock()
+	if err := titles.HandleMemberUpdate(update); err != nil {
+		t.Fatal(err)
+	}
+	titles.SyncTags(f.bot, time.Now())
+	f.mu.Lock()
+	custom := f.customTitles[1]
+	f.mu.Unlock()
+	if custom != "临阵脱身" {
+		t.Fatal("promotion lost selected title", custom)
+	}
+	var e model.TitleEquipment
+	if err := storage.DB.First(&e, "chat_id = ? AND user_id = ?", -100, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	version := e.Version
+	update.OldChatMember, update.NewChatMember = admin, admin
+	update.NewChatMember.CustomTitle = "临阵脱身"
+	if err := titles.HandleMemberUpdate(update); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DB.First(&e, "chat_id = ? AND user_id = ?", -100, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if e.Version != version {
+		t.Fatal("own title update queued another synchronization")
+	}
+	update.OldChatMember, update.NewChatMember = admin, member
+	f.mu.Lock()
+	f.statuses[1], f.tags[1] = "member", ""
+	f.mu.Unlock()
+	if err := titles.HandleMemberUpdate(update); err != nil {
+		t.Fatal(err)
+	}
+	titles.SyncTags(f.bot, time.Now())
+	f.mu.Lock()
+	tag := f.tags[1]
+	f.mu.Unlock()
+	if tag != "临阵脱身" {
+		t.Fatal("demotion lost selected title", tag)
+	}
+}
+
+func TestTitleCleanupDoesNotOwnAnotherRoleField(t *testing.T) {
+	for _, tc := range []struct{ promote, lostAck bool }{{true, false}, {false, false}, {true, true}, {false, true}} {
+		t.Run(fmt.Sprintf("promote_%t/lost_ack_%t", tc.promote, tc.lostAck), func(t *testing.T) {
+			path := setupTribulationTestDB(t)
+			f := newTribulationTelegramFixture(t)
+			seedTribulationTestTitle(t, 1, "escape")
+			oldStatus, newStatus := "member", "administrator"
+			if !tc.promote {
+				oldStatus, newStatus = newStatus, oldStatus
+			}
+			f.statuses[1], f.editableAdmins[1] = oldStatus, true
+			if err := titles.Equip(-100, 1, "escape"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.lostAck {
+				if err := storage.DB.Exec(`CREATE TRIGGER fail_role_tag_ack BEFORE UPDATE ON title_equipments WHEN NEW.synced_version > OLD.synced_version BEGIN SELECT RAISE(ABORT,'ack failure'); END`).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			titles.SyncTags(f.bot, time.Now())
+			if tc.lostAck {
+				if err := storage.DB.Exec("DROP TRIGGER fail_role_tag_ack").Error; err != nil {
+					t.Fatal(err)
+				}
+				conn, err := storage.DB.DB()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := conn.Close(); err != nil {
+					t.Fatal(err)
+				}
+				storage.DB = openTribulationTestDB(t, path)
+			}
+			// After the role change the other field has an independently set
+			// manual title. Equal text does not make it a bot-owned write.
+			f.mu.Lock()
+			f.statuses[1] = newStatus
+			if tc.promote {
+				f.customTitles[1] = "临阵脱身"
+			} else {
+				f.tags[1] = "临阵脱身"
+			}
+			writes := f.setTags + f.setAdminTitles
+			f.mu.Unlock()
+			if err := titles.Equip(-100, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+			user := &tgbotapi.User{ID: 1}
+			if err := titles.HandleMemberUpdate(&tgbotapi.ChatMemberUpdated{
+				Chat:          tgbotapi.Chat{ID: -100, Type: "supergroup"},
+				OldChatMember: tgbotapi.ChatMember{User: user, Status: oldStatus, CanBeEdited: true},
+				NewChatMember: tgbotapi.ChatMember{User: user, Status: newStatus, CanBeEdited: true},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			titles.SyncTags(f.bot, time.Now())
+			f.mu.Lock()
+			got := f.tags[1]
+			if tc.promote {
+				got = f.customTitles[1]
+			}
+			count := f.setTags + f.setAdminTitles
+			f.mu.Unlock()
+			if got != "临阵脱身" || count != writes {
+				t.Fatalf("cleanup erased a manual title in another role field: title=%q writes=%d, before=%d", got, count, writes)
+			}
+			// Returning to the original role must still clear that field's
+			// earlier bot write, including an unacknowledged write after restart.
+			f.mu.Lock()
+			f.statuses[1] = oldStatus
+			f.mu.Unlock()
+			if err := titles.HandleMemberUpdate(&tgbotapi.ChatMemberUpdated{
+				Chat:          tgbotapi.Chat{ID: -100, Type: "supergroup"},
+				OldChatMember: tgbotapi.ChatMember{User: user, Status: newStatus, CanBeEdited: true},
+				NewChatMember: tgbotapi.ChatMember{User: user, Status: oldStatus, CanBeEdited: true},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			titles.SyncTags(f.bot, time.Now())
+			f.mu.Lock()
+			got = f.customTitles[1]
+			if tc.promote {
+				got = f.tags[1]
+			}
+			f.mu.Unlock()
+			if got != "" {
+				t.Fatalf("original field's durable write was orphaned: %q", got)
+			}
+		})
+	}
+}
+
+func TestLegacyTitleCleanupOnlyOwnsRegularMemberTags(t *testing.T) {
+	for _, status := range []string{"member", "administrator"} {
+		t.Run(status, func(t *testing.T) {
+			setupTribulationTestDB(t)
+			f := newTribulationTelegramFixture(t)
+			f.statuses[1], f.editableAdmins[1] = status, true
+			f.tags[1], f.customTitles[1] = "临阵脱身", "临阵脱身"
+			if err := storage.DB.Create(&model.TitleEquipment{
+				ChatID: -100, UserID: 1, TitleKey: titles.RealmKey, Version: 2, SyncedVersion: 1,
+				AppliedTag: "道心坚定", AttemptedTag: "自投雷网", UnconfirmedTagsJSON: `["临阵脱身"]`,
+			}).Error; err != nil {
+				t.Fatal(err)
+			}
+			titles.SyncTags(f.bot, time.Now())
+			f.mu.Lock()
+			tag, custom := f.tags[1], f.customTitles[1]
+			f.mu.Unlock()
+			if custom != "临阵脱身" || (status == "member" && tag != "") || (status == "administrator" && tag != "临阵脱身") {
+				t.Fatalf("legacy ownership crossed fields or lost pending cleanup: tag=%q custom=%q", tag, custom)
+			}
+		})
+	}
+}
+
+func TestTitleWriteStopsWhenFieldIntentCannotPersist(t *testing.T) {
+	setupTribulationTestDB(t)
+	f := newTribulationTelegramFixture(t)
+	f.statuses[1], f.editableAdmins[1] = "administrator", true
+	seedTribulationTestTitle(t, 1, "escape")
+	if err := titles.Equip(-100, 1, "escape"); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DB.Exec(`CREATE TRIGGER fail_title_intent BEFORE UPDATE ON title_equipments WHEN NEW.owned_tags_json <> '' BEGIN SELECT RAISE(ABORT,'intent failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	titles.SyncTags(f.bot, now)
+	f.mu.Lock()
+	writes := f.setTags + f.setAdminTitles
+	f.mu.Unlock()
+	if writes != 0 {
+		t.Fatal("external title was written without a durable field intent")
+	}
+	if err := storage.DB.Exec("DROP TRIGGER fail_title_intent").Error; err != nil {
+		t.Fatal(err)
+	}
+	titles.SyncTags(f.bot, now.Add(2*time.Minute))
+	f.mu.Lock()
+	got := f.customTitles[1]
+	f.mu.Unlock()
+	if got != "临阵脱身" {
+		t.Fatalf("intent persistence failure did not recover: %q", got)
 	}
 }

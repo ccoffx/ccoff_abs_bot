@@ -242,10 +242,7 @@ func run(loadConfig func()) {
 func pollTelegramUpdates(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = telegram.TelegramLongPollTimeout
-	u.AllowedUpdates = []string{"message", "callback_query"}
-	if joinVerification != nil {
-		u.AllowedUpdates = append(u.AllowedUpdates, "chat_member")
-	}
+	u.AllowedUpdates = []string{"message", "callback_query", "chat_member"}
 
 	log.Printf("✅ Telegram 长轮询已启动: timeout=%ds allowed_updates=%s", telegram.TelegramLongPollTimeout, textfmt.FormatPlainValue(strings.Join(u.AllowedUpdates, ",")))
 	writeStartupHealth("polling_started", bot.Self.UserName)
@@ -287,6 +284,18 @@ func pollTelegramUpdates(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob) {
 func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob, update tgbotapi.Update) {
 	if !testUpdateAllowed(update) {
 		return
+	}
+	if update.ChatMember != nil {
+		// 事件一旦被后续 getUpdates 确认就不会再次投递。这里只确保
+		// 独立事件队列已持久化，佩戴表的处理与重试交给后台。
+		for {
+			if err := titles.HandleMemberUpdate(update.ChatMember); err == nil {
+				break
+			} else {
+				log.Printf("⚠️ 更新成员身份后的称号同步任务持久化失败，将重试: %s", textfmt.FormatPlainError(err))
+			}
+			time.Sleep(telegram.TelegramPollRetryDelay)
+		}
 	}
 	if joinVerification != nil && update.ChatMember != nil {
 		for {
