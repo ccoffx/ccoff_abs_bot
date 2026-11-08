@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	ErrMemberTitleOwner           = errors.New("Telegram 不允许机器人修改群主头衔，请在群设置中手动设置为当前称号")
-	ErrMemberTitleAdminUneditable = errors.New("机器人无权修改这位管理员的头衔，请在群设置中手动设置为当前称号")
+	ErrMemberTitleOwner           = errors.New("Telegram 不允许机器人修改群主头衔")
+	ErrMemberTitleAdminUneditable = errors.New("机器人无权修改这位管理员的头衔；Telegram 仅允许机器人修改由其提拔且有权编辑的管理员头衔")
 )
 
 // 普通成员使用群标签，管理员使用头衔；不改变管理员权限。

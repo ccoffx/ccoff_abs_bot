@@ -129,6 +129,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		if handleGroupReplyAdminMessage(bot, msg, text) {
 			return
 		}
+		if handleGroupAdminMessage(bot, msg, text) {
+			return
+		}
 
 		if text == "取消" || strings.Contains(text, "返回") {
 			telegram.ClearSession(userID)

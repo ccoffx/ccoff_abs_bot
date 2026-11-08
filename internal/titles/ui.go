@@ -54,7 +54,11 @@ func Render(chatID, userID int64, ranking bool) (string, tgbotapi.InlineKeyboard
 				b.WriteString("当前佩戴：无\n")
 			}
 			if equipment.SyncHint != "" {
-				b.WriteString(textfmt.FormatPlainValue(equipment.SyncHint) + "\n")
+				b.WriteString("群内显示：" + textfmt.FormatPlainValue(equipment.SyncHint) + "\n")
+			} else if equipment.Version > equipment.SyncedVersion {
+				b.WriteString("群内显示：等待后台同步\n")
+			} else if equipment.Version > 0 {
+				b.WriteString("群内显示：同步完成\n")
 			}
 			b.WriteByte('\n')
 			b.WriteString("📿 境界称号｜账号自带，随境界自动更新\n")
@@ -131,7 +135,8 @@ func Render(chatID, userID int64, ranking bool) (string, tgbotapi.InlineKeyboard
 		return "", tgbotapi.InlineKeyboardMarkup{}, err
 	}
 	if !ranking {
-		b.WriteString("同时仅佩戴一个称号，失效时恢复境界。普通成员同步群标签，管理员同步头衔；受 Telegram 权限限制时会显示原因。\n")
+		b.WriteString("同时仅佩戴一个称号，失效时恢复境界。佩戴保存到档案后，群内显示由后台同步。\n普通成员同步群标签；管理员通过头衔显示，仅由机器人提拔且有权编辑时可自动同步。群主头衔无法自动修改，需手动设置。\n")
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("刷新同步状态", fmt.Sprintf("titles:view:%d", chatID))))
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("恢复默认称号", fmt.Sprintf("titles:clear:%d", chatID)), tgbotapi.NewInlineKeyboardButtonData("称号榜", fmt.Sprintf("titles:rank:%d", chatID))))
 	} else {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("我的称号", fmt.Sprintf("titles:view:%d", chatID))))
@@ -280,7 +285,11 @@ func HandleCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 		telegram.AnswerCallback(bot, cb.ID, errorText(err))
 		return true
 	}
-	telegram.AnswerCallback(bot, cb.ID, "已更新")
+	answer := "已刷新"
+	if parts[1] == "equip" || parts[1] == "clear" {
+		answer = "已保存佩戴，群内显示由后台同步"
+	}
+	telegram.AnswerCallback(bot, cb.ID, answer)
 	sendPanel(bot, cb.Message.Chat.ID, cb.Message.MessageID, out, markup)
 	// 同步由独立巡检执行，避免标签请求拖慢按钮应答和其他玩家的结算。
 	return true

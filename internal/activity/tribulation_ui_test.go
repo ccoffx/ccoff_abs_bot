@@ -964,6 +964,78 @@ func TestTitleSyncReportsAdministratorAndOwnerLimits(t *testing.T) {
 	}
 }
 
+func TestTitlePanelSeparatesSavedSelectionFromGroupDisplay(t *testing.T) {
+	for _, tc := range []struct {
+		status   string
+		editable bool
+		want     string
+	}{
+		{"member", false, "群内显示：同步完成"},
+		{"administrator", true, "群内显示：同步完成"},
+		{"administrator", false, "机器人无权修改"},
+		{"creator", false, "不允许机器人修改群主头衔"},
+	} {
+		t.Run(fmt.Sprintf("%s/editable=%t", tc.status, tc.editable), func(t *testing.T) {
+			setupTribulationTestDB(t)
+			f := newTribulationTelegramFixture(t)
+			f.statuses[1], f.editableAdmins[1], f.customTitles[1] = tc.status, tc.editable, "原头衔"
+			seedTribulationTestTitle(t, 1, "escape")
+			cb := &tgbotapi.CallbackQuery{
+				ID: "equip", From: &tgbotapi.User{ID: 1}, Data: "titles:equip:-100:escape",
+				Message: &tgbotapi.Message{MessageID: 123, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}},
+			}
+			titles.HandleCallback(f.bot, cb)
+			f.mu.Lock()
+			answer, panel := f.answers[len(f.answers)-1], f.edits[len(f.edits)-1]
+			attempts := f.tagAttempts
+			f.mu.Unlock()
+			if !strings.Contains(answer, "已保存佩戴") || !strings.Contains(panel, "群内显示：等待") || strings.Contains(panel, "群内显示：同步完成") || attempts != 0 {
+				t.Fatalf("saved selection was presented as applied: answer=%q panel=%q attempts=%d", answer, panel, attempts)
+			}
+			_, markup, err := titles.Render(-100, 1, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, row := range markup.InlineKeyboard {
+				for _, button := range row {
+					if button.Text == "刷新同步状态" && button.CallbackData != nil && *button.CallbackData == "titles:view:-100" {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Fatal("no way to refresh the asynchronous sync result")
+			}
+			titles.SyncTags(f.bot, time.Now())
+			cb.ID, cb.Data = "refresh", "titles:view:-100"
+			titles.HandleCallback(f.bot, cb)
+			f.mu.Lock()
+			panel = f.edits[len(f.edits)-1]
+			f.mu.Unlock()
+			if !strings.Contains(panel, tc.want) {
+				t.Fatalf("sync outcome not visible after refresh: %q", panel)
+			}
+			if tc.status == "creator" || (tc.status == "administrator" && !tc.editable) {
+				if !strings.Contains(panel, "手动设为「临阵脱身」") || strings.Contains(panel, "群内显示：同步完成") {
+					t.Fatalf("blocked sync lacks an actionable manual title: %q", panel)
+				}
+				// A manually supplied matching title can be confirmed without edit rights.
+				f.mu.Lock()
+				f.customTitles[1] = "临阵脱身"
+				f.mu.Unlock()
+				cb.ID, cb.Data = "confirm", "titles:equip:-100:escape"
+				titles.HandleCallback(f.bot, cb)
+				titles.SyncTags(f.bot, time.Now())
+				out, _, err := titles.Render(-100, 1, false)
+				if err != nil || !strings.Contains(out, "群内显示：同步完成") || strings.Contains(out, "手动设为") {
+					t.Fatalf("manual match could not be confirmed: %q err=%v", out, err)
+				}
+			}
+		})
+	}
+}
+
 func TestMemberRoleChangeResyncsSelectedTitle(t *testing.T) {
 	setupTribulationTestDB(t)
 	f := newTribulationTelegramFixture(t)

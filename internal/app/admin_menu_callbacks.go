@@ -66,7 +66,7 @@ func handleAdminMenuCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) b
 		telegram.AnswerCallback(bot, cb.ID, "管理员菜单已失效，请重新打开。")
 		return true
 	}
-	if !cb.Message.Chat.IsPrivate() {
+	if !cb.Message.Chat.IsPrivate() || cb.Message.Chat.ID != cb.From.ID {
 		telegram.AnswerCallback(bot, cb.ID, "请私聊使用管理员菜单。")
 		return true
 	}
@@ -76,6 +76,7 @@ func handleAdminMenuCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) b
 		telegram.AnswerCallback(bot, cb.ID, "权限不足")
 		return true
 	}
+	clearGroupAdminSession(cb.From.ID)
 
 	parts := strings.Split(cb.Data, ":")
 	if len(parts) < 2 {
@@ -163,6 +164,7 @@ func renderSuperAdminMenu(key string) (string, tgbotapi.InlineKeyboardMarkup) {
 			adminCmdRow("🛑 暂停/恢复", "suspend"),
 			adminCmdRow("🗑️ 删除用户", "delete_user"),
 			adminCmdRow("👑 授权管理员", "promote_admin"),
+			adminCmdRow("🛡 群管理员管理", "group_admins"),
 			adminCmdRow("🏳️ 设置白名单", "whitelist"),
 			adminCmdRow("🧹 清理遗孀", "clean_widows"),
 			adminBackRow(),
@@ -267,6 +269,7 @@ func adminMenuCommandText(key string) (command string, superOnly bool, ok bool) 
 		"suspend":                     {"暂停", true},
 		"delete_user":                 {"删除用户", true},
 		"promote_admin":               {"授权", true},
+		"group_admins":                {groupAdminCommand, true},
 		"whitelist":                   {"白名单", true},
 		"clean_widows":                {"清理遗孀", true},
 		"adjust_points":               {"操控", true},

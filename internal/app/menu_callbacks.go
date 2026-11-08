@@ -92,6 +92,9 @@ func handleMenuCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 		telegram.AnswerCallback(bot, cb.ID, "请私聊我使用菜单。")
 		return true
 	}
+	if cb.Message.Chat.ID == cb.From.ID {
+		clearGroupAdminSession(cb.From.ID)
+	}
 
 	parts := strings.Split(cb.Data, ":")
 	if len(parts) < 2 {
@@ -146,6 +149,9 @@ func handleShopCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) {
 	if !cb.Message.Chat.IsPrivate() {
 		telegram.AnswerCallback(bot, cb.ID, "聚宝斋需私聊交易。")
 		return
+	}
+	if cb.Message.Chat.ID == cb.From.ID {
+		clearGroupAdminSession(cb.From.ID)
 	}
 
 	parts := strings.Split(cb.Data, ":")

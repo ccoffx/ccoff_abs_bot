@@ -3,6 +3,7 @@ package titles
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -116,6 +117,11 @@ func SyncTags(bot *tgbotapi.BotAPI, now time.Time) {
 		delay := time.Minute
 		if errors.Is(err, telegram.ErrMemberTitleOwner) || errors.Is(err, telegram.ErrMemberTitleAdminUneditable) {
 			hint = err.Error()
+			if desired == "" {
+				hint += "。请由群主或有权限的管理员在群设置 → 管理员中手动清空头衔"
+			} else {
+				hint += fmt.Sprintf("。请由群主或有权限的管理员在群设置 → 管理员中将头衔手动设为「%s」", desired)
+			}
 			delay = time.Hour
 		}
 		var apiErr *tgbotapi.Error

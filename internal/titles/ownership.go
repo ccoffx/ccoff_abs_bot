@@ -138,7 +138,7 @@ func setDesiredInTx(tx *gorm.DB, chatID, userID int64, key, tag string, force bo
 	if err == nil && !force && e.TitleKey == key && e.DesiredTag == tag {
 		return nil
 	}
-	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "chat_id"}, {Name: "user_id"}}, DoUpdates: clause.Assignments(map[string]any{"title_key": key, "desired_tag": tag, "version": gorm.Expr("version + 1"), "next_sync_at": time.Time{}, "sync_hint": "等待同步群成员标签"})}).Create(&model.TitleEquipment{ChatID: chatID, UserID: userID, TitleKey: key, DesiredTag: tag, Version: 1, SyncHint: "等待同步群成员标签"}).Error
+	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "chat_id"}, {Name: "user_id"}}, DoUpdates: clause.Assignments(map[string]any{"title_key": key, "desired_tag": tag, "version": gorm.Expr("version + 1"), "next_sync_at": time.Time{}, "sync_hint": "等待后台同步群标签或管理员头衔"})}).Create(&model.TitleEquipment{ChatID: chatID, UserID: userID, TitleKey: key, DesiredTag: tag, Version: 1, SyncHint: "等待后台同步群标签或管理员头衔"}).Error
 }
 
 func Equip(chatID, userID int64, key string) error {

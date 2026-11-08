@@ -354,6 +354,11 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			turn.wait()
 			unlock := telegram.LockUser(cb.From.ID)
 			defer unlock()
+			// Every private feature can replace the active wizard, including
+			// callbacks handled before the ordinary menus below.
+			if cb.Message != nil && cb.Message.Chat != nil && cb.Message.Chat.IsPrivate() && cb.Message.Chat.ID == cb.From.ID && !strings.HasPrefix(cb.Data, groupAdminPrefix) {
+				clearGroupAdminSession(cb.From.ID)
+			}
 			if strings.HasPrefix(cb.Data, joinverify.CallbackPrefix) {
 				if joinVerification == nil {
 					telegram.AnswerCallback(bot, cb.ID, "入群验证当前未启用。")
@@ -406,6 +411,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 				return
 			}
 			if handleGroupReplyCallback(bot, cb) {
+				return
+			}
+			if handleGroupAdminCallback(bot, cb) {
 				return
 			}
 			if handleAdminMenuCallback(bot, cb) {

@@ -34,12 +34,21 @@ func HandleMemberUpdate(update *tgbotapi.ChatMemberUpdated) error {
 	}
 	// 接收线程只写入独立队列，不获取 titleMutex，也不触碰佩戴表。
 	// 称号计算或佩戴写入失败不能堵住所有用户的 Telegram 更新。
+	return RequestMemberSync(update.Chat.ID, next.User.ID, update.Chat.Title)
+}
+
+// RequestMemberSync also lets confirmed group administration operations request
+// synchronization when a permission edit does not change the member's role.
+func RequestMemberSync(chatID, userID int64, groupName string) error {
+	if chatID >= 0 || chatID != defaultGroupID() || userID <= 0 {
+		return nil
+	}
 	return storage.DB.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "chat_id"}, {Name: "user_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"group_name": update.Chat.Title, "version": gorm.Expr("version + 1"), "next_attempt_at": time.Time{},
+			"group_name": groupName, "version": gorm.Expr("version + 1"), "next_attempt_at": time.Time{},
 		}),
-	}).Create(&model.TitleMemberSyncRequest{ChatID: update.Chat.ID, UserID: next.User.ID, GroupName: update.Chat.Title, Version: 1}).Error
+	}).Create(&model.TitleMemberSyncRequest{ChatID: chatID, UserID: userID, GroupName: groupName, Version: 1}).Error
 }
 
 func ProcessMemberUpdates(now time.Time) {
