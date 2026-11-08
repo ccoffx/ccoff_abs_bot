@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"ccoff-abs-bot/internal/abs"
@@ -221,48 +222,63 @@ func TestSameDayAbuseEvidenceWithMismatchedSourceStatistics(t *testing.T) {
 }
 
 func TestPersonalReportUsesCorrectedCacheWhenRefreshFails(t *testing.T) {
-	for _, failure := range []string{"sessions", "snapshot", "missing_days"} {
-		t.Run(failure, func(t *testing.T) {
-			setupRetreatBackfillDB(t)
-			session, source, today := recoveryCrossDaySession()
-			var fail atomic.Bool
-			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case strings.HasSuffix(r.URL.Path, "/listening-stats"):
-					payload := map[string]any{"totalTime": 7200, "days": map[string]float64{source: 7200}}
-					if fail.Load() && failure == "snapshot" {
-						payload["days"] = map[string]float64{source: 3600}
+	for _, clock := range []struct {
+		name                   string
+		hour, minute           int
+		todayHours, totalHours string
+	}{
+		{"凌晨未满一小时", 0, 5, "0.08", "1.08"},
+		{"当天已过一小时", 2, 0, "1.00", "2.00"},
+	} {
+		for _, failure := range []string{"sessions", "snapshot", "missing_days"} {
+			t.Run(clock.name+"/"+failure, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					// 固定在北京时间指定时刻，避免真实时钟与测试缓存掩盖凌晨边界。
+					now := time.Now().In(leaderboardLocation)
+					at := time.Date(now.Year(), now.Month(), now.Day()+1, clock.hour, clock.minute, 0, 0, leaderboardLocation)
+					time.Sleep(at.Sub(now))
+					setupRetreatBackfillDB(t)
+					session, source, today := recoveryCrossDaySession()
+					var fail atomic.Bool
+					bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+						switch {
+						case strings.HasSuffix(r.URL.Path, "/listening-stats"):
+							payload := map[string]any{"totalTime": 7200, "days": map[string]float64{source: 7200}}
+							if fail.Load() && failure == "snapshot" {
+								payload["days"] = map[string]float64{source: 3600}
+							}
+							if fail.Load() && failure == "missing_days" {
+								delete(payload, "days")
+							}
+							_ = json.NewEncoder(w).Encode(payload)
+						case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
+							if fail.Load() && failure == "sessions" {
+								w.WriteHeader(http.StatusServiceUnavailable)
+								return
+							}
+							_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{session}})
+						default:
+							fmt.Fprint(w, `{"mediaProgress":[]}`)
+						}
+					})
+					if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+						t.Fatal("initial refresh failed")
 					}
-					if fail.Load() && failure == "missing_days" {
-						delete(payload, "days")
+					before := recoveryListeningDay(t, today)
+					fail.Store(true)
+					report := GetPersonalReport(abs.DefaultClient, "abs1")
+					for _, want := range []string{"今日实际听书: 1.00 小时", "今日净修为: " + clock.todayHours + " 小时", "净修炼时长: " + clock.totalHours + " 小时", "本次刷新失败", "使用上次成功统计"} {
+						if !strings.Contains(report, want) {
+							t.Errorf("report missing %q: %s", want, report)
+						}
 					}
-					_ = json.NewEncoder(w).Encode(payload)
-				case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
-					if fail.Load() && failure == "sessions" {
-						w.WriteHeader(http.StatusServiceUnavailable)
-						return
+					after := recoveryListeningDay(t, today)
+					if after.RawSeconds != before.RawSeconds || !after.LastFetchedAt.Equal(before.LastFetchedAt) {
+						t.Fatalf("failed report changed cache: %+v", after)
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{session}})
-				default:
-					fmt.Fprint(w, `{"mediaProgress":[]}`)
-				}
+				})
 			})
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
-				t.Fatal("initial refresh failed")
-			}
-			before := recoveryListeningDay(t, today)
-			fail.Store(true)
-			report := GetPersonalReport(abs.DefaultClient, "abs1")
-			for _, want := range []string{"今日实际听书: 1.00 小时", "今日净修为: 1.00 小时", "净修炼时长: 2.00 小时", "本次刷新失败", "使用上次成功统计"} {
-				if !strings.Contains(report, want) {
-					t.Errorf("report missing %q: %s", want, report)
-				}
-			}
-			after := recoveryListeningDay(t, today)
-			if after.RawSeconds != before.RawSeconds || !after.LastFetchedAt.Equal(before.LastFetchedAt) {
-				t.Fatalf("failed report changed cache: %+v", after)
-			}
-		})
+		}
 	}
 }
 
