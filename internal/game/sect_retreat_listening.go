@@ -37,9 +37,9 @@ func decodeSectRetreatEvidence(retreat model.SectCaveRetreat) (sectRetreatListen
 	return evidence, nil
 }
 
-// Observations may arrive after the retreat ends: only mathematically certain
-// playback inside its fixed window earns a bonus. Evidence is persisted with
-// session identity so refreshes and pagination cannot award it twice.
+// Observations may arrive after the retreat ends: only playback lower bounds
+// inside its fixed window, with bounded client clock skew, earn a bonus.
+// Session identity prevents refreshes and pagination from awarding it twice.
 func recordSectRetreatListeningSessions(userID int64, absUserID string, incoming []absListeningSession) error {
 	return storage.DB.Transaction(func(tx *gorm.DB) error {
 		return recordSectRetreatListeningSessionsInTx(tx, userID, absUserID, incoming)
@@ -106,7 +106,7 @@ func provenSectRetreatSessionDays(retreat model.SectCaveRetreat, session absList
 		if end.After(retreat.EndAt) {
 			end = retreat.EndAt
 		}
-		if seconds := guaranteedSessionSeconds(session, start, end); seconds > 0 {
+		if seconds := rewardSessionSeconds(session, start, end); seconds > 0 {
 			days[day] = seconds
 		}
 	}

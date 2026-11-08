@@ -361,12 +361,16 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 
 	retreatBonus := stat.BaseCultivationHours - stat.EffectiveHours
 	retreatLine := fmt.Sprintf("\n基础净修为：`%.2f` 小时\n异火额外修为：`+%.2f` 小时", stat.EffectiveHours+retreatBonus, stat.SpiritFireHours)
+	if stat.ValidationJSON != "" {
+		retreatLine += fmt.Sprintf("\nABS 原始归属统计：`%.2f` 小时", stat.OfficialRawSeconds/3600)
+		retreatLine += dailyListeningValidationNotice(stat)
+	}
 	if retreatBonus > 0 {
 		retreatLine += fmt.Sprintf("\n洞府闭关加成：`+%.2f` 小时", retreatBonus)
 	}
 
 	return fmt.Sprintf(
-		"%s\n\n日期：`%s`\n实际听书：`%.2f` 小时\n封顶计入：`%.2f` 小时\n今日净修为：`%.2f` 小时%s\n总净修为：`%.2f` 小时\n更新时间：`%s`\n来源：`%s`\n刷新状态：`%s`\n刷新原因：`%s`",
+		"%s\n\n日期：`%s`\n分日听书统计：`%.2f` 小时\n有效计入听书：`%.2f` 小时\n今日净修为：`%.2f` 小时%s\n总净修为：`%.2f` 小时\n更新时间：`%s`\n来源：`%s`\n刷新状态：`%s`\n刷新原因：`%s`",
 		title,
 		stat.DayKey,
 		stat.RawSeconds/3600.0,

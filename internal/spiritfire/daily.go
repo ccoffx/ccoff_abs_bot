@@ -11,14 +11,15 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Bonus uses ordinary suppressed hours, excluding retreat improvements.
-// Retreat rewards are added independently and must never reduce fire income.
-func Bonus(rawSeconds, base float64, percent int) float64 {
-	if math.IsNaN(rawSeconds) || math.IsInf(rawSeconds, 0) || rawSeconds < 0 || math.IsNaN(base) || math.IsInf(base, 0) || base < 0 || percent < 0 {
+// Bonus uses credited listening and ordinary suppressed hours, excluding
+// retreat improvements. Fire and retreat rewards are added independently;
+// the resulting cultivation is not limited to the ordinary daily cap.
+func Bonus(creditedSeconds, base float64, percent int) float64 {
+	if math.IsNaN(creditedSeconds) || math.IsInf(creditedSeconds, 0) || creditedSeconds < 0 || math.IsNaN(base) || math.IsInf(base, 0) || base < 0 || percent < 0 {
 		return 0
 	}
-	raw := math.Min(24, rawSeconds/3600)
-	return math.Max(0, raw-base) * float64(percent) / 100
+	creditedHours := math.Min(24, creditedSeconds/3600)
+	return math.Max(0, creditedHours-base) * float64(percent) / 100
 }
 
 // Snapshot resolves historical loadout revisions, not current ownership. A
@@ -79,7 +80,7 @@ func RefreshDaily(tx *gorm.DB, stat *model.DailyListeningStat, base float64, now
 	}
 	oldBase, oldBonus := stat.BaseCultivationHours, stat.SpiritFireHours
 	stat.BaseCultivationHours = base
-	stat.SpiritFireHours = Bonus(stat.RawSeconds, stat.EffectiveHours, snap.Percent)
+	stat.SpiritFireHours = Bonus(stat.CappedSeconds, stat.EffectiveHours, snap.Percent)
 	if stat.ID == 0 || (oldBase == base && oldBonus == stat.SpiritFireHours) {
 		return nil
 	}

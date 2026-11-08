@@ -211,7 +211,7 @@ func TestDailySnapshotHistoryAndFullFusion(t *testing.T) {
 		return nil
 	}))
 	next := now.AddDate(0, 0, 1)
-	stat := model.DailyListeningStat{UserID: 1, DayKey: Day(next), RawSeconds: 24 * 3600, EffectiveHours: 8.5}
+	stat := model.DailyListeningStat{UserID: 1, DayKey: Day(next), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5}
 	must(t, db.Create(&stat).Error)
 	must(t, db.Transaction(func(tx *gorm.DB) error { must(t, Lock(tx)); return RefreshDaily(tx, &stat, 8.5, next) }))
 	if math.Abs(stat.SpiritFireHours+8.5-37.33) > 1e-9 {
@@ -221,6 +221,7 @@ func TestDailySnapshotHistoryAndFullFusion(t *testing.T) {
 	own(t, db, 19, 2, next)
 	// Historical raw/retreat corrections recompute using the old immutable rate.
 	stat.RawSeconds = 8 * 3600
+	stat.CappedSeconds = 8 * 3600
 	stat.EffectiveHours = 6.4
 	must(t, db.Transaction(func(tx *gorm.DB) error { must(t, Lock(tx)); return RefreshDaily(tx, &stat, 7.2, next.AddDate(0, 0, 1)) }))
 	if math.Abs(stat.SpiritFireHours-2.976) > 1e-9 {
@@ -243,6 +244,45 @@ func TestDailySnapshotHistoryAndFullFusion(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+func TestRefreshDailyUsesCreditedListeningAndKeepsAdditiveBonus(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		credited, ordinary, base float64
+		percent                  int
+		wantBonus, wantTotal     float64
+	}{
+		{"duplicate twelve-hour reports", 12 * 3600, 7.314285714285715, 7.314285714285715, 100, 4.685714285714285, 12},
+		{"zero credit cannot generate fire rewards", 0, 0, 0, 186, 0, 0},
+		{"full fusion exceeds daily listening and base caps", 24 * 3600, 8.5, 8.5, 186, 28.83, 37.33},
+		{"retreat does not reduce additive fire reward", 8 * 3600, 6.4, 7.2, 186, 2.976, 10.176},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, now := fixture(t)
+			must(t, db.Create(&model.SpiritFireDaily{UserID: 1, DayKey: Day(now), FireIDs: "[]", Percent: tc.percent}).Error)
+			stat := model.DailyListeningStat{
+				UserID: 1, DayKey: Day(now), RawSeconds: 24 * 3600,
+				CappedSeconds: tc.credited, EffectiveHours: tc.ordinary,
+				BaseCultivationHours: 8.5, SpiritFireHours: 28.83,
+			}
+			must(t, db.Create(&stat).Error)
+			for retry := 0; retry < 2; retry++ {
+				must(t, db.Transaction(func(tx *gorm.DB) error {
+					must(t, Lock(tx))
+					return RefreshDaily(tx, &stat, tc.base, now)
+				}))
+				var saved model.DailyListeningStat
+				must(t, db.First(&saved, stat.ID).Error)
+				if math.Abs(saved.SpiritFireHours-tc.wantBonus) > 1e-9 || math.Abs(saved.BaseCultivationHours+saved.SpiritFireHours-tc.wantTotal) > 1e-9 {
+					t.Fatalf("bonus=%g total=%g; want bonus=%g total=%g", saved.SpiritFireHours, saved.BaseCultivationHours+saved.SpiritFireHours, tc.wantBonus, tc.wantTotal)
+				}
+				if saved.RawSeconds != 24*3600 || saved.CappedSeconds != tc.credited || saved.EffectiveHours != tc.ordinary {
+					t.Fatalf("fire refresh changed listening statistics: %+v", saved)
+				}
+			}
+		})
+	}
 }
 func TestLearningFailureRollsBackScrollsAndAudit(t *testing.T) {
 	db, now := fixture(t)

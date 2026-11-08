@@ -3206,47 +3206,95 @@ func cappedListeningSeconds(seconds float64) float64 {
 }
 
 func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
-	adjusted, corrected, _, err := prepareDailyListeningDaysChecked(userID, absUserID, days, fetchedAt)
+	adjusted, corrected, _, validation, err := prepareDailyListeningDaysChecked(userID, absUserID, days, fetchedAt)
 	if err != nil {
 		return err
 	}
-	return recordPreparedDailyListeningStats(userID, absUserID, adjusted, corrected, fetchedAt)
+	return recordPreparedDailyListeningStats(userID, absUserID, adjusted, corrected, fetchedAt, validation)
 }
 
 // Do not replace an already corrected day with source-day totals when session
 // data is unavailable or comes from a different ABS snapshot.
-func prepareDailyListeningDaysChecked(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) (map[string]float64, map[string]bool, []absListeningSession, error) {
+func prepareDailyListeningDaysChecked(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) (map[string]float64, map[string]bool, []absListeningSession, *dailyListeningValidation, error) {
 	if days == nil || abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" {
-		return nil, nil, nil, fmt.Errorf("ABS_CROSS_DAY_NOT_READY")
+		return nil, nil, nil, nil, fmt.Errorf("ABS_CROSS_DAY_NOT_READY")
 	}
 	startedAt := time.Now()
 	snapshot, err := fetchABSCrossDayListeningSessions(absUserID)
 	sessions := snapshot.Sessions
 	if err != nil {
 		logDailyListeningObservation(userID, absUserID, days, nil, nil, sessions, startedAt, fetchedAt, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	persistedSessions, err := persistAndLoadABSCrossDaySessions(userID, absUserID, days, snapshot)
 	if err != nil {
+		scheduleABSListeningSnapshotRepair(userID, absUserID, snapshot, err)
 		logDailyListeningObservation(userID, absUserID, days, nil, nil, sessions, startedAt, fetchedAt, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if err := validateABSCrossDaySnapshot(days, persistedSessions); err != nil {
 		if scheduleErr := scheduleABSCrossDayReconciliation(userID, absUserID, days, snapshot, persistedSessions); scheduleErr != nil {
 			log.Printf("ABS cross-day reconciliation schedule failed: user=%d err=%s", userID, textfmt.FormatPlainError(scheduleErr))
 		}
 		logDailyListeningObservation(userID, absUserID, days, nil, nil, sessions, startedAt, fetchedAt, err)
-		return nil, nil, sessions, err
+		return nil, nil, sessions, nil, err
 	}
 	adjusted, corrected := rebalanceABSDaysForCrossDaySessions(days, persistedSessions)
+	validationSessions, err := loadDailyListeningValidationSessions(userID, absUserID, snapshot, persistedSessions)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	validationErr := validateABSCrossDaySnapshot(days, latestDailyListeningSessions(validationSessions))
+	if evidence := missingABSListeningSessionEvidence(days, snapshot, validationSessions); len(evidence.MissingSessions) > 0 {
+		if err := scheduleABSCrossDayReconciliation(userID, absUserID, days, snapshot, validationSessions); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		// Keep the source-budget error for evidence-only abuse scans while
+		// historical omissions are reconciled. Daily credit remains blocked.
+		if validationErr == nil {
+			validationErr = fmt.Errorf("ABS_DAILY_HISTORY_SNAPSHOT_MISMATCH")
+		}
+	}
+	// Same-day observations must agree with the source-day budget too. Never
+	// truncate an individual session before deduplication to fit an older total.
+	if validationErr != nil {
+		// Missing source-day totals must not discard current session proof
+		// needed by the evidence-only abuse scan.
+		return nil, nil, sessions, nil, validationErr
+	}
+	if err := validateABSListeningSourceRemainders(userID, absUserID, days, validationSessions); err != nil {
+		scheduleABSListeningSnapshotRepair(userID, absUserID, snapshot, err)
+		return nil, nil, nil, nil, err
+	}
+	// Validation can credit physical dates absent from both the official days
+	// and AllocationJSON (for example, an overstated uncertain session). Always
+	// recompute cached dates for this binding, including after the session is
+	// cleared or its timestamps change, so omitted dates cannot retain credit.
+	var recordedDays []string
+	if err := storage.DB.Model(&model.DailyListeningStat{}).
+		Where("user_id = ? AND abs_user_id = ?", userID, strings.TrimSpace(absUserID)).
+		Pluck("day_key", &recordedDays).Error; err != nil {
+		return nil, nil, nil, nil, err
+	}
+	for _, day := range recordedDays {
+		if _, exists := adjusted[day]; !exists {
+			adjusted[day] = 0
+		}
+	}
+	validation := validateDailyListeningCredit(days, adjusted, validationSessions, time.Now())
+	for day := range validation.Seconds {
+		if _, exists := adjusted[day]; !exists {
+			adjusted[day] = 0
+		}
+	}
 	logDailyListeningObservation(userID, absUserID, days, adjusted, corrected, sessions, startedAt, fetchedAt, nil)
 	if err := recordSectRetreatListeningSessions(userID, absUserID, sessions); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return adjusted, corrected, sessions, nil
+	return adjusted, corrected, sessions, validation, nil
 }
 
-func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time) error {
+func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time, validations ...*dailyListeningValidation) error {
 	if storage.DB == nil || userID == 0 {
 		return nil
 	}
@@ -3260,6 +3308,9 @@ func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[
 			records[index].Source = dailyListeningCrossDaySource
 			records[index].FetchStatus = dailyListeningCrossDayStatus
 			records[index].RefreshReason = "abs_cross_day_rebalance"
+		}
+		if len(validations) > 0 {
+			applyDailyListeningValidation(&records[index], validations[0])
 		}
 	}
 	if len(records) == 0 {
@@ -3317,10 +3368,8 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 		recordedAt = fetchedAt
 	}
 
-	// Daily cultivation must use the exact Beijing calendar-day value reported by
-	// listening-stats.days. The user listening-sessions endpoint is a historical
-	// session list, not a trustworthy live-play feed; using it as a live fallback
-	// can multiply one refresh interval by every historical session returned.
+	// Retain the official/cross-day corrected total independently of creditable
+	// playback. Session validation can restrict this budget, never create more.
 	rawOfficialByDay := make(map[string]float64, len(days)+1)
 	daySet := make(map[string]bool, len(days)+1)
 	// A request started before midnight may already contain the next day's data.
@@ -3347,18 +3396,19 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 	records := make([]model.DailyListeningStat, 0, len(daySet))
 	for dayKey := range daySet {
 		rawSeconds := rawOfficialByDay[dayKey]
-		cappedSeconds := cappedListeningSeconds(rawSeconds)
+		cappedSeconds := math.Min(cappedListeningSeconds(rawSeconds), dailyListeningElapsedLimit(dayKey, recordedAt))
 		records = append(records, model.DailyListeningStat{
-			UserID:         userID,
-			AbsUserID:      strings.TrimSpace(absUserID),
-			DayKey:         dayKey,
-			RawSeconds:     rawSeconds,
-			CappedSeconds:  cappedSeconds,
-			EffectiveHours: calculateSectEffectiveHoursFromSeconds(rawSeconds),
-			LastFetchedAt:  fetchedAt,
-			Source:         "abs_days",
-			FetchStatus:    "ok",
-			RefreshReason:  "abs_refresh",
+			UserID:             userID,
+			AbsUserID:          strings.TrimSpace(absUserID),
+			DayKey:             dayKey,
+			RawSeconds:         rawSeconds,
+			OfficialRawSeconds: rawSeconds,
+			CappedSeconds:      cappedSeconds,
+			EffectiveHours:     calculateSectEffectiveHoursFromSeconds(cappedSeconds),
+			LastFetchedAt:      fetchedAt,
+			Source:             "abs_days",
+			FetchStatus:        "ok",
+			RefreshReason:      "abs_refresh",
 		})
 	}
 	return records
@@ -3376,16 +3426,18 @@ func dailyListeningStatOnConflict(now time.Time) clause.OnConflict {
 			clause.Eq{Column: clause.Column{Name: "deleted_at"}, Value: nil},
 		}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"raw_seconds":     gorm.Expr("excluded.raw_seconds"),
-			"capped_seconds":  gorm.Expr("excluded.capped_seconds"),
-			"effective_hours": gorm.Expr("excluded.effective_hours"),
-			"abs_user_id":     gorm.Expr("excluded.abs_user_id"),
-			"last_fetched_at": gorm.Expr("excluded.last_fetched_at"),
-			"source":          gorm.Expr("excluded.source"),
-			"fetch_status":    gorm.Expr("excluded.fetch_status"),
-			"refresh_reason":  gorm.Expr("excluded.refresh_reason"),
-			"updated_at":      now,
-			"deleted_at":      nil,
+			"official_raw_seconds": gorm.Expr("excluded.official_raw_seconds"),
+			"validation_json":      gorm.Expr("excluded.validation_json"),
+			"raw_seconds":          gorm.Expr("excluded.raw_seconds"),
+			"capped_seconds":       gorm.Expr("excluded.capped_seconds"),
+			"effective_hours":      gorm.Expr("excluded.effective_hours"),
+			"abs_user_id":          gorm.Expr("excluded.abs_user_id"),
+			"last_fetched_at":      gorm.Expr("excluded.last_fetched_at"),
+			"source":               gorm.Expr("excluded.source"),
+			"fetch_status":         gorm.Expr("excluded.fetch_status"),
+			"refresh_reason":       gorm.Expr("excluded.refresh_reason"),
+			"updated_at":           now,
+			"deleted_at":           nil,
 		}),
 	}
 }
@@ -3468,7 +3520,7 @@ func cachedDailyListeningDaysWithinTTL(userID int64, absUserID string, now time.
 	if stat.LastFetchedAt.IsZero() || now.Before(stat.LastFetchedAt) || now.Sub(stat.LastFetchedAt) >= dailyListeningABSFetchMinInterval {
 		return nil, false
 	}
-	return map[string]float64{SectDayKey(now): stat.RawSeconds}, true
+	return map[string]float64{SectDayKey(now): stat.CappedSeconds}, true
 }
 
 func RefreshDailyListeningStatsFromABS(userID int64, absUserID string) (map[string]float64, bool) {
@@ -3522,7 +3574,7 @@ func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force boo
 	// Order concurrent responses by request start, so an older request cannot
 	// overwrite a more recent snapshot just because its response arrived later.
 	fetchedAt := startedAt
-	adjustedDays, correctedDays, sessions, correctionErr := prepareDailyListeningDaysChecked(userID, absUserID, stats.Days, fetchedAt)
+	adjustedDays, correctedDays, sessions, validation, correctionErr := prepareDailyListeningDaysChecked(userID, absUserID, stats.Days, fetchedAt)
 	if correctionErr != nil {
 		outcome, failure = "correction_failed", textfmt.FormatPlainError(correctionErr)
 		log.Printf("每日听书跨日修正失败: user=%d err=%s", userID, textfmt.FormatPlainError(correctionErr))
@@ -3540,7 +3592,7 @@ func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force boo
 		}
 		return nil, false
 	}
-	if err := recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt); err != nil {
+	if err := recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt, validation); err != nil {
 		outcome, failure = "write_failed", textfmt.FormatPlainError(err)
 		return nil, false
 	}
@@ -3548,7 +3600,7 @@ func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force boo
 	if forAbuse {
 		return listeningAbuseProvenDays(sessions, abuseDays), true
 	}
-	return adjustedDays, true
+	return validation.Seconds, true
 }
 
 func refreshSectMembersDailyListeningStats(sectID int64, limit int) int {

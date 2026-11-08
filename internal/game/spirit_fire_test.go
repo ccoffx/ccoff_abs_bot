@@ -46,8 +46,8 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []model.DailyListeningStat{
-		{UserID: 1, DayKey: SectDayKey(launch.AddDate(0, 0, -1)), RawSeconds: 24 * 3600, EffectiveHours: 8.5},
-		{UserID: 1, DayKey: SectDayKey(now), RawSeconds: 24 * 3600, EffectiveHours: 8.5},
+		{UserID: 1, DayKey: SectDayKey(launch.AddDate(0, 0, -1)), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5},
+		{UserID: 1, DayKey: SectDayKey(now), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5},
 	}
 	if err := db.Create(&records).Error; err != nil {
 		t.Fatal(err)
@@ -70,7 +70,9 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 	if !ok || got != 8.5 {
 		t.Fatalf("sect %v %v", got, ok)
 	}
-	if err := db.Model(&records[1]).Updates(map[string]any{"raw_seconds": 8 * 3600, "effective_hours": 6.4}).Error; err != nil {
+	// A listening validation correction lowers eligible hours while retaining
+	// the original ABS total. Fire rewards must follow the corrected budget.
+	if err := db.Model(&records[1]).Updates(map[string]any{"capped_seconds": 8 * 3600, "effective_hours": 6.4}).Error; err != nil {
 		t.Fatal(err)
 	}
 	got, ok = totalCultivationEffectiveHoursFromDailyStats(1, now.AddDate(0, 0, 1))

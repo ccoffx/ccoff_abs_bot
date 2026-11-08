@@ -40,6 +40,7 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 	todayUnavailable := false
 	totalUnavailable := false
 	refreshNotice := ""
+	validationNotice := ""
 	var statsDays map[string]float64
 
 	// 精准映射 ABS 的统计数据结构
@@ -125,6 +126,7 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 				todayRawHours = abs.PositiveListeningSeconds(todayStat.RawSeconds) / 3600.0
 				todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + todayStat.SpiritFireHours
 				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-todayStat.SpiritFireHours, todayStat.SpiritFireHours)
+				validationNotice = fmt.Sprintf("\n今日有效计入听书: %.2f 小时", todayStat.CappedSeconds/3600) + dailyListeningValidationNotice(todayStat)
 			}
 		} else {
 			log.Printf("⚠️ 听书报告刷新失败，读取上次成功统计: user=%d abs=%s err=%s",
@@ -134,6 +136,7 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 				todayRawHours = abs.PositiveListeningSeconds(stat.RawSeconds) / 3600
 				todayEffectiveHours = stat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + stat.SpiritFireHours
 				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-stat.SpiritFireHours, stat.SpiritFireHours)
+				validationNotice = fmt.Sprintf("\n今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600) + dailyListeningValidationNotice(stat)
 				refreshNotice = fmt.Sprintf("\n⚠️ 本次刷新失败，今日时长及修为使用上次成功统计（%s）。", stat.LastFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
 			} else {
 				todayUnavailable, totalUnavailable = true, true
@@ -161,12 +164,13 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 	totalText := fmt.Sprintf("%.2f 小时", effectiveTotalHours)
 	if todayUnavailable {
 		todayText, todayRawText = "读取失败", "读取失败"
+		validationNotice = ""
 	}
 	if totalUnavailable {
 		totalText = "读取失败"
 	}
 	return fmt.Sprintf("📊 你的专属听书战绩%s\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %s\n✨ 净修炼时长: %s\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
-		refreshNotice, rawHours, todayRawText, totalText, todayText, spiritFireLine+suppressNotice, finishedCountText, listeningCountText)
+		refreshNotice, rawHours, todayRawText, totalText, todayText, spiritFireLine+validationNotice+suppressNotice, finishedCountText, listeningCountText)
 }
 
 func cachedDailyListeningReport(userID int64, absUserID string, now time.Time) (model.DailyListeningStat, float64, bool) {

@@ -29,8 +29,12 @@ type ABSCrossDaySessionScanCursor struct {
 
 	// A repair scan confirms missing historical sessions without lifting the
 	// normal five-page request limit. Evidence and page advancement commit together.
-	ReconcileStartedAt    *time.Time
-	ReconcileEvidenceJSON string
+	ReconcileStartedAt     *time.Time
+	ReconcileEvidenceJSON  string
+	DailyValidationVersion int
+	// Only reductions are deferred; additions still commit page by page. Pending
+	// observations retain their original timestamps across restarts and retries.
+	PendingObservationsJSON string
 }
 
 func (ABSCrossDaySessionScanCursor) TableName() string {
@@ -51,6 +55,7 @@ type ABSCrossDaySessionAdjustment struct {
 	SessionUpdatedAt time.Time
 	ListeningSeconds float64
 	AllocationJSON   string
+	RetiredDaysJSON  string    // Dates touched by previous versions; retained for cleanup.
 	Status           string    `gorm:"index;not null"`
 	Confidence       string    `gorm:"index;not null"`
 	Reason           string    `gorm:"index;not null"`
@@ -97,6 +102,8 @@ type DailyListeningStat struct {
 	DayKey    string `gorm:"index;not null"` // 北京时间日期 YYYY-MM-DD
 
 	RawSeconds           float64
+	OfficialRawSeconds   float64 // Unmodified listening-stats.days value for this date.
+	ValidationJSON       string  // Daily credit limits and diagnostics; never penalty evidence.
 	CappedSeconds        float64
 	BaseCultivationHours float64
 	SpiritFireHours      float64

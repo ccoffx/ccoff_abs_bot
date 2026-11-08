@@ -51,7 +51,7 @@ func scanListeningWindow(p *listeningWindowProgress, absID string, start, end ti
 				break
 			}
 			for _, session := range sessions {
-				seconds := guaranteedSessionSeconds(session, start, end)
+				seconds := rewardSessionSeconds(session, start, end)
 				if seconds > evidence[session.SessionKey] {
 					evidence[session.SessionKey] = seconds
 				}

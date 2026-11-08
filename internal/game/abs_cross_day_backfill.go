@@ -81,7 +81,7 @@ func seedABSCrossDaySessionScanCursors() error {
 		if user.TelegramID == 0 || absUserID == "" {
 			continue
 		}
-		rows = append(rows, model.ABSCrossDaySessionScanCursor{UserID: user.TelegramID, AbsUserID: absUserID})
+		rows = append(rows, model.ABSCrossDaySessionScanCursor{UserID: user.TelegramID, AbsUserID: absUserID, DailyValidationVersion: dailyListeningValidationVersion})
 	}
 	if len(rows) == 0 {
 		return nil
@@ -101,7 +101,7 @@ func EnsureABSCrossDaySessionScanCursor(userID int64, absUserID string) error {
 	if userID == 0 || absUserID == "" {
 		return fmt.Errorf("ABS_CROSS_DAY_CURSOR_ARGUMENT_INVALID")
 	}
-	row := model.ABSCrossDaySessionScanCursor{UserID: userID, AbsUserID: absUserID}
+	row := model.ABSCrossDaySessionScanCursor{UserID: userID, AbsUserID: absUserID, DailyValidationVersion: dailyListeningValidationVersion}
 	return storage.DB.Clauses(absCrossDaySessionCursorOnConflict(time.Now())).Create(&row).Error
 }
 
@@ -109,22 +109,24 @@ func absCrossDaySessionCursorOnConflict(now time.Time) clause.OnConflict {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	changed := "(abs_cross_day_session_scan_cursors.user_id <> excluded.user_id OR abs_cross_day_session_scan_cursors.last_error_code = 'binding_no_longer_current')"
+	changed := "(abs_cross_day_session_scan_cursors.user_id <> excluded.user_id OR abs_cross_day_session_scan_cursors.last_error_code = 'binding_no_longer_current' OR COALESCE(abs_cross_day_session_scan_cursors.daily_validation_version, 0) < excluded.daily_validation_version)"
 	return clause.OnConflict{
 		Columns: []clause.Column{{Name: "abs_user_id"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"user_id":                 gorm.Expr("excluded.user_id"),
-			"next_page":               gorm.Expr("CASE WHEN " + changed + " THEN 0 ELSE abs_cross_day_session_scan_cursors.next_page END"),
-			"pages_scanned":           gorm.Expr("CASE WHEN " + changed + " THEN 0 ELSE abs_cross_day_session_scan_cursors.pages_scanned END"),
-			"sessions_observed":       gorm.Expr("CASE WHEN " + changed + " THEN 0 ELSE abs_cross_day_session_scan_cursors.sessions_observed END"),
-			"completed":               gorm.Expr("CASE WHEN " + changed + " THEN false ELSE abs_cross_day_session_scan_cursors.completed END"),
-			"last_scanned_at":         gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.last_scanned_at END"),
-			"completed_at":            gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.completed_at END"),
-			"next_retry_at":           gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.next_retry_at END"),
-			"last_error_code":         gorm.Expr("CASE WHEN " + changed + " THEN '' ELSE abs_cross_day_session_scan_cursors.last_error_code END"),
-			"reconcile_started_at":    gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.reconcile_started_at END"),
-			"reconcile_evidence_json": gorm.Expr("CASE WHEN " + changed + " THEN '' ELSE abs_cross_day_session_scan_cursors.reconcile_evidence_json END"),
-			"updated_at":              now,
+			"daily_validation_version":  gorm.Expr("excluded.daily_validation_version"),
+			"user_id":                   gorm.Expr("excluded.user_id"),
+			"next_page":                 gorm.Expr("CASE WHEN " + changed + " THEN 0 ELSE abs_cross_day_session_scan_cursors.next_page END"),
+			"pages_scanned":             gorm.Expr("CASE WHEN " + changed + " THEN 0 ELSE abs_cross_day_session_scan_cursors.pages_scanned END"),
+			"sessions_observed":         gorm.Expr("CASE WHEN " + changed + " THEN 0 ELSE abs_cross_day_session_scan_cursors.sessions_observed END"),
+			"completed":                 gorm.Expr("CASE WHEN " + changed + " THEN false ELSE abs_cross_day_session_scan_cursors.completed END"),
+			"last_scanned_at":           gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.last_scanned_at END"),
+			"completed_at":              gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.completed_at END"),
+			"next_retry_at":             gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.next_retry_at END"),
+			"last_error_code":           gorm.Expr("CASE WHEN " + changed + " THEN '' ELSE abs_cross_day_session_scan_cursors.last_error_code END"),
+			"reconcile_started_at":      gorm.Expr("CASE WHEN " + changed + " THEN NULL ELSE abs_cross_day_session_scan_cursors.reconcile_started_at END"),
+			"reconcile_evidence_json":   gorm.Expr("CASE WHEN " + changed + " THEN '' ELSE abs_cross_day_session_scan_cursors.reconcile_evidence_json END"),
+			"pending_observations_json": gorm.Expr("CASE WHEN " + changed + " THEN '' ELSE abs_cross_day_session_scan_cursors.pending_observations_json END"),
+			"updated_at":                now,
 		}),
 	}
 }
@@ -172,7 +174,7 @@ func advanceABSCrossDaySessionBackfill(now time.Time) error {
 		var reconciliationDays map[string]float64
 		if fetchErr == nil && cursor.ReconcileStartedAt != nil {
 			if err := json.Unmarshal([]byte(cursor.ReconcileEvidenceJSON), &evidence); err != nil {
-				return fmt.Errorf("decode ABS reconciliation evidence: %w", err)
+				return recordABSBackfillFailure(cursor, now, fmt.Errorf("decode ABS reconciliation evidence: %w", err))
 			}
 			evidence.observe(sessions, rawCount)
 			if complete && evidence.Valid {
@@ -180,17 +182,14 @@ func advanceABSCrossDaySessionBackfill(now time.Time) error {
 			}
 		}
 		if fetchErr != nil {
-			retryAt := now.Add(absCrossDayBackfillRetryDelay)
-			updateErr := storage.DB.Model(&model.ABSCrossDaySessionScanCursor{}).
-				Where("id = ? AND user_id = ? AND next_page = ?", cursor.ID, cursor.UserID, page).
-				Where("reconcile_started_at IS ?", cursor.ReconcileStartedAt).Updates(map[string]interface{}{
-				"next_retry_at":   retryAt,
-				"last_error_code": textfmt.TruncateRunes(textfmt.FormatPlainError(fetchErr), 120),
-			}).Error
-			if updateErr != nil {
-				return fmt.Errorf("fetch=%v cursor_update=%w", fetchErr, updateErr)
+			return recordABSBackfillFailure(cursor, now, fetchErr)
+		}
+
+		var pending []model.ABSCrossDaySessionAdjustment
+		if cursor.PendingObservationsJSON != "" {
+			if err := json.Unmarshal([]byte(cursor.PendingObservationsJSON), &pending); err != nil {
+				return recordABSBackfillFailure(cursor, now, fmt.Errorf("decode ABS pending observations: %w", err))
 			}
-			return fetchErr
 		}
 
 		observations, diagnostics := buildABSCrossDaySessionObservations(cursor.UserID, cursor.AbsUserID, sessions, observedAt)
@@ -202,64 +201,97 @@ func advanceABSCrossDaySessionBackfill(now time.Time) error {
 		if cursor.ReconcileStartedAt != nil {
 			body, err := json.Marshal(evidence)
 			if err != nil {
-				return err
+				return recordABSBackfillFailure(cursor, now, err)
 			}
 			evidenceJSON = string(body)
 		}
-		err = storage.DB.Transaction(func(tx *gorm.DB) error {
-			if err := lockCurrentListeningBindingInTx(tx, cursor.UserID, cursor.AbsUserID); err != nil {
-				return err
-			}
-			if err := upsertABSCrossDaySessionObservations(tx, observations); err != nil {
-				return err
-			}
-			if err := recordSectRetreatListeningSessionsInTx(tx, cursor.UserID, cursor.AbsUserID, sessions); err != nil {
-				return err
-			}
-			updates := map[string]interface{}{
-				"next_page":         page + 1,
-				"pages_scanned":     gorm.Expr("pages_scanned + 1"),
-				"sessions_observed": gorm.Expr("sessions_observed + ?", observationCount),
-				"completed":         complete,
-				"last_scanned_at":   observedAt,
-				"next_retry_at":     nil,
-				"last_error_code":   "",
-			}
-			if complete {
-				updates["completed_at"] = observedAt
-			}
-			if cursor.ReconcileStartedAt != nil {
-				updates["reconcile_evidence_json"] = evidenceJSON
-				if complete {
-					if err := invalidateMissingABSCrossDaySessionsInTx(tx, cursor.UserID, cursor.AbsUserID, reconciliationDays, evidence, *cursor.ReconcileStartedAt, observedAt); err != nil {
+		combined := mergeABSBackfillObservations(pending, observations)
+		var pendingJSON string
+		commitPage := func(sourceDays map[string]float64) error {
+			return storage.DB.Transaction(func(tx *gorm.DB) error {
+				if err := lockCurrentListeningBindingInTx(tx, cursor.UserID, cursor.AbsUserID); err != nil {
+					return err
+				}
+				toApply := combined
+				pendingJSON = ""
+				if !complete {
+					previous, eligible, err := prepareABSCrossDaySessionObservationsInTx(tx, combined)
+					if err != nil {
 						return err
 					}
-					updates["reconcile_started_at"], updates["reconcile_evidence_json"] = nil, ""
+					var deferred []model.ABSCrossDaySessionAdjustment
+					toApply, deferred = splitABSBackfillReductions(previous, eligible)
+					if len(deferred) > 0 {
+						body, err := json.Marshal(deferred)
+						if err != nil {
+							return err
+						}
+						pendingJSON = string(body)
+					}
 				}
+				if err := upsertABSCrossDaySessionObservations(tx, toApply, sourceDays); err != nil {
+					return err
+				}
+				if err := recordSectRetreatListeningSessionsInTx(tx, cursor.UserID, cursor.AbsUserID, sessions); err != nil {
+					return err
+				}
+				updates := map[string]interface{}{
+					"next_page":                 page + 1,
+					"pages_scanned":             gorm.Expr("pages_scanned + 1"),
+					"sessions_observed":         gorm.Expr("sessions_observed + ?", observationCount),
+					"completed":                 complete,
+					"last_scanned_at":           observedAt,
+					"next_retry_at":             nil,
+					"last_error_code":           "",
+					"pending_observations_json": pendingJSON,
+				}
+				if complete {
+					updates["completed_at"] = observedAt
+				}
+				if cursor.ReconcileStartedAt != nil {
+					updates["reconcile_evidence_json"] = evidenceJSON
+					if complete {
+						if err := invalidateMissingABSCrossDaySessionsInTx(tx, cursor.UserID, cursor.AbsUserID, reconciliationDays, evidence, *cursor.ReconcileStartedAt, observedAt); err != nil {
+							return err
+						}
+						updates["reconcile_started_at"], updates["reconcile_evidence_json"] = nil, ""
+					}
+				}
+				res := tx.Model(&model.ABSCrossDaySessionScanCursor{}).
+					Where(
+						"id = ? AND user_id = ? AND abs_user_id = ? AND next_page = ? AND completed = ?",
+						cursor.ID, cursor.UserID, cursor.AbsUserID, page, false,
+					).
+					Where("reconcile_started_at IS ?", cursor.ReconcileStartedAt).
+					Updates(updates)
+				if res.Error != nil {
+					return res.Error
+				}
+				if res.RowsAffected != 1 {
+					return fmt.Errorf("ABS_CROSS_DAY_CURSOR_ADVANCE_CONFLICT")
+				}
+				return nil
+			})
+		}
+		err = commitPage(reconciliationDays)
+		if errors.Is(err, errABSListeningStatsRequired) {
+			// Reductions commit only after all pages have been collected, using
+			// fresh official totals and the version-accepted complete ledger.
+			var sourceDays map[string]float64
+			sourceDays, err = fetchABSCrossDayReconciliationDays(cursor.AbsUserID)
+			if err == nil {
+				err = commitPage(sourceDays)
 			}
-			res := tx.Model(&model.ABSCrossDaySessionScanCursor{}).
-				Where(
-					"id = ? AND user_id = ? AND abs_user_id = ? AND next_page = ? AND completed = ?",
-					cursor.ID, cursor.UserID, cursor.AbsUserID, page, false,
-				).
-				Where("reconcile_started_at IS ?", cursor.ReconcileStartedAt).
-				Updates(updates)
-			if res.Error != nil {
-				return res.Error
-			}
-			if res.RowsAffected != 1 {
-				return fmt.Errorf("ABS_CROSS_DAY_CURSOR_ADVANCE_CONFLICT")
-			}
-			return nil
-		})
+		}
 		if err != nil {
-			return err
+			return recordABSBackfillFailure(cursor, now, err)
 		}
 		if len(diagnostics) > 0 {
 			log.Printf("ABS cross-day history page persisted: user=%d abs=%s page=%d raw=%d tracked=%d", cursor.UserID, textfmt.FormatPlainValue(cursor.AbsUserID), page, rawCount, len(observations))
 		}
 		cursor.NextPage = page + 1
 		cursor.ReconcileEvidenceJSON = evidenceJSON
+		cursor.PendingObservationsJSON = pendingJSON
 		if complete {
 			log.Printf("ABS cross-day history scan completed: user=%d abs=%s pages=%d", cursor.UserID, textfmt.FormatPlainValue(cursor.AbsUserID), cursor.NextPage)
 			return nil

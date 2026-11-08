@@ -56,6 +56,7 @@ func TestWorldBossCountsOnlyProvenPlaybackInsideParticipationWindow(t *testing.T
 		{"after event", time.Hour, 2 * time.Hour, 3600, 0, false},
 		{"before event", -2 * time.Hour, -time.Hour, 3600, 0, false},
 		{"inside event", 0, 30 * time.Minute, 1800, 0.5, false},
+		{"small client clock skew", 0, 30 * time.Minute, 1819, 0.5, false},
 		{"cross start", -30 * time.Minute, 30 * time.Minute, 3600, 0.5, false},
 		{"ambiguous pauses", -time.Hour, 2 * time.Hour, 3600, 0, false},
 		{"invalid duration", 0, 30 * time.Minute, 3600, 0, false},

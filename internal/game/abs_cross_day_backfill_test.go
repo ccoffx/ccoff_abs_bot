@@ -61,7 +61,8 @@ func TestHistoricalBackfillRecordsRetreatBeyondRecentFivePages(t *testing.T) {
 		}
 		sessions := make([]map[string]interface{}, dailyListeningSessionPageSize)
 		for i := range sessions {
-			sessions[i] = map[string]interface{}{"id": fmt.Sprintf("recent-%d-%d", page, i), "userId": "abs1", "date": "2026-10-27", "startedAt": "2026-10-27T10:00:00+08:00", "updatedAt": "2026-10-27T10:01:00+08:00", "timeListening": 60}
+			// Fill pagination without introducing playback absent from daily stats.
+			sessions[i] = map[string]interface{}{"id": fmt.Sprintf("recent-%d-%d", page, i), "userId": "abs1", "date": "2026-10-27", "startedAt": "2026-10-27T10:00:00+08:00", "updatedAt": "2026-10-27T10:01:00+08:00", "timeListening": 0}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"sessions": sessions})
 	}))
@@ -170,7 +171,7 @@ func TestHistoricalBackfillRollsBackEvidenceAndCursorTogether(t *testing.T) {
 			if err := storage.DB.Exec("DROP TRIGGER reject_backfill").Error; err != nil {
 				t.Fatal(err)
 			}
-			if err := advanceABSCrossDaySessionBackfill(time.Now()); err != nil {
+			if err := advanceABSCrossDaySessionBackfill(time.Now().Add(absCrossDayBackfillRetryDelay)); err != nil {
 				t.Fatal(err)
 			}
 			if err := storage.DB.First(&cursor, cursor.ID).Error; err != nil {

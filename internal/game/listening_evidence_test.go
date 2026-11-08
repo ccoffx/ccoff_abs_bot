@@ -63,6 +63,55 @@ func TestGuaranteedPlaybackWindowBounds(t *testing.T) {
 	}
 }
 
+func TestRewardPlaybackWindowClockSkew(t *testing.T) {
+	start, _ := time.Parse(time.RFC3339, "2026-11-07T13:00:00+08:00")
+	end := start.Add(2 * time.Hour)
+	for _, tc := range []struct {
+		name         string
+		offset, wall time.Duration
+		listen, want float64
+	}{
+		{"exact wall time", 0, 2 * time.Hour, 7200, 7200},
+		{"client skew", 0, 2 * time.Hour, 7218.960275532873, 7200},
+		{"tolerance boundary", 0, 2 * time.Hour, 7320, 7200},
+		{"outside tolerance", 0, 2 * time.Hour, 7320.001, 0},
+		{"clearly invalid duration", 0, 2 * time.Hour, 10800, 0},
+		{"short client session", 0, 1738 * time.Millisecond, 15.061240748751207, 1.738},
+		{"session covers wider window", -time.Hour, 4 * time.Hour, 14419, 7200},
+		{"session partially overlaps", -time.Hour, 2 * time.Hour, 7219, 3600},
+		{"before participation", -time.Hour, time.Hour, 3619, 0},
+		{"after event", 2 * time.Hour, time.Hour, 3619, 0},
+		{"pauses may all fall inside event", -time.Hour, 4 * time.Hour, 7200, 0},
+		{"pauses cannot all fall inside event", -time.Hour, 4 * time.Hour, 10800, 3600},
+		{"zero wall time", 0, 0, 19, 0},
+		{"negative wall time", 0, -time.Second, 19, 0},
+		{"zero listening", 0, time.Hour, 0, 0},
+		{"negative listening", 0, time.Hour, -1, 0},
+		{"invalid listening", 0, time.Hour, math.NaN(), 0},
+		{"infinite listening", 0, time.Hour, math.Inf(1), 0},
+		{"negative infinite listening", 0, time.Hour, math.Inf(-1), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := absListeningSession{SessionKey: "session", StartedAt: start.Add(tc.offset), UpdatedAt: start.Add(tc.offset + tc.wall), ListeningSeconds: tc.listen, HasListeningTime: true}
+			got := rewardSessionSeconds(session, start, end)
+			if math.IsNaN(got) || math.Abs(got-tc.want) > 1e-9 {
+				t.Fatalf("got %.9f seconds, want %.9f", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestListeningAbuseDoesNotUseToleratedClockSkew(t *testing.T) {
+	start, _ := time.Parse(time.RFC3339, "2026-11-07T13:00:00+08:00")
+	session := absListeningSession{SessionKey: "skewed", StartedAt: start, UpdatedAt: start.Add(2 * time.Hour), ListeningSeconds: 7219, HasListeningTime: true}
+	if seconds := guaranteedSessionSeconds(session, start, session.UpdatedAt); seconds != 0 {
+		t.Fatalf("client clock skew became strict evidence: %f", seconds)
+	}
+	if days := listeningAbuseProvenDays([]absListeningSession{session}, []string{SectDayKey(start)}); len(days) != 0 {
+		t.Fatalf("client clock skew became penalty evidence: %v", days)
+	}
+}
+
 func TestRetreatIgnoresLatePlaybackAndPersistsProvenEvidence(t *testing.T) {
 	setupListeningAbuseScheduleDB(t)
 	if err := storage.DB.Create(&model.User{TelegramID: 1, AbsUserID: "abs1"}).Error; err != nil {
@@ -91,11 +140,13 @@ func TestRetreatIgnoresLatePlaybackAndPersistsProvenEvidence(t *testing.T) {
 	check(0)
 	// An in-window observation proves one hour. A later snapshot with pauses
 	// cannot erase that earlier evidence or count the same session again.
-	observed := absListeningSession{SessionKey: "observed", StartedAt: start, UpdatedAt: start.Add(time.Hour), ListeningSeconds: 3600, HasListeningTime: true}
+	observed := absListeningSession{SessionKey: "observed", StartedAt: start, UpdatedAt: start.Add(time.Hour), ListeningSeconds: 3619, HasListeningTime: true}
 	if err := recordSectRetreatListeningSessions(1, "abs1", []absListeningSession{observed, observed}); err != nil {
 		t.Fatal(err)
 	}
 	check(0.2)
+	// The tolerated 19-second excess must never become additional playback.
+	observed.ListeningSeconds = 3600
 	observed.UpdatedAt = start.Add(4 * time.Hour)
 	if err := recordSectRetreatListeningSessions(1, "abs1", []absListeningSession{observed, late}); err != nil {
 		t.Fatal(err)

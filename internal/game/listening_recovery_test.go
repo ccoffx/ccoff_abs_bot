@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -150,6 +151,72 @@ func TestMissingSourceAllowsAbuseEvidenceWithoutWritingDailyCache(t *testing.T) 
 	after := recoveryListeningDay(t, today)
 	if after.RawSeconds != before.RawSeconds || !after.LastFetchedAt.Equal(before.LastFetchedAt) || after.Source != before.Source {
 		t.Fatalf("evidence-only scan changed daily cache: %+v", after)
+	}
+}
+
+func TestSameDayAbuseEvidenceWithMismatchedSourceStatistics(t *testing.T) {
+	for _, tc := range []struct{ missingSource, missingHistory bool }{{true, false}, {false, false}, {true, true}, {false, true}} {
+		t.Run(fmt.Sprintf("missing_source_%t_missing_history_%t", tc.missingSource, tc.missingHistory), func(t *testing.T) {
+			setupRetreatBackfillDB(t)
+			start := time.Now().In(storage.DailyOperationsLocation).AddDate(0, 0, -2)
+			start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+			day := SectDayKey(start)
+			var mismatch atomic.Bool
+			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+					days := map[string]float64{day: 86400}
+					if tc.missingHistory {
+						days[day] += 3600
+					}
+					if mismatch.Load() {
+						if tc.missingSource {
+							days = map[string]float64{}
+						} else {
+							days[day] = 0
+						}
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"days": days})
+					return
+				}
+				sessions := []any{}
+				for _, id := range []string{"first", "second"} {
+					s := bossSession(id, start, start.Add(12*time.Hour), 43200)
+					s["date"] = day
+					sessions = append(sessions, s)
+				}
+				if tc.missingHistory && !mismatch.Load() {
+					old := bossSession("old", start.Add(time.Hour), start.Add(2*time.Hour), 3600)
+					old["date"] = day
+					sessions = append(sessions, old)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
+			})
+			if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 43200 {
+				t.Fatalf("initial daily credit=%v ok=%t", days, ok)
+			}
+			before := recoveryListeningDay(t, day)
+			mismatch.Store(true)
+			proven, ok := refreshDailyListeningStatsFromABS(1, "abs1", true, day)
+			if tc.missingSource {
+				if !ok || proven[day] != 86400 {
+					t.Fatalf("missing source suppressed strict same-day evidence: %v ok=%t", proven, ok)
+				}
+			} else if ok {
+				t.Fatalf("explicitly conflicting statistics must wait for retry: %v", proven)
+			}
+			if tc.missingHistory {
+				var cursor model.ABSCrossDaySessionScanCursor
+				if err := storage.DB.Where("abs_user_id = ?", "abs1").First(&cursor).Error; err != nil || cursor.ReconcileStartedAt == nil || cursor.Completed {
+					t.Fatalf("missing historical session was not scheduled for reconciliation: %+v err=%v", cursor, err)
+				}
+			}
+			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+				t.Fatal("ordinary refresh accepted inconsistent source statistics")
+			}
+			if after := recoveryListeningDay(t, day); !reflect.DeepEqual(before, after) {
+				t.Fatalf("mismatched statistics changed the daily cache: before=%+v after=%+v", before, after)
+			}
+		})
 	}
 }
 
@@ -302,7 +369,7 @@ func TestHistoricalDeletionReconciliationResumesAndCommitsAtomically(t *testing.
 	if err := storage.DB.Exec("DROP TRIGGER reject_repair").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := advanceABSCrossDaySessionBackfill(time.Now().Add(absCrossDayBackfillRetryDelay)); err != nil {
+	if err := advanceABSCrossDaySessionBackfill(time.Now().Add(2 * absCrossDayBackfillRetryDelay)); err != nil {
 		t.Fatal(err)
 	}
 	resumed = model.ABSCrossDaySessionScanCursor{}

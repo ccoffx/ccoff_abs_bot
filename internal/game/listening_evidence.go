@@ -33,6 +33,18 @@ func guaranteedSessionSeconds(session absListeningSession, start, end time.Time)
 	return math.Max(0, session.ListeningSeconds-(wall-overlap))
 }
 
+// rewardSessionSeconds tolerates the same small client/server clock skew as
+// cross-day reconciliation, but never credits more than the session wall time.
+// Keep this normalization out of penalty evidence, which requires strict bounds.
+func rewardSessionSeconds(session absListeningSession, start, end time.Time) float64 {
+	wall := session.UpdatedAt.Sub(session.StartedAt).Seconds()
+	if session.ListeningSeconds > wall+dailyListeningCrossDayClockTolerance.Seconds() {
+		return 0
+	}
+	session.ListeningSeconds = math.Min(session.ListeningSeconds, wall)
+	return guaranteedSessionSeconds(session, start, end)
+}
+
 // Penalties use only session evidence, never the official source-day assignment
 // or proportional estimates. Missing history can reduce this lower bound, but
 // cannot inflate it. Only the explicitly requested scan dates are evaluated;

@@ -115,15 +115,18 @@ func logDailyListeningWrite(userID int64, absUserID string, previous, records []
 		before[stat.DayKey] = stat
 	}
 	type dayChange struct {
-		DayKey                 string    `json:"day_key"`
-		PreviousPresent        bool      `json:"previous_present"`
-		PreviousRawSeconds     float64   `json:"previous_raw_seconds"`
-		RawSeconds             float64   `json:"raw_seconds"`
-		PreviousEffectiveHours float64   `json:"previous_effective_hours"`
-		EffectiveHours         float64   `json:"effective_hours"`
-		PreviousFetchedAt      time.Time `json:"previous_fetched_at"`
-		Source                 string    `json:"source"`
-		Outcome                string    `json:"outcome"`
+		DayKey                 string          `json:"day_key"`
+		PreviousPresent        bool            `json:"previous_present"`
+		PreviousRawSeconds     float64         `json:"previous_raw_seconds"`
+		RawSeconds             float64         `json:"raw_seconds"`
+		PreviousEffectiveHours float64         `json:"previous_effective_hours"`
+		EffectiveHours         float64         `json:"effective_hours"`
+		PreviousFetchedAt      time.Time       `json:"previous_fetched_at"`
+		Source                 string          `json:"source"`
+		Outcome                string          `json:"outcome"`
+		OfficialSeconds        float64         `json:"official_seconds"`
+		CreditedSeconds        float64         `json:"credited_seconds"`
+		Validation             json.RawMessage `json:"validation,omitempty"`
 	}
 	changes := make([]dayChange, 0)
 	yesterday := SectDayKey(fetchedAt.AddDate(0, 0, -1))
@@ -131,14 +134,19 @@ func logDailyListeningWrite(userID int64, absUserID string, previous, records []
 		old, exists := before[stat.DayKey]
 		// Keep every recent observation and every change to an existing historic
 		// day, without logging an entire imported history on first registration.
-		if stat.DayKey < yesterday && (!exists || (old.RawSeconds == stat.RawSeconds && old.EffectiveHours == stat.EffectiveHours && old.Source == stat.Source)) {
+		if stat.DayKey < yesterday && (!exists || (old.RawSeconds == stat.RawSeconds && old.CappedSeconds == stat.CappedSeconds && old.EffectiveHours == stat.EffectiveHours && old.Source == stat.Source && old.ValidationJSON == stat.ValidationJSON)) {
 			continue
 		}
 		outcome := "applied"
 		if stale {
 			outcome = "ignored_older_snapshot"
 		}
-		changes = append(changes, dayChange{stat.DayKey, exists, old.RawSeconds, stat.RawSeconds, old.EffectiveHours, stat.EffectiveHours, old.LastFetchedAt, stat.Source, outcome})
+		changes = append(changes, dayChange{
+			DayKey: stat.DayKey, PreviousPresent: exists, PreviousRawSeconds: old.RawSeconds, RawSeconds: stat.RawSeconds,
+			PreviousEffectiveHours: old.EffectiveHours, EffectiveHours: stat.EffectiveHours, PreviousFetchedAt: old.LastFetchedAt,
+			Source: stat.Source, Outcome: outcome, OfficialSeconds: stat.OfficialRawSeconds, CreditedSeconds: stat.CappedSeconds,
+			Validation: json.RawMessage(stat.ValidationJSON),
+		})
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].DayKey < changes[j].DayKey })
 	logDailyListeningDiagnostic("write", userID, absUserID, map[string]any{"fetched_at": fetchedAt, "days": changes})

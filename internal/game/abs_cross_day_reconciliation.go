@@ -51,7 +51,7 @@ func (e *absCrossDayReconciliationEvidence) observe(sessions []absListeningSessi
 func reconcileCompleteABSCrossDaySnapshotInTx(tx *gorm.DB, userID int64, absUserID string, days map[string]float64, snapshot absListeningSessionSnapshot) error {
 	var rows []model.ABSCrossDaySessionAdjustment
 	if err := tx.Where("user_id = ? AND abs_user_id = ? AND status IN ? AND algorithm_version = ?", userID, strings.TrimSpace(absUserID),
-		[]string{crossDayAdjustmentStatusAccepted, crossDayAdjustmentStatusBounded}, dailyListeningCrossDayAlgorithmVersion).Find(&rows).Error; err != nil {
+		[]string{crossDayAdjustmentStatusAccepted, crossDayAdjustmentStatusBounded, crossDayAdjustmentStatusSameDay, crossDayAdjustmentStatusUncertain}, dailyListeningCrossDayAlgorithmVersion).Find(&rows).Error; err != nil {
 		return err
 	}
 	evidence := newABSCrossDayReconciliationEvidence()
@@ -72,7 +72,7 @@ func invalidateMissingABSCrossDaySessionsInTx(tx *gorm.DB, userID int64, absUser
 	}
 	var rows []model.ABSCrossDaySessionAdjustment
 	if err := tx.Where("user_id = ? AND abs_user_id = ? AND session_key IN ? AND status IN ? AND algorithm_version = ?", userID, strings.TrimSpace(absUserID), keys,
-		[]string{crossDayAdjustmentStatusAccepted, crossDayAdjustmentStatusBounded}, dailyListeningCrossDayAlgorithmVersion).Find(&rows).Error; err != nil {
+		[]string{crossDayAdjustmentStatusAccepted, crossDayAdjustmentStatusBounded, crossDayAdjustmentStatusSameDay, crossDayAdjustmentStatusUncertain}, dailyListeningCrossDayAlgorithmVersion).Find(&rows).Error; err != nil {
 		return err
 	}
 	for _, row := range rows {
@@ -83,8 +83,12 @@ func invalidateMissingABSCrossDaySessionsInTx(tx *gorm.DB, userID int64, absUser
 			math.Abs(evidence.DaySeconds[row.SourceDay]-abs.PositiveListeningSeconds(days[row.SourceDay])) > 1e-6 {
 			continue
 		}
+		status := crossDayAdjustmentStatusInvalidated
+		if row.Status == crossDayAdjustmentStatusSameDay || row.Status == crossDayAdjustmentStatusUncertain {
+			status = crossDayAdjustmentStatusDeleted
+		}
 		if err := tx.Model(&row).Updates(map[string]any{
-			"status": crossDayAdjustmentStatusInvalidated, "confidence": crossDayAdjustmentConfidenceUncertain,
+			"status": status, "confidence": crossDayAdjustmentConfidenceUncertain,
 			"reason": "missing_from_complete_history", "observed_at": observedAt,
 		}).Error; err != nil {
 			return err
@@ -93,25 +97,33 @@ func invalidateMissingABSCrossDaySessionsInTx(tx *gorm.DB, userID int64, absUser
 	return nil
 }
 
-func scheduleABSCrossDayReconciliation(userID int64, absUserID string, days map[string]float64, snapshot absListeningSessionSnapshot, persisted []absListeningSession) error {
+func missingABSListeningSessionEvidence(days map[string]float64, snapshot absListeningSessionSnapshot, persisted []absListeningSession) absCrossDayReconciliationEvidence {
 	totals, seen := make(map[string]float64), make(map[string]bool)
 	for _, session := range snapshot.Sessions {
 		seen[session.SessionKey] = true
 	}
-	for _, session := range persisted {
-		if session.CrossDayStatus != crossDayAdjustmentStatusInvalidated {
-			totals[session.DateKey] += session.ListeningSeconds
-		}
+	active := latestDailyListeningSessions(persisted)
+	for _, session := range active {
+		totals[session.DateKey] += session.ListeningSeconds
 	}
 	evidence := newABSCrossDayReconciliationEvidence()
-	for _, session := range persisted {
-		if session.CrossDayStatus != crossDayAdjustmentStatusInvalidated && !seen[session.SessionKey] && totals[session.DateKey] > abs.PositiveListeningSeconds(days[session.DateKey])+1e-6 {
+	for _, session := range active {
+		if !seen[session.SessionKey] && totals[session.DateKey] > abs.PositiveListeningSeconds(days[session.DateKey])+1e-6 {
 			evidence.addCandidate(session.SessionKey, session.DateKey)
 		}
 	}
+	return evidence
+}
+
+func scheduleABSCrossDayReconciliation(userID int64, absUserID string, days map[string]float64, snapshot absListeningSessionSnapshot, persisted []absListeningSession) error {
+	evidence := missingABSListeningSessionEvidence(days, snapshot, persisted)
 	if len(evidence.MissingSessions) == 0 {
 		return nil
 	}
+	return scheduleABSListeningReconciliationEvidence(userID, absUserID, evidence)
+}
+
+func scheduleABSListeningReconciliationEvidence(userID int64, absUserID string, evidence absCrossDayReconciliationEvidence) error {
 	body, err := json.Marshal(evidence)
 	if err != nil {
 		return err
@@ -120,7 +132,7 @@ func scheduleABSCrossDayReconciliation(userID int64, absUserID string, days map[
 		if err := lockCurrentListeningBindingInTx(tx, userID, absUserID); err != nil {
 			return err
 		}
-		cursor := model.ABSCrossDaySessionScanCursor{UserID: userID, AbsUserID: strings.TrimSpace(absUserID)}
+		cursor := model.ABSCrossDaySessionScanCursor{UserID: userID, AbsUserID: strings.TrimSpace(absUserID), DailyValidationVersion: dailyListeningValidationVersion}
 		if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "abs_user_id"}}, DoNothing: true}).Create(&cursor).Error; err != nil {
 			return err
 		}
@@ -131,9 +143,11 @@ func scheduleABSCrossDayReconciliation(userID int64, absUserID string, days map[
 			return nil // Repeated manual refreshes must not restart an in-flight scan.
 		}
 		return tx.Model(&cursor).Updates(map[string]any{
-			"user_id": userID, "next_page": 0, "pages_scanned": 0, "sessions_observed": 0,
+			"daily_validation_version": dailyListeningValidationVersion,
+			"user_id":                  userID, "next_page": 0, "pages_scanned": 0, "sessions_observed": 0,
 			"completed": false, "completed_at": nil, "last_scanned_at": nil, "next_retry_at": nil, "last_error_code": "",
 			"reconcile_started_at": time.Now(), "reconcile_evidence_json": string(body),
+			"pending_observations_json": "",
 		}).Error
 	})
 }
