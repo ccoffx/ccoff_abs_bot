@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/realm"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/textfmt"
 )
@@ -155,6 +156,17 @@ func ValidateCultivationRuleSet(rules *CultivationRuleSet) error {
 	if len(rules.Realms) == 0 {
 		return errors.New("realm configs are empty")
 	}
+	for major := 0; major <= realm.Emperor; major++ {
+		if _, ok := rules.Realms[major]; !ok {
+			return fmt.Errorf("missing major realm: %d", major)
+		}
+		if len(rules.MinorRealms[major]) != realm.StageCount(major) {
+			return fmt.Errorf("major %d requires %d minor stages", major, realm.StageCount(major))
+		}
+	}
+	if len(rules.Realms) != realm.Emperor+1 {
+		return fmt.Errorf("unexpected realm count: %d", len(rules.Realms))
+	}
 
 	maxRealmCount := 0
 	for major, realm := range rules.Realms {
@@ -196,8 +208,8 @@ func ValidateCultivationRuleSet(rules *CultivationRuleSet) error {
 		lastHours := -1.0
 
 		for _, minor := range minors {
-			if minor.MinorRealm < 1 || minor.MinorRealm > 4 {
-				return fmt.Errorf("minor realm must be 1-4: major=%d minor=%d", major, minor.MinorRealm)
+			if err := realm.ValidateStage(major, minor.MinorRealm); err != nil {
+				return err
 			}
 
 			if seen[minor.MinorRealm] {
@@ -411,24 +423,7 @@ func createDefaultCultivationRealmConfigIfMissingInTx(tx *gorm.DB, cfg *model.Cu
 	return nil
 }
 
-func defaultCultivationRealmConfigs() []model.CultivationRealmConfig {
-	return []model.CultivationRealmConfig{
-		{MajorRealm: 0, Name: "斗之气", TitleName: "斗之气", MinTotalHours: 0, MaxTotalHours: 10, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 1, Name: "斗者", TitleName: "斗者", MinTotalHours: 10, MaxTotalHours: 50, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 2, Name: "斗师", TitleName: "斗师", MinTotalHours: 50, MaxTotalHours: 150, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 3, Name: "大斗师", TitleName: "大斗师", MinTotalHours: 150, MaxTotalHours: 350, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 4, Name: "斗灵", TitleName: "斗灵", MinTotalHours: 350, MaxTotalHours: 750, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 5, Name: "斗王", TitleName: "斗王", MinTotalHours: 750, MaxTotalHours: 1500, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 6, Name: "斗皇", TitleName: "斗皇", MinTotalHours: 1500, MaxTotalHours: 2400, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 7, Name: "斗宗", TitleName: "斗宗", MinTotalHours: 2400, MaxTotalHours: 3700, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 8, Name: "斗尊", TitleName: "斗尊", MinTotalHours: 3700, MaxTotalHours: 5500, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 9, Name: "九转斗尊", TitleName: "九转斗尊", MinTotalHours: 5500, MaxTotalHours: 8100, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 10, Name: "半圣", TitleName: "半圣", MinTotalHours: 8100, MaxTotalHours: 11500, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 11, Name: "斗圣", TitleName: "斗圣", MinTotalHours: 11500, MaxTotalHours: 16100, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 12, Name: "半帝", TitleName: "半帝", MinTotalHours: 16100, MaxTotalHours: 22300, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 13, Name: "斗帝", TitleName: "斗帝", MinTotalHours: 22300, MaxTotalHours: 0, IsMaxRealm: true, Enabled: true},
-	}
-}
+func defaultCultivationRealmConfigs() []model.CultivationRealmConfig { return realm.Defaults() }
 
 func seedDefaultMinorRealmConfigs(tx *gorm.DB) error {
 	defaults := defaultCultivationMinorRealmConfigs()
@@ -455,7 +450,7 @@ func createDefaultCultivationMinorRealmConfigIfMissingInTx(tx *gorm.DB, cfg *mod
 		return fmt.Errorf("CULTIVATION_MINOR_REALM_CONFIG_INVALID")
 	}
 	entry := *cfg
-	if entry.MajorRealm <= 0 || entry.MinorRealm <= 0 || strings.TrimSpace(entry.Name) == "" {
+	if entry.MajorRealm < 0 || entry.MinorRealm <= 0 || strings.TrimSpace(entry.Name) == "" {
 		return fmt.Errorf("CULTIVATION_MINOR_REALM_CONFIG_INVALID")
 	}
 	res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&entry)
@@ -470,72 +465,7 @@ func createDefaultCultivationMinorRealmConfigIfMissingInTx(tx *gorm.DB, cfg *mod
 }
 
 func defaultCultivationMinorRealmConfigs() []model.CultivationMinorRealmConfig {
-	return []model.CultivationMinorRealmConfig{
-		{MajorRealm: 1, MinorRealm: 1, Name: "初期", RequiredHours: 10, Enabled: true},
-		{MajorRealm: 1, MinorRealm: 2, Name: "中期", RequiredHours: 20, Enabled: true},
-		{MajorRealm: 1, MinorRealm: 3, Name: "后期", RequiredHours: 30, Enabled: true},
-		{MajorRealm: 1, MinorRealm: 4, Name: "圆满", RequiredHours: 40, Enabled: true},
-
-		{MajorRealm: 2, MinorRealm: 1, Name: "初期", RequiredHours: 50, Enabled: true},
-		{MajorRealm: 2, MinorRealm: 2, Name: "中期", RequiredHours: 75, Enabled: true},
-		{MajorRealm: 2, MinorRealm: 3, Name: "后期", RequiredHours: 100, Enabled: true},
-		{MajorRealm: 2, MinorRealm: 4, Name: "圆满", RequiredHours: 125, Enabled: true},
-
-		{MajorRealm: 3, MinorRealm: 1, Name: "初期", RequiredHours: 150, Enabled: true},
-		{MajorRealm: 3, MinorRealm: 2, Name: "中期", RequiredHours: 200, Enabled: true},
-		{MajorRealm: 3, MinorRealm: 3, Name: "后期", RequiredHours: 250, Enabled: true},
-		{MajorRealm: 3, MinorRealm: 4, Name: "圆满", RequiredHours: 300, Enabled: true},
-
-		{MajorRealm: 4, MinorRealm: 1, Name: "初期", RequiredHours: 350, Enabled: true},
-		{MajorRealm: 4, MinorRealm: 2, Name: "中期", RequiredHours: 450, Enabled: true},
-		{MajorRealm: 4, MinorRealm: 3, Name: "后期", RequiredHours: 550, Enabled: true},
-		{MajorRealm: 4, MinorRealm: 4, Name: "圆满", RequiredHours: 650, Enabled: true},
-
-		{MajorRealm: 5, MinorRealm: 1, Name: "初期", RequiredHours: 750, Enabled: true},
-		{MajorRealm: 5, MinorRealm: 2, Name: "中期", RequiredHours: 900, Enabled: true},
-		{MajorRealm: 5, MinorRealm: 3, Name: "后期", RequiredHours: 1050, Enabled: true},
-		{MajorRealm: 5, MinorRealm: 4, Name: "圆满", RequiredHours: 1200, Enabled: true},
-
-		{MajorRealm: 6, MinorRealm: 1, Name: "初期", RequiredHours: 1500, Enabled: true},
-		{MajorRealm: 6, MinorRealm: 2, Name: "中期", RequiredHours: 1700, Enabled: true},
-		{MajorRealm: 6, MinorRealm: 3, Name: "后期", RequiredHours: 1900, Enabled: true},
-		{MajorRealm: 6, MinorRealm: 4, Name: "圆满", RequiredHours: 2100, Enabled: true},
-
-		{MajorRealm: 7, MinorRealm: 1, Name: "初期", RequiredHours: 2400, Enabled: true},
-		{MajorRealm: 7, MinorRealm: 2, Name: "中期", RequiredHours: 2700, Enabled: true},
-		{MajorRealm: 7, MinorRealm: 3, Name: "后期", RequiredHours: 3000, Enabled: true},
-		{MajorRealm: 7, MinorRealm: 4, Name: "圆满", RequiredHours: 3300, Enabled: true},
-
-		{MajorRealm: 8, MinorRealm: 1, Name: "初期", RequiredHours: 3700, Enabled: true},
-		{MajorRealm: 8, MinorRealm: 2, Name: "中期", RequiredHours: 4100, Enabled: true},
-		{MajorRealm: 8, MinorRealm: 3, Name: "后期", RequiredHours: 4500, Enabled: true},
-		{MajorRealm: 8, MinorRealm: 4, Name: "圆满", RequiredHours: 5000, Enabled: true},
-
-		{MajorRealm: 9, MinorRealm: 1, Name: "初期", RequiredHours: 5500, Enabled: true},
-		{MajorRealm: 9, MinorRealm: 2, Name: "中期", RequiredHours: 6100, Enabled: true},
-		{MajorRealm: 9, MinorRealm: 3, Name: "后期", RequiredHours: 6700, Enabled: true},
-		{MajorRealm: 9, MinorRealm: 4, Name: "圆满", RequiredHours: 7400, Enabled: true},
-
-		{MajorRealm: 10, MinorRealm: 1, Name: "初期", RequiredHours: 8100, Enabled: true},
-		{MajorRealm: 10, MinorRealm: 2, Name: "中期", RequiredHours: 8900, Enabled: true},
-		{MajorRealm: 10, MinorRealm: 3, Name: "后期", RequiredHours: 9700, Enabled: true},
-		{MajorRealm: 10, MinorRealm: 4, Name: "圆满", RequiredHours: 10600, Enabled: true},
-
-		{MajorRealm: 11, MinorRealm: 1, Name: "初期", RequiredHours: 11500, Enabled: true},
-		{MajorRealm: 11, MinorRealm: 2, Name: "中期", RequiredHours: 12600, Enabled: true},
-		{MajorRealm: 11, MinorRealm: 3, Name: "后期", RequiredHours: 13700, Enabled: true},
-		{MajorRealm: 11, MinorRealm: 4, Name: "圆满", RequiredHours: 14900, Enabled: true},
-
-		{MajorRealm: 12, MinorRealm: 1, Name: "初期", RequiredHours: 16100, Enabled: true},
-		{MajorRealm: 12, MinorRealm: 2, Name: "中期", RequiredHours: 17500, Enabled: true},
-		{MajorRealm: 12, MinorRealm: 3, Name: "后期", RequiredHours: 19000, Enabled: true},
-		{MajorRealm: 12, MinorRealm: 4, Name: "圆满", RequiredHours: 20600, Enabled: true},
-
-		{MajorRealm: 13, MinorRealm: 1, Name: "初期", RequiredHours: 22300, Enabled: true},
-		{MajorRealm: 13, MinorRealm: 2, Name: "中期", RequiredHours: 24400, Enabled: true},
-		{MajorRealm: 13, MinorRealm: 3, Name: "后期", RequiredHours: 27800, Enabled: true},
-		{MajorRealm: 13, MinorRealm: 4, Name: "圆满", RequiredHours: 31700, Enabled: true},
-	}
+	return realm.DefaultMinors()
 }
 
 func seedDefaultBreakthroughConfigs(tx *gorm.DB) error {
@@ -728,19 +658,6 @@ func defaultBreakthroughConfigs() []model.BreakthroughConfig {
 		{
 			FromMajorRealm:     11,
 			ToMajorRealm:       12,
-			PillName:           "帝境残魂",
-			PointsCost:         1500,
-			MinTotalHours:      16100,
-			SuccessRate:        0.10,
-			CooldownHours:      168,
-			GuaranteeFailCount: 10,
-			RefundRate:         0.2,
-			FailPenaltyPoints:  50,
-			Enabled:            true,
-		},
-		{
-			FromMajorRealm:     12,
-			ToMajorRealm:       13,
 			PillName:           "古帝源气",
 			PointsCost:         1500,
 			MinTotalHours:      22300,

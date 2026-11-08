@@ -173,6 +173,10 @@ func pointTransactionTypeText(txType string) string {
 		return "抢红包"
 	case "admin_adjust":
 		return "管理员调账"
+	case "tribulation_cost":
+		return "猜阵入场"
+	case "tribulation_reward":
+		return "猜阵奖励"
 	case "treasure_cost":
 		return "寻宝开箱"
 	case "treasure_reward":

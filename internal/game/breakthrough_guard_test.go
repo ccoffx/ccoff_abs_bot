@@ -53,7 +53,7 @@ func setupGuardTestDB(t *testing.T) {
 		if err := db.Create(&model.User{TelegramID: id, Username: fmt.Sprint("user", id), AbsUserID: fmt.Sprint("abs", id), Points: 100, Status: "active", AccountType: "formal"}).Error; err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Create(&model.Cultivation{UserID: id, MajorRealm: 2, MinorRealm: 4, TotalAudioTime: 150, ConsolidateUntil: time.Now().Add(-time.Hour)}).Error; err != nil {
+		if err := db.Create(&model.Cultivation{UserID: id, MajorRealm: 2, MinorRealm: 9, TotalAudioTime: 150, ConsolidateUntil: time.Now().Add(-time.Hour)}).Error; err != nil {
 			t.Fatal(err)
 		}
 	}

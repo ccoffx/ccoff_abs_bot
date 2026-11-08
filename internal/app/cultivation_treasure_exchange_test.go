@@ -25,7 +25,7 @@ func setupCultivationTreasureTestDB(t *testing.T) {
 	if err := storage.DB.Exec(`CREATE UNIQUE INDEX idx_inventory_user_item_unique ON inventories(user_id,item_name) WHERE deleted_at IS NULL`).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.DB.Create(&model.Cultivation{UserID: 1, MajorRealm: 5, MinorRealm: 4}).Error; err != nil {
+	if err := storage.DB.Create(&model.Cultivation{UserID: 1, MajorRealm: 5, MinorRealm: 9}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := game.GardenGrantInventoryInTx(storage.DB, 1, game.SectSecretRealmTokenItemName, 3); err != nil {
@@ -52,7 +52,7 @@ func prepareExchangeForTest(t *testing.T) *model.CultivationTreasureExchange {
 }
 
 func TestCultivationTreasureExchangeAllRealms(t *testing.T) {
-	for major := 5; major <= 12; major++ {
+	for major := 5; major <= 11; major++ {
 		t.Run(fmt.Sprint(major), func(t *testing.T) {
 			setupCultivationTreasureTestDB(t)
 			if err := storage.DB.Model(&model.Cultivation{}).Where("user_id = ?", 1).Update("major_realm", major).Error; err != nil {
@@ -88,7 +88,7 @@ func TestCultivationTreasureExchangeRejectsUnavailableAndFailedReads(t *testing.
 	if _, err := game.PrepareCultivationTreasureExchange(storage.DB, 2); !errors.Is(err, game.ErrCultivationTreasureNoProfile) {
 		t.Fatalf("missing profile: %v", err)
 	}
-	for _, major := range []int{-1, 0, 1, 2, 3, 4, 13, 14} {
+	for _, major := range []int{-1, 0, 1, 2, 3, 4, 12, 13} {
 		if err := storage.DB.Model(&model.Cultivation{}).Where("user_id = ?", 1).Update("major_realm", major).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -244,7 +244,7 @@ func TestCurrentCultivationIntegration(t *testing.T) {
 		}
 	}
 	damage, multiplier, err := game.ApplyWorldBossDamageBonusesChecked(1, 30)
-	if err != nil || damage != 36.9 || multiplier < 1.22999 || multiplier > 1.23001 {
+	if err != nil || damage != 36.73 || multiplier < 1.22444 || multiplier > 1.22445 {
 		t.Fatalf("unexpected world boss technology bonus: %f, %f, %v", damage, multiplier, err)
 	}
 	if hours, ok := game.GetTodaySectListeningHoursFromCache(1, time.Now()); !ok || hours != 2 {

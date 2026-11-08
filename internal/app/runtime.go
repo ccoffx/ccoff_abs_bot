@@ -28,6 +28,7 @@ import (
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
+	"ccoff-abs-bot/internal/titles"
 )
 
 var joinVerification *joinverify.Service
@@ -225,6 +226,8 @@ func run(loadConfig func()) {
 	market.StartMarketplaceExpiryScheduler(bot)
 	game.StartGardenMaturityNotifier(bot)
 	activity.StartTreasureHuntScheduler(bot)
+	activity.StartTribulationScheduler(bot)
+	titles.StartScheduler(bot)
 
 	// 🚨 修复隐患 2：实现真正的高并发 Worker 工作池
 	jobs := make(chan telegramMessageJob, config.AppConfig.QueueCapacity)
@@ -376,6 +379,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 				return
 			}
 			if activity.HandleTreasureHuntCallback(bot, cb) {
+				return
+			}
+			if activity.HandleTribulationCallback(bot, cb) || titles.HandleCallback(bot, cb) {
 				return
 			}
 			if game.HandleGardenCallback(bot, cb) {
@@ -613,6 +619,11 @@ func botWorker(bot *tgbotapi.BotAPI, jobs <-chan telegramMessageJob) {
 				return
 			}
 			handleInteractiveMessage(bot, msg)
+			if msg.Chat != nil && msg.Chat.ID < 0 {
+				if err := titles.TrackMember(msg.Chat.ID, msg.Chat.Title, msg.From.ID); err != nil {
+					log.Printf("⚠️ 更新群成员默认称号失败: %s", textfmt.FormatPlainError(err))
+				}
+			}
 		}()
 	}
 }

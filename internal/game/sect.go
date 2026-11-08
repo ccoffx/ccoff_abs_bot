@@ -18,6 +18,7 @@ import (
 	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/lifecycle"
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/rankings"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -979,7 +980,7 @@ func handleMySect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 func handleSectRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	var sects []model.Sect
-	if err := storage.DB.Order("level DESC, prestige DESC, funds DESC, member_count DESC").
+	if err := rankings.Sects(storage.DB).
 		Limit(10).
 		Find(&sects).Error; err != nil {
 		telegram.ReplyText(bot, msg.Chat.ID, "宗门排行榜读取失败，请稍后再试。")
@@ -1154,7 +1155,7 @@ func formatSectMemberListPageWithMax(sect model.Sect, members []model.SectMember
 }
 
 // loadSectMemberRealmNames 一次性批量读取本页成员的修为境界，避免逐人查询造成 N+1。
-// 返回 user_id -> 境界名（如【大斗师中期】）；查不到修为档案的成员不在 map 中。
+// 返回 user_id -> 境界名（如【五星大斗师】）；查不到修为档案的成员不在 map 中。
 func loadSectMemberRealmNames(members []model.SectMember) map[int64]string {
 	realmNames := make(map[int64]string, len(members))
 	if len(members) == 0 || storage.DB == nil {

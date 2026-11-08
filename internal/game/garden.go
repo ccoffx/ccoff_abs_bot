@@ -95,13 +95,13 @@ func PillEffectSummary(itemName string) string {
 	case "万载灵髓":
 		return "吞服后增加 10.0 小时丹药修为，本月最多 1 颗。"
 	case "凝元丹":
-		return "斗师突破专用丹药，达到斗者大圆满后渡劫时自动消耗。"
+		return "斗师突破专用丹药，达到九星斗者后渡劫时自动消耗。"
 	case "三纹清灵丹":
-		return "大斗师突破专用丹药，达到斗师大圆满后渡劫时自动消耗。"
+		return "大斗师突破专用丹药，达到九星斗师后渡劫时自动消耗。"
 	case "斗灵丹":
-		return "斗灵突破专用丹药，达到大斗师大圆满后渡劫时自动消耗。"
+		return "斗灵突破专用丹药，达到九星大斗师后渡劫时自动消耗。"
 	case "皇极丹":
-		return "斗王突破专用丹药，达到斗灵大圆满后渡劫时自动消耗。"
+		return "斗王突破专用丹药，达到九星斗灵后渡劫时自动消耗。"
 	default:
 		return ""
 	}
@@ -1478,7 +1478,17 @@ func gardenAlchemy(userID int64, recipeKey string) (string, error) {
 				return err
 			}
 		}
-		return GardenGrantInventoryInTx(tx, userID, cfg.ProductName, 1)
+		if err := GardenGrantInventoryInTx(tx, userID, cfg.ProductName, 1); err != nil {
+			return err
+		}
+		res := tx.Create(&model.GardenAlchemyRecord{UserID: userID, RecipeKey: cfg.Key, ProductName: cfg.ProductName, Quantity: 1, CreatedAt: time.Now()})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("GARDEN_ALCHEMY_RECORD_CREATE_MISSED")
+		}
+		return nil
 	})
 	if err != nil {
 		return "", err

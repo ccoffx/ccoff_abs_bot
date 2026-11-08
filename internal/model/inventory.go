@@ -89,6 +89,17 @@ func (GardenRecipeUnlock) TableName() string {
 	return "garden_recipe_unlocks"
 }
 
+// GardenAlchemyRecord 仅在成丹、扣材料及积分同一事务成功时写入。
+// 累计成丹数以记录为准，不受购买、赠送或吞服后的库存变化影响。
+type GardenAlchemyRecord struct {
+	ID          uint      `gorm:"primaryKey"`
+	UserID      int64     `gorm:"index;not null"`
+	RecipeKey   string    `gorm:"not null"`
+	ProductName string    `gorm:"not null"`
+	Quantity    int       `gorm:"not null"`
+	CreatedAt   time.Time `gorm:"index;not null"`
+}
+
 // 丹药使用日志。
 // 用于记录每一次实际吞服丹药的时间。
 // 老逻辑和新逻辑都会用到它，所以不能删除。

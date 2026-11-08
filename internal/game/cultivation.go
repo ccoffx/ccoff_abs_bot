@@ -16,6 +16,8 @@ import (
 
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/rankings"
+	"ccoff-abs-bot/internal/realm"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -103,34 +105,16 @@ func createCultivationIfMissing(userID int64) (*model.Cultivation, error) {
 	return &cul, nil
 }
 
-// GetRealmName 获取文本名称，例如 【大斗师中期】
+// GetRealmName 获取境界文本，例如【三星大斗师】。
 func GetRealmName(cul *model.Cultivation) string {
 	if cul == nil {
 		return "【未知境界】"
 	}
+	return "【" + realm.Format(cul.MajorRealm, cul.MinorRealm, getCultivationRealmTitle(cul.MajorRealm), getCultivationMinorName(cul.MajorRealm, cul.MinorRealm)) + "】"
+}
 
-	realmTitle := getCultivationRealmTitle(cul.MajorRealm)
-	if realmTitle == "" {
-		majors := defaultCultivationRealmConfigs()
-		if cul.MajorRealm < 0 || cul.MajorRealm >= len(majors) {
-			return "【震古烁今大能】"
-		}
-		realmTitle = majors[cul.MajorRealm].TitleName
-	}
-
-	if cul.MajorRealm == 0 {
-		return fmt.Sprintf("【%s】", realmTitle)
-	}
-
-	minorName := getCultivationMinorName(cul.MajorRealm, cul.MinorRealm)
-	if minorName == "" {
-		minors := []string{"", "初期", "中期", "后期", "圆满"}
-		if cul.MinorRealm > 0 && cul.MinorRealm < len(minors) {
-			minorName = minors[cul.MinorRealm]
-		}
-	}
-
-	return fmt.Sprintf("【%s%s】", realmTitle, minorName)
+func IsCultivationAtPeak(cul *model.Cultivation) bool {
+	return cul != nil && realm.StageCount(cul.MajorRealm) > 0 && cul.MinorRealm >= realm.StageCount(cul.MajorRealm)
 }
 
 // SyncCultivationRealm 根据总修为（苦修+药力），平滑自动晋升当前大境界内的“小段位”
@@ -157,7 +141,7 @@ func SyncCultivationRealm(cul *model.Cultivation) {
 	}
 
 	// 小境界完全由 cultivation_minor_realm_configs.required_hours 驱动。
-	if cul.MajorRealm > 0 {
+	if realm.StageCount(cul.MajorRealm) > 0 {
 		minors := rules.MinorRealms[cul.MajorRealm]
 		if len(minors) > 0 {
 			bestMinor := 1
@@ -173,8 +157,8 @@ func SyncCultivationRealm(cul *model.Cultivation) {
 	if cul.MinorRealm < 1 {
 		cul.MinorRealm = 1
 	}
-	if cul.MinorRealm > 4 {
-		cul.MinorRealm = 4
+	if maximum := realm.StageCount(cul.MajorRealm); maximum > 0 && cul.MinorRealm > maximum {
+		cul.MinorRealm = maximum
 	}
 
 	if oldMajor != cul.MajorRealm || oldMinor != cul.MinorRealm {
@@ -263,7 +247,7 @@ func getBreakthroughSettingFromRules(fromMajor int) (BreakthroughSetting, bool) 
 func isMaxCultivationRealm(major int) bool {
 	rules := GetCultivationRules()
 	if rules == nil {
-		return major >= 5
+		return major >= realm.Emperor
 	}
 
 	realm, ok := rules.Realms[major]
@@ -343,8 +327,8 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	if cul.MinorRealm != 4 && cul.MajorRealm != 0 {
-		telegram.SendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("❌ @%s 您的修为尚未达到当前境界的【大圆满】瓶颈，盲目渡劫必会爆体身亡！请继续闭关听书打磨气血。", safeName))
+	if !IsCultivationAtPeak(cul) {
+		telegram.SendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("❌ @%s 您的修为尚未达到当前境界的【最高小境界】瓶颈，盲目渡劫必会爆体身亡！请继续闭关听书打磨气血。", safeName))
 		return
 	}
 
@@ -539,8 +523,8 @@ func resolveBreakthroughWithRoll(userID int64, mode string, ritualID uint, now t
 			return storage.ErrConsolidating
 		}
 
-		// 事务内再次校验是否大圆满。
-		if cul.MinorRealm != 4 && cul.MajorRealm != 0 {
+		// 事务内再次校验是否已达到该境界的最高小境界。
+		if !IsCultivationAtPeak(&cul) {
 			return storage.ErrBreakthroughNotReady
 		}
 
@@ -849,7 +833,7 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 		case "CONSOLIDATING":
 			telegram.ReplyTextToMessage(bot, msg, "⚠️ 您仍处于境界巩固期，暂时无法再次渡劫。")
 		case "NOT_READY":
-			telegram.ReplyTextToMessage(bot, msg, "❌ 您尚未达到当前境界大圆满，无法引动雷劫。")
+			telegram.ReplyTextToMessage(bot, msg, "❌ 您尚未达到当前境界最高小境界，无法引动雷劫。")
 		case "INSUFFICIENT_CULTIVATION":
 			telegram.ReplyTextToMessage(bot, msg, "❌ 当前总修为不足，无法突破。")
 		case "INSUFFICIENT_POINTS":
@@ -1019,12 +1003,10 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 
 	var results []RankResult
 
-	err := storage.DB.Table("cultivations").
+	err := rankings.Cultivation(storage.DB).
 		Select("users.username, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time").
-		Joins("left join users on users.telegram_id = cultivations.user_id").
 		Joins("left join sect_members on sect_members.user_id = cultivations.user_id and sect_members.deleted_at is null").
 		Joins("left join sects on sects.id = sect_members.sect_id and sects.deleted_at is null").
-		Order("cultivations.major_realm desc, cultivations.minor_realm desc, (cultivations.total_audio_time + cultivations.pill_audio_time) desc, cultivations.total_audio_time desc").
 		Limit(10).
 		Scan(&results).Error
 

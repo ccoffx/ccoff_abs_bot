@@ -812,7 +812,7 @@ func showMyReferral(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 		if errors.Is(err, storage.ErrReferralCultivationLow) {
-			telegram.ReplyText(bot, msg.Chat.ID, "❌ 个人邀请链接需达到【斗者初期】后解锁。请先听书积累修为，并发送 `听书报告` 同步斗气档案。")
+			telegram.ReplyText(bot, msg.Chat.ID, "❌ 个人邀请链接需达到【一星斗者】后解锁。请先听书积累修为，并发送 `听书报告` 同步斗气档案。")
 			return
 		}
 		log.Printf("create referral code failed: user=%d err=%s", msg.From.ID, textfmt.FormatPlainError(err))
@@ -828,7 +828,7 @@ func showMyReferral(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf(
-		"🔗 **我的邀请链接**\n\n链接：`%s`\n\n规则：斗者初期及以上正式账号可邀请新人；新人通过链接注册后获得 `%d` 天体验；体验期内听书满 `%.0f` 小时将**自动**获得 `%d` 天体验延期（无需手动领取）；邀请者获得 `%d` 积分。\n\n限制：同一邀请链接每日最多激活 `%d` 名新人；每月邀请奖励最多 `%d` 积分。\n\n%s",
+		"🔗 **我的邀请链接**\n\n链接：`%s`\n\n规则：一星斗者及以上正式账号可邀请新人；新人通过链接注册后获得 `%d` 天体验；体验期内听书满 `%.0f` 小时将**自动**获得 `%d` 天体验延期（无需手动领取）；邀请者获得 `%d` 积分。\n\n限制：同一邀请链接每日最多激活 `%d` 名新人；每月邀请奖励最多 `%d` 积分。\n\n%s",
 		referralLink(bot, code.Code),
 		storage.ReferralTrialDays,
 		storage.ReferralTaskHours,

@@ -26,6 +26,7 @@ import (
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
+	"ccoff-abs-bot/internal/titles"
 )
 
 // Channel posts, automatic discussion forwards and anonymous senders do not
@@ -222,6 +223,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if activity.HandleTreasureHuntCommand(bot, msg, text) {
+		return
+	}
+	if activity.HandleTribulationCommand(bot, msg, text) || titles.HandleCommand(bot, msg, text) {
 		return
 	}
 	if !msg.Chat.IsPrivate() && (text == "签到" || text == "每日签到") {
@@ -1734,7 +1738,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		// 🛡️ 防呆机制：拦截破境丹，提醒自动消耗
 		if strings.Contains(itemName, "丹") && itemName != "回气丹" && itemName != "青灵养气丹" {
-			telegram.ReplyText(bot, chatID, fmt.Sprintf("⚠️ **【%s】** 是渡劫破阶专用丹药。\n👉 *无需手动吞服*，请在达到境界大圆满时直接发送 `突破` 指令，天道雷劫降临时系统会自动吞服！", textfmt.InventoryItemMarkdownName(itemName)))
+			telegram.ReplyText(bot, chatID, fmt.Sprintf("⚠️ **【%s】** 是渡劫破阶专用丹药。\n👉 *无需手动吞服*，请在达到当前大境界巅峰时直接发送 `突破` 指令，天道雷劫降临时系统会自动吞服！", textfmt.InventoryItemMarkdownName(itemName)))
 			telegram.ClearSession(userID)
 			return
 		}

@@ -18,6 +18,7 @@
 | 宗门、科技、喇叭、宗门抽奖和秘境 | `internal/game/sect*.go` |
 | 听书统计、跨日修正、违规检测和排行榜 | `internal/game/*listening*.go`、`internal/game/abs_cross_day_*.go`、`internal/game/leaderboard.go` |
 | 世界 Boss | `internal/game/world_boss.go` |
+| 境界、称号、榜首荣誉和群标签 | `internal/realm/`、`internal/titles/` |
 | 抽奖、红包、盲盒和寻宝 | `internal/activity/` |
 | 交易行和卡密回收 | `internal/market/` |
 
@@ -29,6 +30,7 @@
 | --- | --- |
 | `model` | 按账号、钱包、宗门、活动等分类的 GORM 模型与表名定义 |
 | `storage` | 数据库连接状态、索引、系统配置、账号资格、钱包事务、卡密、审计和安全校验 |
+| `rankings` | 财富、斗气、宗门榜与榜首称号共用的资格、排序和并列规则 |
 | `lifecycle` | 跨业务的 ABS 账号恢复、播放冻结解除与持久化生命周期互斥保护 |
 | `telegram` | 消息发送队列、自动删除、回调应答、菜单、群成员校验、会话和用户锁 |
 | `abs` | Audiobookshelf 请求、账号管理和统计 API；听书报告的修为计算在 `game` 中 |

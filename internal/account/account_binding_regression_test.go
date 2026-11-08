@@ -131,6 +131,9 @@ func TestRebindMigratesRelatedAssetsAndEncryptedReward(t *testing.T) {
 	if err := storage.DB.Create(&plant).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.DB.Create(&model.GardenAlchemyRecord{UserID: 101, RecipeKey: "huiqi", ProductName: "回气丹", Quantity: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
 	identity := func(id int64) string {
 		return fmt.Sprintf("activity=%d:winner=%d:user=%d", winner.ActivityID, winner.ID, id)
 	}
@@ -155,7 +158,7 @@ func TestRebindMigratesRelatedAssetsAndEncryptedReward(t *testing.T) {
 	for _, check := range []struct {
 		value any
 		field string
-	}{{&model.SpiritFire{}, "owner_id"}, {&model.Sect{}, "owner_id"}, {&model.MarketplaceSecret{}, "seller_id"}, {&model.RenewCode{}, "owner_user_id"}, {&model.GardenPlot{}, "user_id"}, {&model.GardenPlanting{}, "user_id"}, {&model.ExchangeCodeReceipt{}, "user_id"}} {
+	}{{&model.SpiritFire{}, "owner_id"}, {&model.Sect{}, "owner_id"}, {&model.MarketplaceSecret{}, "seller_id"}, {&model.RenewCode{}, "owner_user_id"}, {&model.GardenPlot{}, "user_id"}, {&model.GardenPlanting{}, "user_id"}, {&model.GardenAlchemyRecord{}, "user_id"}, {&model.ExchangeCodeReceipt{}, "user_id"}} {
 		var count int64
 		if err := storage.DB.Model(check.value).Where(check.field+" = ?", 202).Count(&count).Error; err != nil || count != 1 {
 			t.Fatalf("asset missing (%T): %d %v", check.value, count, err)

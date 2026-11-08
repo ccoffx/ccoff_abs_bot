@@ -25,7 +25,9 @@
 | `internal/account/` | 注册、绑定、续期、签到和邀请关系 |
 | `internal/books/` | 求书工单、书库事件和公告 |
 | `internal/game/` | 听书修为、斗气、宗门、秘境、世界 Boss 和药园 |
-| `internal/activity/` | 抽奖、红包、盲盒和寻宝 |
+| `internal/activity/` | 抽奖、红包、盲盒、寻宝和天雷猜阵 |
+| `internal/realm/`、`internal/titles/` | 共享境界划分、各来源称号、默认佩戴和群标签同步 |
+| `internal/rankings/` | 财富、斗气、宗门榜与榜首称号共用的资格和排序规则 |
 | `internal/market/` | 交易行和卡密回收 |
 | `internal/model/`、`internal/storage/` | GORM 模型、SQLite 索引、钱包事务与审计 |
 | `internal/telegram/` | 发送、自动清理、回调、会话和群权限 |

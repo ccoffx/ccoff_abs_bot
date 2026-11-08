@@ -46,6 +46,7 @@ var rebindAssetModels = []struct {
 	{&model.GardenSeedPurchase{}, []string{"UserID"}},
 	{&model.GardenHerbMarketSale{}, []string{"UserID"}},
 	{&model.GardenRecipeUnlock{}, []string{"UserID"}},
+	{&model.GardenAlchemyRecord{}, []string{"UserID"}},
 	{&model.ItemUsageLog{}, []string{"UserID"}},
 	{&model.ItemUsageQuota{}, []string{"UserID"}},
 	{&model.ABSCrossDaySessionScanCursor{}, []string{"UserID"}},

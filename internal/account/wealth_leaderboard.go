@@ -9,8 +9,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 
-	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/rankings"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -127,8 +127,7 @@ func loadWealthLeaderboardPage(page int) ([]model.User, int, int, error) {
 
 	var users []model.User
 	if limit > 0 {
-		if err := wealthLeaderboardBaseQuery().
-			Order("points desc, telegram_id asc").
+		if err := rankings.Wealth(storage.DB).
 			Limit(limit).
 			Offset(offset).
 			Find(&users).Error; err != nil {
@@ -140,17 +139,7 @@ func loadWealthLeaderboardPage(page int) ([]model.User, int, int, error) {
 }
 
 func wealthLeaderboardBaseQuery() *gorm.DB {
-	query := storage.DB.Model(&model.User{}).Where("role != ? AND role != ?", "super_admin", "admin")
-	if config.AppConfig != nil {
-		envAdminIDs := make([]int64, 0, len(config.AppConfig.AdminIDs))
-		for id := range config.AppConfig.AdminIDs {
-			envAdminIDs = append(envAdminIDs, id)
-		}
-		if len(envAdminIDs) > 0 {
-			query = query.Where("telegram_id NOT IN ?", envAdminIDs)
-		}
-	}
-	return query
+	return rankings.WealthBase(storage.DB)
 }
 
 func wealthLeaderboardTotalPages(totalUsers int) int {

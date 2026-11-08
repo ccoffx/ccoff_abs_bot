@@ -16,8 +16,8 @@ type Cultivation struct {
 	SectListeningSettledHours float64   `gorm:"not null;default:0"`
 	TotalAudioTime            float64   `gorm:"default:0"` // 🎧 累计听书修为（小时），包含闭关与异火，不含丹药
 	PillAudioTime             float64   `gorm:"default:0"` // 💊 累计丹药时长（小时）- 氪金药力加成
-	MajorRealm                int       `gorm:"default:0"` // 大境界编号 0-13：斗之气至斗帝
-	MinorRealm                int       `gorm:"default:1"` // 小段位 (1:初期, 2:中期, 3:后期, 4:圆满)
+	MajorRealm                int       `gorm:"default:0"` // 大境界编号 0-12：斗之气至斗帝
+	MinorRealm                int       `gorm:"default:1"` // 小境界：段/星 1-9，斗尊巅峰 1-10 转，半圣 1-4 阶，斗帝固定 1
 	TribulationFails          int       `gorm:"default:0"` // 渡劫失败次数计数器（暗藏天道保底）
 	ConsolidateUntil          time.Time // 境界巩固期（防止老玩家光速吃药连升的冷却时间）
 }

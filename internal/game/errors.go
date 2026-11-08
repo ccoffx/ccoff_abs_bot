@@ -4,7 +4,7 @@ import "errors"
 
 var (
 	ErrListeningBindingChanged         = errors.New("听书账号绑定已变更，请刷新后重试")
-	ErrCultivationTreasureUnavailable  = errors.New("当前境界无需兑换突破至宝（斗王至半帝可兑换）")
+	ErrCultivationTreasureUnavailable  = errors.New("当前境界无需兑换突破至宝（斗王至斗圣可兑换）")
 	ErrCultivationTreasureNoProfile    = errors.New("请先建立斗气档案后再兑换")
 	ErrCultivationTreasureTokens       = errors.New("秘境信物不足，请参与宗门秘境获取")
 	ErrCultivationTreasureExpired      = errors.New("兑换确认已失效，请重新打开突破材料面板")

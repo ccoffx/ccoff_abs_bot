@@ -19,6 +19,7 @@ import (
 	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/realm"
 	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
@@ -206,7 +207,7 @@ func startWorldBossEvent(bot *tgbotapi.BotAPI, chatID int64, now time.Time) {
 			"发送 `参加Boss` 记录当前实际听书时长。\n"+
 			"最后 `%d` 分钟停止新道友加入。\n"+
 			"结算伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技）。\n"+
-			"修为加成：斗者初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n\n"+
+			"修为加成：按小境界进度递增，每个完整大境界 `+4%%`，最高 `+25%%`。\n\n"+
 			"发送 `Boss状态` 查看进度，`Boss排行` 查看伤害榜。",
 		textfmt.EscapeMarkdown(event.Name),
 		event.CurrentHP,
@@ -1106,7 +1107,7 @@ func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf(
-		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技），不计算白天净修为，无单人伤害上限。\n修为加成：斗者初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。",
+		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技），不计算白天净修为，无单人伤害上限。\n修为加成：按小境界进度递增，每个完整大境界 `+4%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。",
 		textfmt.EscapeMarkdown(event.Name),
 		statusText,
 		event.CurrentHP,
@@ -1458,15 +1459,16 @@ func calculateWorldBossCultivationDamageBonus(major int, minor int) float64 {
 	if minor < 1 {
 		minor = 1
 	}
-	if minor > 4 {
-		minor = 4
-	}
-
-	stage := (major-1)*4 + minor
-	if stage < 1 {
+	count := realm.StageCount(major)
+	if count == 0 {
 		return 0
 	}
-	bonus := float64(stage) * worldBossCultivationBonusPerStage
+	if minor > count {
+		minor = count
+	}
+	// 每个大境界仍占原先四阶段的总加成，按实际星/转/阶细分。
+	stage := float64((major-1)*4) + 4*float64(minor)/float64(count)
+	bonus := stage * worldBossCultivationBonusPerStage
 	if bonus > worldBossCultivationBonusCap {
 		return worldBossCultivationBonusCap
 	}

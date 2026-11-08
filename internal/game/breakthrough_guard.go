@@ -97,7 +97,7 @@ func CreateBreakthroughRitual(userID int64, name string, originChatID, groupID i
 		if now.Before(cul.ConsolidateUntil) {
 			return storage.ErrConsolidating
 		}
-		if cul.MajorRealm != 0 && cul.MinorRealm != 4 {
+		if !IsCultivationAtPeak(&cul) {
 			return storage.ErrBreakthroughNotReady
 		}
 		if cul.TotalAudioTime+cul.PillAudioTime < req.MinHours {

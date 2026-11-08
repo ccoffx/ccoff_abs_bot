@@ -11,6 +11,7 @@ import (
 
 	"ccoff-abs-bot/internal/game"
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/realm"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -449,8 +450,8 @@ func updateRealmThreshold(actorID int64, major int, minHours float64, maxHours f
 }
 
 func updateMinorRealmThreshold(actorID int64, major int, minor int, requiredHours float64, reason string) (string, error) {
-	if minor < 1 || minor > 4 {
-		return "", fmt.Errorf("小境界只能是 1-4。")
+	if err := realm.ValidateStage(major, minor); err != nil {
+		return "", err
 	}
 
 	var minorName string
