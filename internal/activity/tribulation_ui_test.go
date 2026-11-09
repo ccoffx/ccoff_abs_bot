@@ -50,6 +50,18 @@ func newTribulationTelegramFixture(t *testing.T) *tribulationTelegramFixture {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		if (method == "sendMessage" || method == "editMessageText") && r.Form.Get("reply_markup") != "" {
+			var markup struct {
+				InlineKeyboard json.RawMessage `json:"inline_keyboard"`
+			}
+			if err := json.Unmarshal([]byte(r.Form.Get("reply_markup")), &markup); err != nil {
+				t.Error(err)
+			}
+			if len(markup.InlineKeyboard) == 0 || string(markup.InlineKeyboard) == "null" {
+				fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: field 'inline_keyboard' of the InlineKeyboardMarkup must be an Array"}`)
+				return
+			}
+		}
 		f.mu.Lock()
 		var result any = true
 		var hook func()

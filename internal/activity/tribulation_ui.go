@@ -147,7 +147,9 @@ func RenderTribulationPanel(round model.TribulationRound, entries []model.Tribul
 			}
 		}
 	}
-	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+	// 保留空数组；库构造函数会将零行转换为 null，Telegram 会拒绝该格式。
+	// 准备、封阵和取消阶段均需要无按钮面板，编辑时空数组也会清除旧按钮。
+	return b.String(), tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 func oppositeTribulationSide(side string) string {

@@ -63,8 +63,8 @@ func FetchReportAndCheckUpgrade(bot *tgbotapi.BotAPI, userID int64, absUserID st
 			if oldCul.MajorRealm != newCul.MajorRealm {
 				telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, announce)
 			} else {
-				// 🚨 小阶段福利：调用全局安全引擎注入奖池
-				smallPts, err := security.RandomIntRange(5, 10)
+				// 小境界细分后降低单次注入量，使逐级晋升的总奖励接近原四阶段规则。
+				smallPts, err := security.RandomIntRange(2, 4)
 				if err != nil {
 					log.Printf("⚠️ 修为突破奖池随机奖励生成失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 					telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, announce)
