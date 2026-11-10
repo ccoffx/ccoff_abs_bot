@@ -120,6 +120,7 @@ func TestAccountRealmTitlesExistWithoutPlayingAndFollowRealm(t *testing.T) {
 
 func TestOtherTitleSelectionPreservedThenFallsBackToLatestRealm(t *testing.T) {
 	setupTitleTestDB(t)
+	registerTestGroupTitle(t)
 	if err := RefreshDefaults(); err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +212,7 @@ func TestBindingAfterGroupActivityAddsDefaultWithoutAnotherMessage(t *testing.T)
 
 func TestGameTitleLeaderboardKeepsIncumbentFirstOnTiedCounts(t *testing.T) {
 	setupTitleTestDB(t)
+	registerTestGroupTitle(t)
 	if err := TrackMember(-100, "测试群", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -283,5 +285,54 @@ func TestRealmTitleIgnoresObsoleteStageNames(t *testing.T) {
 				t.Fatal("equipment button has inconsistent stage name", markup)
 			}
 		})
+	}
+}
+
+// 测试专属称号用于覆盖通用称号同步机制，线上不注册猜阵称号。
+func registerTestGroupTitle(t *testing.T) {
+	t.Helper()
+	previous := UniqueDefinitions
+	UniqueDefinitions = []Definition{{Key: "escape", Name: "临阵脱身", Source: "tribulation", Unique: true}}
+	t.Cleanup(func() { UniqueDefinitions = previous })
+}
+
+func TestRetiredTribulationTitlesRejectEquipAndRestoreRealm(t *testing.T) {
+	setupTitleTestDB(t)
+	for _, key := range []string{"escape", "backfire", "steadfast", "lone"} {
+		if _, ok := ByKey(key); ok {
+			t.Fatalf("retired title still registered: %s", key)
+		}
+		if err := storage.DB.Create(&model.TribulationTitleHolder{ChatID: -100, UserID: 1, TitleKey: key, Count: 10}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := Equip(-100, 1, key); !errors.Is(err, ErrNotHeld) {
+			t.Fatalf("old title button accepted: %s err=%v", key, err)
+		}
+		if err := Transaction(func(tx *gorm.DB) error {
+			return setDesiredInTx(tx, -100, 1, key, "旧猜阵称号", true)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := RefreshDefaults(); err != nil {
+			t.Fatal(err)
+		}
+		e := titleTestEquipment(t, -100, 1)
+		if e.TitleKey != RealmKey || e.DesiredTag != "三星斗师" || e.NextSyncAt.After(time.Now()) {
+			t.Fatalf("retired title did not queue realm fallback: %+v", e)
+		}
+	}
+	out, markup, err := Render(-100, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "猜阵") || strings.Contains(out, "临阵脱身") {
+		t.Fatal("retired titles shown", out)
+	}
+	for _, row := range markup.InlineKeyboard {
+		for _, button := range row {
+			if button.CallbackData != nil && strings.HasSuffix(*button.CallbackData, ":escape") {
+				t.Fatal("retired title offered for equip")
+			}
+		}
 	}
 }

@@ -233,7 +233,7 @@ Bot 必须是公告频道管理员并拥有发布消息权限，启动时检查�
 超级管理员可在 Bot 私聊发送 `查看异火配置` 查看当前参数，使用完整 JSON 提交变更：
 
 ```text
-设置异火配置 {"boss_percent":1,"realm_percent":1,"scroll_percent":10,"prices":[2000,3000,4000,5000],"percents":[5,8,10,12]}
+设置异火配置 {"boss_percent":1,"realm_percent":1,"scroll_percent":10,"prices":[2000,3000,4000,5000],"percents":[20,25,30,35]}
 ```
 
 `prices` 与 `percents` 按黄、玄、地、天顺序填写；概率为百分数。二次确认后次日生效，已开启的活动使用开启时的规则。玩法与普通玩家操作见仓库中的 `docs/user-guide.md`。

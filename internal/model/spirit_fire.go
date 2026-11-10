@@ -39,8 +39,9 @@ type SpiritFireRules struct {
 // The singleton both marks launch day and provides a cross-connection SQLite
 // write lock before any mutation reads its preconditions.
 type SpiritFireState struct {
-	ID        uint   `gorm:"primaryKey"`
-	LaunchDay string `gorm:"not null"`
+	DefaultBonusUpgradeDay string
+	ID                     uint   `gorm:"primaryKey"`
+	LaunchDay              string `gorm:"not null"`
 }
 
 type SpiritFireLoadout struct {

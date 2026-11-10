@@ -19,6 +19,7 @@ import (
 	"ccoff-abs-bot/internal/lifecycle"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/rankings"
+	"ccoff-abs-bot/internal/sectbonus"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -221,7 +222,7 @@ const (
 	sectCreateCost               = 100
 	sectJoinCost                 = 10
 	sectRenameCost               = 50
-	sectInitialMaxUsers          = 20
+	sectInitialMaxUsers          = 15
 	sectMaxLevel                 = 10
 	sectMemberListPageSize       = 30
 	sectMemberPageCallbackPrefix = "sect_members_page:"
@@ -423,7 +424,8 @@ func getSectMaxMembers(level int) int {
 	if level <= 1 {
 		return sectInitialMaxUsers
 	}
-	return sectInitialMaxUsers + (level-1)*10
+	// 每级增加一个基础名额，满级基础上限为 24；科技可继续增加名额。
+	return sectInitialMaxUsers + min(level-1, sectMaxLevel-1)
 }
 
 func getSectUpgradeRequirement(level int) (fundsCost int, prestigeNeed int) {
@@ -578,9 +580,10 @@ func handleCreateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawName strin
 	}
 
 	telegram.ReplyText(bot, chatID, fmt.Sprintf(
-		"确认创建宗门 **%s** 将消耗 `%d` 积分。\n\n确认无误请发送：`确认创建宗门 %s`",
+		"确认创建宗门 **%s** 将消耗 `%d` 积分。\n\n%s\n\n确认无误请发送：`确认创建宗门 %s`",
 		textfmt.EscapeMarkdown(name),
 		sectCreateCost,
+		SectOwnerCultivationPerkText,
 		name,
 	))
 }
@@ -649,7 +652,7 @@ func handleConfirmCreateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawNam
 			return err
 		}
 
-		return nil
+		return sectbonus.Schedule(tx, userID, true, time.Now())
 	})
 
 	if err != nil {
@@ -670,10 +673,11 @@ func handleConfirmCreateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawNam
 	}
 
 	telegram.ReplyText(bot, chatID, fmt.Sprintf(
-		"宗门 **%s** 创建成功。\n\n消耗积分：`%d`\n成员上限：`%d` 人",
+		"宗门 **%s** 创建成功。\n\n消耗积分：`%d`\n成员上限：`%d` 人\n\n%s",
 		textfmt.EscapeMarkdown(name),
 		sectCreateCost,
 		sectInitialMaxUsers,
+		SectOwnerCultivationPerkText,
 	))
 }
 
@@ -909,7 +913,7 @@ func handleConfirmJoinSect(bot *tgbotapi.BotAPI, message *tgbotapi.Message, args
 		case errors.Is(err, storage.ErrSectNotFound):
 			telegram.ReplyTextToMessage(bot, message, "未找到该宗门。")
 		case errors.Is(err, storage.ErrSectFull):
-			telegram.ReplyTextToMessage(bot, message, "该宗门成员已满。")
+			telegram.ReplyTextToMessage(bot, message, "该宗门已达到招募上限，可加入其他宗门，或发送「创建宗门 宗门名」自立门户。")
 		case errors.Is(err, storage.ErrPointsNotEnough):
 			telegram.ReplyTextToMessage(bot, message, fmt.Sprintf("积分不足，加入宗门需要 `%d` 积分。", sectJoinCost))
 		default:
@@ -925,7 +929,7 @@ func handleConfirmJoinSect(bot *tgbotapi.BotAPI, message *tgbotapi.Message, args
 func handleMySect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	var member model.SectMember
 	if err := loadSectMemberByUserInTx(storage.DB, msg.From.ID, &member, false); err != nil {
-		replySectMemberReadError(bot, msg.Chat.ID, msg.From.ID, err, "你尚未加入宗门。\n可发送 `创建宗门 名称` 创建宗门，或发送 `加入宗门 名称` 加入已有宗门。", "我的宗门")
+		replySectMemberReadError(bot, msg.Chat.ID, msg.From.ID, err, "你尚未加入宗门。\n"+SectOwnerCultivationPerkText+"\n可发送 `创建宗门 名称` 创建宗门，或发送 `加入宗门 名称` 加入已有宗门。", "我的宗门")
 		return
 	}
 
@@ -943,7 +947,7 @@ func handleMySect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		upgradeText = fmt.Sprintf("下级需要资金 `%d`，声望 `%d`", nextFundsCost, nextPrestigeNeed)
 	}
 	telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf(
-		"**我的宗门**\n\n"+
+		"**我的宗门**\n\n%s\n\n"+
 			"宗门：**%s**\n"+
 			"职位：`%s`\n"+
 			"等级：`%d`\n"+
@@ -955,6 +959,7 @@ func handleMySect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			"本周贡献：`%d`\n"+
 			"个人声望：`%d`\n"+
 			"洞府：`%s`",
+		SectOwnerCultivationPerkText,
 		textfmt.EscapeMarkdown(sect.Name),
 		roleText,
 		sect.Level,
@@ -988,13 +993,13 @@ func handleSectRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if len(sects) == 0 {
-		telegram.ReplyText(bot, msg.Chat.ID, "暂无宗门上榜。")
+		telegram.ReplyText(bot, msg.Chat.ID, "暂无宗门上榜。\n\n"+SectOwnerCultivationPerkText+"\n发送 `创建宗门 名称`，开创第一个宗门。")
 		return
 	}
 
 	medals := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
 	var b strings.Builder
-	b.WriteString("**宗门排行榜 Top 10**\n\n")
+	b.WriteString("**宗门排行榜 Top 10**\n\n" + SectOwnerCultivationPerkText + "\n发送 `创建宗门 名称` 自立门户。\n\n")
 
 	for i, sect := range sects {
 		maxMembersText := sectMaxMembersDisplayText(sect, "sect_rank", msg.From.ID)
@@ -1307,7 +1312,7 @@ func handleUpgradeSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	telegram.ReplyText(bot, chatID, fmt.Sprintf(
-		"宗门 **%s** 升级成功。\n\n当前等级：`%d`\n消耗资金：`%d`\n成员上限提升至：`%s` 人",
+		"宗门 **%s** 升级成功。\n\n当前等级：`%d`\n消耗资金：`%d`\n成员上限：`%s` 人",
 		textfmt.EscapeMarkdown(sectName),
 		newLevel,
 		fundsCost,
@@ -1601,7 +1606,11 @@ func handleTransferSectOwner(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawTar
 		if sectRes.RowsAffected == 0 {
 			return fmt.Errorf("SECT_TRANSFER_SECT_OWNER_UPDATE_MISSED")
 		}
-		return nil
+		now := time.Now()
+		if err := sectbonus.Schedule(tx, userID, false, now); err != nil {
+			return err
+		}
+		return sectbonus.Schedule(tx, targetID, true, now)
 	})
 
 	if err != nil {
@@ -1620,7 +1629,7 @@ func handleTransferSectOwner(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawTar
 	}
 
 	telegram.ReplyText(bot, chatID, fmt.Sprintf(
-		"宗门 **%s** 已转让给 `%s`。",
+		"宗门 **%s** 已转让给 `%s`。\n👑 宗主修炼加成将于次日切换，已获得的修为保留。",
 		textfmt.EscapeMarkdown(sectName),
 		textfmt.EscapeMarkdown(targetName),
 	))
@@ -2972,9 +2981,9 @@ const (
 	sectDailyTaskRewardContribution = 3
 	sectDailyTaskRewardPrestige     = 3
 
-	SectWeeklySignTarget       = 100
-	SectWeeklyListenHourTarget = 200
-	SectWeeklyTaskTarget       = 60
+	SectWeeklySignTarget       = 30
+	SectWeeklyListenHourTarget = 60
+	SectWeeklyTaskTarget       = 20
 
 	sectWeeklyExcessPercentCap   = 200
 	sectWeeklyExcessFundsRate    = 0.8

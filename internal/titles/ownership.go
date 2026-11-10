@@ -22,18 +22,14 @@ import (
 const RealmKey = "realm"
 
 // 不同来源使用不同资格规则；境界是人人随账号获得的动态称号，
-// 避雷的四种称号则使用群内唯一持有者与历史记录。
+// 榜首称号按各榜单的实时资格决定。
 type Definition struct {
 	Key, Name, Emoji, Description, Source string
 	Unique                                bool
 }
 
-var UniqueDefinitions = []Definition{
-	{Key: "escape", Name: "临阵脱身", Emoji: "🦊", Description: "换阵后成功避雷", Source: "tribulation", Unique: true},
-	{Key: "backfire", Name: "自投雷网", Emoji: "🤡", Description: "换阵后被雷击中", Source: "tribulation", Unique: true},
-	{Key: "steadfast", Name: "道心坚定", Emoji: "🗿", Description: "未换阵且避雷成功", Source: "tribulation", Unique: true},
-	{Key: "lone", Name: "孤胆渡劫", Emoji: "🌟", Description: "独占一边并获胜", Source: "tribulation", Unique: true},
-}
+// 保留通用群内唯一称号机制；猜阵称号已停用，历史数据仅归档。
+var UniqueDefinitions []Definition
 
 var RankDefinitions = []Definition{
 	{Key: rankings.WealthTitle, Name: "富甲天下", Emoji: "💰", Description: "全服财富榜第一", Source: "ranking", Unique: true},

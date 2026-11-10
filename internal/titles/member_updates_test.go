@@ -74,6 +74,7 @@ func TestMemberRoleUpdateDoesNotDependOnRealmConfiguration(t *testing.T) {
 
 func TestMemberUpdateQueueSurvivesRestartAndKeepsLatestSelection(t *testing.T) {
 	setupTitleTestDB(t)
+	registerTestGroupTitle(t)
 	for _, id := range []int64{1, 2} {
 		if err := TrackMember(-100, "交流群", id); err != nil {
 			t.Fatal(err)

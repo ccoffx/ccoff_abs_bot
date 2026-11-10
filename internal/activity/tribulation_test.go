@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +16,6 @@ import (
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
-	"ccoff-abs-bot/internal/titles"
 )
 
 func openTribulationTestDB(t *testing.T, path string) *gorm.DB {
@@ -153,21 +151,17 @@ func TestTribulationPhasesConcurrentEntryAndRollback(t *testing.T) {
 		{2, -200, r.MessageID, TribulationYin, false, now, ErrTribulationPanel},
 		{2, -100, r.MessageID + 1, TribulationYin, false, now, ErrTribulationPanel},
 		{2, -100, r.MessageID, "invalid", false, now, ErrTribulationPanel},
-		{1, -100, r.MessageID, TribulationYin, true, r.JoinUntil.Add(-time.Nanosecond), ErrTribulationSwitchEarly},
+		{1, -100, r.MessageID, TribulationYin, true, r.JoinUntil.Add(-time.Nanosecond), ErrTribulationSwitchDisabled},
 		{2, -100, r.MessageID, TribulationYin, false, r.JoinUntil, ErrTribulationJoinClosed},
-		{2, -100, r.MessageID, TribulationYin, true, r.JoinUntil, ErrTribulationNotJoined},
-		{1, -100, r.MessageID, TribulationYang, true, r.JoinUntil, ErrTribulationSameSide},
-		{1, -100, r.MessageID, TribulationYin, true, r.SwitchUntil, ErrTribulationExpired},
+		{2, -100, r.MessageID, TribulationYin, true, r.JoinUntil, ErrTribulationSwitchDisabled},
+		{1, -100, r.MessageID, TribulationYang, true, r.JoinUntil, ErrTribulationSwitchDisabled},
+		{1, -100, r.MessageID, TribulationYin, true, r.SwitchUntil, ErrTribulationSwitchDisabled},
 	}
 	for _, c := range checks {
 		_, err := ChooseTribulationSide(r.ID, c.chat, c.message, c.side, c.switching, &tgbotapi.User{ID: c.user}, c.at)
 		if !errors.Is(err, c.want) {
 			t.Fatalf("want %v got %v", c.want, err)
 		}
-	}
-	tribulationTestChoose(t, r, 1, TribulationYin, true, r.JoinUntil)
-	if _, err := ChooseTribulationSide(r.ID, r.ChatID, r.MessageID, TribulationYang, true, user, r.SwitchUntil.Add(-time.Nanosecond)); !errors.Is(err, ErrTribulationSwitched) {
-		t.Fatal(err)
 	}
 	if tribulationTestBalance(t, 1) != 95 || tribulationTestCount(t, &model.PointTransaction{}) != 1 {
 		t.Fatal("switch charged points")
@@ -192,6 +186,29 @@ func TestTribulationPhasesConcurrentEntryAndRollback(t *testing.T) {
 	}
 }
 
+func TestTribulationThirtySecondEntryAndImmediateSettlement(t *testing.T) {
+	setupTribulationTestDB(t)
+	now := time.Now()
+	r := newTribulationTestRound(t, -100, now)
+	deadline := now.Add(30 * time.Second)
+	if !r.JoinUntil.Equal(deadline) || !r.SwitchUntil.Equal(deadline) || !r.ExpiresAt.Equal(deadline) {
+		t.Fatalf("unexpected round deadlines: %+v", r)
+	}
+	tribulationTestChoose(t, r, 1, TribulationYang, false, deadline.Add(-time.Nanosecond))
+	if closed, err := CloseTribulationRound(r.ID, deadline.Add(-time.Nanosecond)); err != nil || closed {
+		t.Fatal("settled before entry deadline", err)
+	}
+	if _, err := ChooseTribulationSide(r.ID, r.ChatID, r.MessageID, TribulationYin, false, &tgbotapi.User{ID: 2}, deadline); !errors.Is(err, ErrTribulationJoinClosed) {
+		t.Fatal("accepted entry at deadline", err)
+	}
+	if closed, err := CloseTribulationRound(r.ID, deadline); err != nil || !closed {
+		t.Fatal("did not settle at entry deadline", err)
+	}
+	if tribulationTestBalance(t, 2) != 100 {
+		t.Fatal("late entry charged points")
+	}
+}
+
 func TestTribulationSettlementAwardsAndNoSoloFarming(t *testing.T) {
 	setupTribulationTestDB(t)
 	now := time.Now()
@@ -199,25 +216,17 @@ func TestTribulationSettlementAwardsAndNoSoloFarming(t *testing.T) {
 	for id, side := range map[int64]string{1: TribulationYang, 2: TribulationYin, 3: TribulationYin, 4: TribulationYang} {
 		tribulationTestChoose(t, r, id, side, false, now)
 	}
-	tribulationTestChoose(t, r, 1, TribulationYin, true, r.JoinUntil)
-	tribulationTestChoose(t, r, 2, TribulationYang, true, r.JoinUntil)
 	if closed, err := CloseTribulationRound(r.ID, r.ExpiresAt.Add(-time.Nanosecond)); err != nil || closed {
 		t.Fatal("settled early", err)
 	}
 	settleTribulationTestRound(t, r, TribulationYin)
-	for id, want := range map[int64]int{1: 105, 2: 95, 3: 105, 4: 95} {
+	for id, want := range map[int64]int{1: 95, 2: 105, 3: 105, 4: 95} {
 		if got := tribulationTestBalance(t, id); got != want {
 			t.Fatalf("user %d: %d", id, got)
 		}
 	}
-	for key, id := range map[string]int64{"escape": 1, "backfire": 2, "steadfast": 3} {
-		var h model.TribulationTitleHolder
-		if err := storage.DB.Where("chat_id = ? AND title_key = ?", -100, key).First(&h).Error; err != nil || h.UserID != id || h.Count != 1 {
-			t.Fatalf("%s: %+v %v", key, h, err)
-		}
-	}
-	if tribulationTestCount(t, &model.TribulationTitleHolder{}) != 3 {
-		t.Fatal("unexpected lone award")
+	if tribulationTestCount(t, &model.TribulationTitleHolder{}) != 0 || tribulationTestCount(t, &model.TribulationTitleStat{}) != 0 {
+		t.Fatal("retired titles were awarded")
 	}
 	if closed, err := CloseTribulationRound(r.ID, r.ExpiresAt.Add(time.Hour)); err != nil || closed {
 		t.Fatal("duplicate settlement", err)
@@ -248,7 +257,7 @@ func TestTribulationSettlementAwardsAndNoSoloFarming(t *testing.T) {
 			t.Fatal("empty round not cancelled")
 		}
 	}
-	if tribulationTestCount(t, &model.TribulationTitleHolder{}) != 3 {
+	if tribulationTestCount(t, &model.TribulationTitleHolder{}) != 0 {
 		t.Fatal("solo farming created title")
 	}
 }
@@ -301,93 +310,6 @@ func TestTribulationSavedDrawSurvivesFailedPayoutAndRestart(t *testing.T) {
 	}
 	if closed, err := CloseTribulationRound(r.ID, r.ExpiresAt.Add(2*time.Hour)); err != nil || closed {
 		t.Fatal("repeated payout", err)
-	}
-}
-
-func TestTribulationUniqueTitlesTransferEquipmentAndGroupIsolation(t *testing.T) {
-	setupTribulationTestDB(t)
-	now := time.Now()
-	win := func(chatID, winner int64) {
-		r := newTribulationTestRound(t, chatID, now)
-		tribulationTestChoose(t, r, winner, TribulationYin, false, now)
-		tribulationTestChoose(t, r, 12, TribulationYang, false, now)
-		settleTribulationTestRound(t, r, TribulationYin)
-	}
-	win(-100, 1)
-	if err := titles.Equip(-100, 1, "steadfast"); err != nil {
-		t.Fatal(err)
-	}
-	if err := titles.Equip(-100, 1, "escape"); !errors.Is(err, ErrTribulationTitleNotHeld) {
-		t.Fatal("equipped unowned title", err)
-	}
-	win(-100, 2)
-	var holder model.TribulationTitleHolder
-	if err := storage.DB.Where("chat_id = ? AND title_key = ?", -100, "steadfast").First(&holder).Error; err != nil || holder.UserID != 1 {
-		t.Fatal("tie stole incumbent title", err)
-	}
-	win(-100, 2)
-	if err := storage.DB.Where("chat_id = ? AND title_key = ?", -100, "steadfast").First(&holder).Error; err != nil || holder.UserID != 2 || holder.Count != 2 {
-		t.Fatalf("title not transferred: %+v %v", holder, err)
-	}
-	var equipment model.TitleEquipment
-	if err := storage.DB.Where("chat_id = ? AND user_id = ?", -100, 1).First(&equipment).Error; err != nil || equipment.TitleKey != titles.RealmKey || equipment.Version != 2 {
-		t.Fatal("old holder not unequipped", err)
-	}
-	if err := titles.Equip(-100, 1, "steadfast"); !errors.Is(err, ErrTribulationTitleNotHeld) {
-		t.Fatal("old button equipped lost title")
-	}
-	if err := titles.Equip(-100, 2, "steadfast"); err != nil {
-		t.Fatal(err)
-	}
-	if err := titles.Equip(-100, 2, "lone"); err != nil {
-		t.Fatal(err)
-	}
-	var newEquipment model.TitleEquipment
-	if err := storage.DB.Where("chat_id = ? AND user_id = ?", -100, 2).First(&newEquipment).Error; err != nil || newEquipment.TitleKey != "lone" {
-		t.Fatal("multiple titles could not be held", err)
-	}
-	win(-200, 3)
-	if err := titles.Equip(-200, 2, "steadfast"); !errors.Is(err, ErrTribulationTitleNotHeld) {
-		t.Fatal("cross-group title equipped")
-	}
-	out, markup, err := titles.Render(-100, 1, false)
-	if err != nil || !strings.Contains(out, "曾经持有") || !strings.Contains(out, "还需增加 2 次才能夺回") {
-		t.Fatal("history or gap missing", out, err)
-	}
-	for _, row := range markup.InlineKeyboard {
-		for _, button := range row {
-			if button.CallbackData != nil && strings.Contains(*button.CallbackData, ":equip:") {
-				t.Fatal("former holder offered equip")
-			}
-		}
-	}
-}
-
-func TestTribulationSameRoundTieRetainsIncumbent(t *testing.T) {
-	setupTribulationTestDB(t)
-	now := time.Now()
-	for _, id := range []int64{2, 1} {
-		r := newTribulationTestRound(t, -100, now)
-		tribulationTestChoose(t, r, id, TribulationYang, false, now)
-		tribulationTestChoose(t, r, 12, TribulationYin, false, now)
-		settleTribulationTestRound(t, r, TribulationYang)
-	}
-	if err := titles.Equip(-100, 2, "steadfast"); err != nil {
-		t.Fatal(err)
-	}
-	r := newTribulationTestRound(t, -100, now)
-	// 挑战者先入阵、先被遍历，但整局结算后双方仍并列。
-	tribulationTestChoose(t, r, 1, TribulationYang, false, now)
-	tribulationTestChoose(t, r, 2, TribulationYang, false, now)
-	tribulationTestChoose(t, r, 12, TribulationYin, false, now)
-	settleTribulationTestRound(t, r, TribulationYang)
-	var holder model.TribulationTitleHolder
-	if err := storage.DB.Where("chat_id = ? AND title_key = ?", -100, "steadfast").First(&holder).Error; err != nil || holder.UserID != 2 || holder.Count != 2 {
-		t.Fatal("simultaneous tie stole title", holder, err)
-	}
-	var equipment model.TitleEquipment
-	if err := storage.DB.Where("chat_id = ? AND user_id = ?", -100, 2).First(&equipment).Error; err != nil || equipment.TitleKey != "steadfast" || equipment.Version != 1 {
-		t.Fatal("tie revoked equipment", equipment, err)
 	}
 }
 

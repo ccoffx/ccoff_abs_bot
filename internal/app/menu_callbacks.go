@@ -129,7 +129,7 @@ func handleMenuCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 			tip = "🗺 群内寻宝是限时积分小游戏。请在群内发送 发起寻宝，再点击原藏宝图下方的宝箱按钮参与。每箱消耗 2 积分，每局含 10 分大奖，另有 0、1、2 分奖励，每人每局限开一次，结果在结算后统一揭晓。仅 10 分宝箱有万分之一概率额外开出未认主异火，需满足异火领取资格且池中有余火。每天不限局数，结算后可立即发起下一局。"
 		}
 		if parts[2] == "tribulation" {
-			tip = "⚡ 请在群内发送「猜阵」。前 20 秒选阴阳阵入场，每人 5 积分；随后 10 秒可免费换阵一次，封阵 5 秒后开奖。不限人数，每人胜负概率各 50%，成功到账 10 分（净赚 5 分），失败亏 5 分。封阵时两边都有人才累计称号次数，每群每种称号由累计次数第一者独占，追平不转移。请在「我的档案 → 我的称号」中佩戴；同步群成员标签需要机器人具有管理成员标签权限。"
+			tip = "⚡ 请在群内发送「猜阵」。30 秒内选阴阳阵入场，每人 5 积分，选定后不能修改，倒计时结束直接开奖。不限人数，每人胜负概率各 50%，成功到账 10 分（净赚 5 分），失败亏 5 分。"
 		}
 		telegram.SendPlainText(bot, cb.Message.Chat.ID, tip)
 	default:
@@ -271,7 +271,7 @@ func renderFeatureMenu(key string, userID int64) (string, tgbotapi.InlineKeyboar
 			menuCmdRow("🌍 世界喇叭", "world_horn"),
 			menuBackRow(),
 		}
-		return "🏯 **【宗门】**", menuMarkup(rows...)
+		return "🏯 **【宗门】**\n\n" + game.SectOwnerCultivationPerkText + "\n发送 `创建宗门 名称`，开创自己的宗门。", menuMarkup(rows...)
 	case "activity":
 		return "🎮 **【活动】**", menuMarkup(
 			menuCmdRow("🐉 世界Boss", "world_boss"),

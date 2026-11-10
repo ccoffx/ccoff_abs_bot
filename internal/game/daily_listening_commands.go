@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/sectbonus"
 	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
@@ -198,8 +199,11 @@ func dailyCultivationTotalsInTx(tx *gorm.DB, userID int64, now time.Time) (total
 		if err = spiritfire.RefreshDaily(tx, &stat, base, now); err != nil {
 			return
 		}
+		if err = sectbonus.RefreshDaily(tx, &stat); err != nil {
+			return
+		}
 		baseTotal += base
-		total += base + stat.SpiritFireHours
+		total += base + stat.SpiritFireHours + stat.SectOwnerBonusHours
 	}
 	return
 }
@@ -248,7 +252,10 @@ func RefreshSpiritFireDailyStat(stat *model.DailyListeningStat, now time.Time) e
 				return err
 			}
 		}
-		return spiritfire.RefreshDaily(tx, stat, stat.EffectiveHours+dailySectCaveRetreatBonusHours(*stat, retreats), now)
+		if err := spiritfire.RefreshDaily(tx, stat, stat.EffectiveHours+dailySectCaveRetreatBonusHours(*stat, retreats), now); err != nil {
+			return err
+		}
+		return sectbonus.RefreshDaily(tx, stat)
 	})
 }
 
@@ -361,6 +368,7 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 
 	retreatBonus := stat.BaseCultivationHours - stat.EffectiveHours
 	retreatLine := fmt.Sprintf("\n基础净修为：`%.2f` 小时\n异火额外修为：`+%.2f` 小时", stat.EffectiveHours+retreatBonus, stat.SpiritFireHours)
+	retreatLine += SectOwnerDailyBonusLine(stat)
 	if stat.ValidationJSON != "" {
 		retreatLine += fmt.Sprintf("\nABS 原始归属统计：`%.2f` 小时", stat.OfficialRawSeconds/3600)
 		retreatLine += dailyListeningValidationNotice(stat)
@@ -375,7 +383,7 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 		stat.DayKey,
 		stat.RawSeconds/3600.0,
 		stat.CappedSeconds/3600.0,
-		stat.EffectiveHours+retreatBonus+stat.SpiritFireHours,
+		stat.EffectiveHours+retreatBonus+stat.SpiritFireHours+stat.SectOwnerBonusHours,
 		retreatLine,
 		totalEffective,
 		stat.LastFetchedAt.Format("2006-01-02 15:04:05"),

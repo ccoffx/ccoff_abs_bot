@@ -367,7 +367,8 @@ func spiritFirePanel(user int64, now time.Time) (string, error) {
 		return "", err
 	}
 	if ok {
-		fmt.Fprintf(&b, "\n今日基础净修为：%.2f小时\n异火额外修为：%.2f小时\n最终净修为：%.2f小时\n", stat.BaseCultivationHours, stat.SpiritFireHours, stat.BaseCultivationHours+stat.SpiritFireHours)
+		fmt.Fprintf(&b, "\n今日基础净修为：%.2f小时\n异火额外修为：%.2f小时\n最终净修为：%.2f小时\n", stat.BaseCultivationHours, stat.SpiritFireHours, stat.BaseCultivationHours+stat.SpiritFireHours+stat.SectOwnerBonusHours)
+		b.WriteString(SectOwnerDailyBonusLine(stat))
 	}
 	b.WriteString("\n操作：\n异火寻缘\n购买焚诀 1\n合成焚诀\n学习异火 编号\n启用异火 编号 编号…\n启用异火 无\n上架异火 编号（查看原价与可填单价范围）\n上架异火 编号 单价\n回收异火 编号\n放弃异火 编号\n\n单火无需掌控；融合须每种都已掌控。搭配次日生效，掌控记录永久保留。")
 	return b.String(), nil

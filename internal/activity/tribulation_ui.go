@@ -51,7 +51,7 @@ func lockTribulationPanel(id uint) func() {
 }
 
 func tribulationErrorText(err error) string {
-	for _, expected := range []error{ErrTribulationBusy, ErrTribulationPanel, ErrTribulationExpired, ErrTribulationJoined, ErrTribulationJoinClosed, ErrTribulationSwitchEarly, ErrTribulationNotJoined, ErrTribulationSwitched, ErrTribulationSameSide, ErrTribulationTitleNotHeld} {
+	for _, expected := range []error{ErrTribulationBusy, ErrTribulationPanel, ErrTribulationExpired, ErrTribulationJoined, ErrTribulationJoinClosed, ErrTribulationSwitchDisabled, ErrTribulationTitleNotHeld} {
 		if errors.Is(err, expected) {
 			return expected.Error()
 		}
@@ -75,7 +75,7 @@ func tribulationSideName(side string) string {
 
 func RenderTribulationPanel(round model.TribulationRound, entries []model.TribulationEntry, now time.Time) (string, tgbotapi.InlineKeyboardMarkup) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "⚡ 天雷猜阵 #%d\n\n入场 %d 积分，每人限入阵一次。\n成功到账 %d 分（净赚 %d），失败亏 %d 分。\n阴阳两阵获胜概率各 50%%，人数、换阵和称号不影响概率。\n", round.ID, round.EntryCost, round.EntryCost*2, round.EntryCost, round.EntryCost)
+	fmt.Fprintf(&b, "⚡ 天雷猜阵 #%d\n\n入场 %d 积分，每人限入阵一次。\n成功到账 %d 分（净赚 %d），失败亏 %d 分。\n阴阳两阵获胜概率各 50%%，人数不影响概率，入阵后不能修改选择。\n", round.ID, round.EntryCost, round.EntryCost*2, round.EntryCost, round.EntryCost)
 	counts := map[string]int{}
 	for _, entry := range entries {
 		counts[entry.Side]++
@@ -84,9 +84,6 @@ func RenderTribulationPanel(round model.TribulationRound, entries []model.Tribul
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0)
 	if round.Status == TribulationClosed {
 		fmt.Fprintf(&b, "\n⚡ 天雷击中%s，%s避雷成功！\n成功 %d 人，失败 %d 人。\n", tribulationSideName(oppositeTribulationSide(round.WinningSide)), tribulationSideName(round.WinningSide), counts[round.WinningSide], len(entries)-counts[round.WinningSide])
-		if !round.TitleEligible {
-			b.WriteString("本局封阵时未形成双阵对抗，不累计称号次数。\n")
-		}
 		limit := len(entries)
 		if limit > 12 {
 			limit = 12
@@ -94,18 +91,11 @@ func RenderTribulationPanel(round model.TribulationRound, entries []model.Tribul
 		b.WriteString("\n📜 避雷结果\n")
 		for _, entry := range entries[:limit] {
 			fmt.Fprintf(&b, "%s：净%+d 分", textfmt.LotteryDisplayText(entry.UserName, 20, "道友"), entry.Reward-entry.Cost)
-			if round.TitleEligible {
-				for _, key := range tribulationEntryTitles(entry, round.WinningSide, counts[entry.Side]) {
-					title, _ := TribulationTitleByKey(key)
-					fmt.Fprintf(&b, " · %s%s", title.Emoji, title.Name)
-				}
-			}
 			b.WriteByte('\n')
 		}
 		if len(entries) > limit {
 			fmt.Fprintf(&b, "其余 %d 人可点击下方查看本人结果。\n", len(entries)-limit)
 		}
-		b.WriteString("称号累计次数第一者独占，追平不转移；请私聊「我的称号」查看归属并佩戴。\n")
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("📜 我的结果", fmt.Sprintf("trib:result:%d", round.ID))))
 	} else if round.Status == TribulationCancelled {
 		b.WriteString("\n本局已取消，无人扣分。发送「猜阵」开始下一局。\n")
@@ -113,18 +103,10 @@ func RenderTribulationPanel(round model.TribulationRound, entries []model.Tribul
 		// 发送成功和激活入库之间可能失败或重启。未激活的面板不可招募，
 		// 即使外部发送结果不确定、无法保存消息编号，也不会留下可点击的假入口。
 		b.WriteString("\n⏳ 猜阵面板准备中，开放后才能入阵；尚未扣分。\n若一直未开放，请重新发送「猜阵」。\n")
-	} else if round.Status == TribulationSettling || !now.Before(round.ExpiresAt) {
+	} else if round.Status == TribulationSettling || !now.Before(round.JoinUntil) || !now.Before(round.ExpiresAt) {
 		b.WriteString("\n⚡ 天雷已至，正在结算，请稍候……\n")
-	} else if !now.Before(round.SwitchUntil) {
-		fmt.Fprintf(&b, "\n🔒 两阵已封锁，谁也无法离开。\n雷云正在凝聚……%d 秒后落雷！\n", int(math.Ceil(round.ExpiresAt.Sub(now).Seconds())))
-	} else if !now.Before(round.JoinUntil) {
-		fmt.Fprintf(&b, "\n🌀 已停止入阵，还可免费换阵一次。\n%d 秒后封阵，换阵后不能再次修改。\n", int(math.Ceil(round.SwitchUntil.Sub(now).Seconds())))
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("☀️ 换至阳阵", fmt.Sprintf("trib:switch:%d:yang", round.ID)),
-			tgbotapi.NewInlineKeyboardButtonData("🌙 换至阴阵", fmt.Sprintf("trib:switch:%d:yin", round.ID)),
-		))
 	} else {
-		fmt.Fprintf(&b, "\n⏳ 还有 %d 秒可以入阵，不限人数，一人也能玩。\n随后 10 秒可免费换阵一次，封阵 5 秒后开奖。\n", int(math.Ceil(round.JoinUntil.Sub(now).Seconds())))
+		fmt.Fprintf(&b, "\n⏳ 还有 %d 秒可以入阵，不限人数，一人也能玩。\n每局开放选阵 30 秒，选定后不能修改，到时直接开奖。\n", int(math.Ceil(round.JoinUntil.Sub(now).Seconds())))
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("☀️ 阳阵 · 5积分", fmt.Sprintf("trib:join:%d:yang", round.ID)),
 			tgbotapi.NewInlineKeyboardButtonData("🌙 阴阵 · 5积分", fmt.Sprintf("trib:join:%d:yin", round.ID)),
@@ -132,23 +114,19 @@ func RenderTribulationPanel(round model.TribulationRound, entries []model.Tribul
 	}
 	if round.Status == TribulationActive || round.Status == tribulationPublishing {
 		if len(entries) > 0 {
-			b.WriteString("\n最近入阵 / 换阵\n")
+			b.WriteString("\n最近入阵\n")
 			// 只展示最近六条，参与人数不受 Telegram 单条消息长度限制。
 			start := len(entries) - 6
 			if start < 0 {
 				start = 0
 			}
 			for _, entry := range entries[start:] {
-				if entry.SwitchedAt != nil {
-					fmt.Fprintf(&b, "🌀 %s：%s → %s\n", textfmt.LotteryDisplayText(entry.UserName, 20, "道友"), tribulationSideName(entry.InitialSide), tribulationSideName(entry.Side))
-				} else {
-					fmt.Fprintf(&b, "%s加入%s\n", textfmt.LotteryDisplayText(entry.UserName, 20, "道友"), tribulationSideName(entry.Side))
-				}
+				fmt.Fprintf(&b, "%s加入%s\n", textfmt.LotteryDisplayText(entry.UserName, 20, "道友"), tribulationSideName(entry.Side))
 			}
 		}
 	}
 	// 保留空数组；库构造函数会将零行转换为 null，Telegram 会拒绝该格式。
-	// 准备、封阵和取消阶段均需要无按钮面板，编辑时空数组也会清除旧按钮。
+	// 准备、结算和取消阶段均需要无按钮面板，编辑时空数组也会清除旧按钮。
 	return b.String(), tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
@@ -322,16 +300,13 @@ func HandleTribulationCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		telegram.AnswerCallback(bot, cb.ID, ErrTribulationPanel.Error())
 		return true
 	}
-	entry, err := ChooseTribulationSide(uint(id), cb.Message.Chat.ID, cb.Message.MessageID, parts[3], parts[1] == "switch", cb.From, time.Now())
+	_, err = ChooseTribulationSide(uint(id), cb.Message.Chat.ID, cb.Message.MessageID, parts[3], parts[1] == "switch", cb.From, time.Now())
 	if err != nil {
 		telegram.AnswerCallback(bot, cb.ID, tribulationErrorText(err))
-	} else if parts[1] == "switch" {
-		telegram.AnswerCallback(bot, cb.ID, "已免费换入"+tribulationSideName(entry.Side)+"，本局不能再次换阵")
 	} else {
-		telegram.AnswerCallback(bot, cb.ID, "入阵成功，扣除 5 积分；入阵结束后可免费换阵一次")
+		telegram.AnswerCallback(bot, cb.ID, "入阵成功，扣除 5 积分；本局选择已锁定")
 	}
-	// 入阵/换阵已持久化 panel_dirty。面板由独立巡检刷新，避免慢请求
-	// 持有用户回调锁，挤占仅十秒的换阵窗口。
+	// 面板由独立巡检刷新，避免慢请求持有用户回调锁。
 	return true
 }
 

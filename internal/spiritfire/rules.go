@@ -32,7 +32,7 @@ type Rules struct {
 }
 
 func DefaultRules() Rules {
-	return Rules{1, 1, 10, [4]int{2000, 3000, 4000, 5000}, [4]int{5, 8, 10, 12}}
+	return Rules{1, 1, 10, [4]int{2000, 3000, 4000, 5000}, [4]int{20, 25, 30, 35}}
 }
 func Day(t time.Time) string      { return t.In(Location).Format("2006-01-02") }
 func Tomorrow(t time.Time) string { return Day(t.In(Location).AddDate(0, 0, 1)) }
@@ -91,6 +91,9 @@ func Initialize(db *gorm.DB, now time.Time) error {
 			if err := tx.Create(&model.SpiritFireRules{EffectiveDay: Day(now), JSON: Encode(DefaultRules())}).Error; err != nil {
 				return err
 			}
+		}
+		if err := upgradeDefaultBonuses(tx, now); err != nil {
+			return err
 		}
 		names := []string{"帝炎", "虚无吞炎", "净莲妖火", "金帝焚天炎", "生灵之焱", "八荒破灭焱", "九幽金祖火", "红莲业火", "三千焱炎火", "九幽风炎", "骨灵冷火", "九龙雷罡火", "龟灵地火", "陨落心炎", "海心焰", "火云水炎", "火山石焰", "风怒龙炎", "青莲地心火", "幽冥毒火", "阴阳双炎", "万兽灵火", "玄黄炎"}
 		for i, name := range names {
@@ -211,4 +214,49 @@ func RequireAdmin(tx *gorm.DB, user int64) error {
 		return errors.New("仅超级管理员可设置异火配置")
 	}
 	return nil
+}
+
+// Upgrade persisted defaults once, preserving historical rules and custom rates.
+func upgradeDefaultBonuses(tx *gorm.DB, now time.Time) error {
+	var state model.SpiritFireState
+	if err := tx.First(&state, 1).Error; err != nil {
+		return err
+	}
+	if state.DefaultBonusUpgradeDay != "" {
+		return nil
+	}
+	day := Tomorrow(now)
+	var current model.SpiritFireRules
+	if err := tx.Where("effective_day <= ?", Day(now)).Order("effective_day DESC").First(&current).Error; err != nil {
+		return err
+	}
+	var future []model.SpiritFireRules
+	if err := tx.Where("effective_day >= ?", day).Find(&future).Error; err != nil {
+		return err
+	}
+	old := [4]int{5, 8, 10, 12}
+	for _, record := range future {
+		rules, err := ParseRules(record.JSON)
+		if err != nil {
+			return err
+		}
+		if rules.Percents == old {
+			rules.Percents = DefaultRules().Percents
+			if err := tx.Model(&record).Update("json", Encode(rules)).Error; err != nil {
+				return err
+			}
+		}
+	}
+	rules, err := ParseRules(current.JSON)
+	if err != nil {
+		return err
+	}
+	if rules.Percents == old {
+		rules.Percents = DefaultRules().Percents
+		record := model.SpiritFireRules{EffectiveDay: day, JSON: Encode(rules)}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&record).Error; err != nil {
+			return err
+		}
+	}
+	return tx.Model(&state).Update("default_bonus_upgrade_day", day).Error
 }

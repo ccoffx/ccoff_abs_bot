@@ -107,6 +107,7 @@ type DailyListeningStat struct {
 	CappedSeconds        float64
 	BaseCultivationHours float64
 	SpiritFireHours      float64
+	SectOwnerBonusHours  float64
 	EffectiveHours       float64
 	LastFetchedAt        time.Time `gorm:"index"`
 	Source               string

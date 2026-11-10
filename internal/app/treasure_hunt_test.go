@@ -44,7 +44,7 @@ func setupTreasureTestDB(t *testing.T) string {
 	if err := storage.DB.AutoMigrate(&modelpkg.TreasureRound{}, &modelpkg.TreasurePick{}, &modelpkg.User{}, &modelpkg.PointTransaction{}, &modelpkg.SystemConfig{}, &modelpkg.RedPacket{}, &modelpkg.AutoDeleteMsg{}, &modelpkg.SecurityAttemptLock{}); err != nil {
 		t.Fatal(err)
 	}
-	models := append(spiritfire.Models(), &modelpkg.Cultivation{}, &modelpkg.ListeningAbuseRecord{}, &modelpkg.AuditLog{})
+	models := append(append(spiritfire.Models(), &modelpkg.SectOwnerBonusRevision{}, &modelpkg.SectOwnerBonusState{}), &modelpkg.Cultivation{}, &modelpkg.ListeningAbuseRecord{}, &modelpkg.AuditLog{})
 	if err := storage.DB.AutoMigrate(models...); err != nil {
 		t.Fatal(err)
 	}

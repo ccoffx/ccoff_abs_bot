@@ -97,7 +97,7 @@ func TestCombinedDailyRetreatCap(t *testing.T) {
 	if err := db.AutoMigrate(&model.DailyListeningStat{}, &model.SectCaveRetreat{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(spiritfire.Models()...); err != nil {
+	if err := db.AutoMigrate(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{})...); err != nil {
 		t.Fatal(err)
 	}
 	if err := spiritfire.Initialize(db, time.Now()); err != nil {

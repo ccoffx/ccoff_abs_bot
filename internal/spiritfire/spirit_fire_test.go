@@ -107,14 +107,14 @@ func TestCatalogAndBonus(t *testing.T) {
 			sum += r.Percents[f.Grade]
 		}
 	}
-	if sum != 186 {
+	if sum != 590 {
 		t.Fatal(sum)
 	}
 	for _, tc := range []struct {
 		raw, base float64
 		p         int
 		want      float64
-	}{{0, 0, 186, 0}, {24, 8.5, 186, 28.83}, {30, 8.5, 186, 28.83}, {8, 6.4, 50, .8}, {8, 7.2, 50, .4}, {18, 8.5, 186, 17.67}, {4, 4, 186, 0}, {8, 6.4, 0, 0}} {
+	}{{0, 0, 590, 0}, {24, 8.5, 590, 91.45}, {30, 8.5, 590, 91.45}, {8, 6.4, 50, .8}, {8, 7.2, 50, .4}, {18, 8.5, 590, 56.05}, {4, 4, 590, 0}, {8, 6.4, 0, 0}} {
 		if got := Bonus(tc.raw*3600, tc.base, tc.p); math.Abs(got-tc.want) > 1e-9 {
 			t.Fatalf("%+v: %v", tc, got)
 		}
@@ -214,7 +214,7 @@ func TestDailySnapshotHistoryAndFullFusion(t *testing.T) {
 	stat := model.DailyListeningStat{UserID: 1, DayKey: Day(next), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5}
 	must(t, db.Create(&stat).Error)
 	must(t, db.Transaction(func(tx *gorm.DB) error { must(t, Lock(tx)); return RefreshDaily(tx, &stat, 8.5, next) }))
-	if math.Abs(stat.SpiritFireHours+8.5-37.33) > 1e-9 {
+	if math.Abs(stat.SpiritFireHours+8.5-99.95) > 1e-9 {
 		t.Fatal(stat)
 	}
 	must(t, Equip(db, 1, nil, next))
@@ -224,7 +224,7 @@ func TestDailySnapshotHistoryAndFullFusion(t *testing.T) {
 	stat.CappedSeconds = 8 * 3600
 	stat.EffectiveHours = 6.4
 	must(t, db.Transaction(func(tx *gorm.DB) error { must(t, Lock(tx)); return RefreshDaily(tx, &stat, 7.2, next.AddDate(0, 0, 1)) }))
-	if math.Abs(stat.SpiritFireHours-2.976) > 1e-9 {
+	if math.Abs(stat.SpiritFireHours-9.44) > 1e-9 {
 		t.Fatal(stat.SpiritFireHours)
 	}
 	must(t, db.Transaction(func(tx *gorm.DB) error {
@@ -254,9 +254,9 @@ func TestRefreshDailyUsesCreditedListeningAndKeepsAdditiveBonus(t *testing.T) {
 		wantBonus, wantTotal     float64
 	}{
 		{"duplicate twelve-hour reports", 12 * 3600, 7.314285714285715, 7.314285714285715, 100, 4.685714285714285, 12},
-		{"zero credit cannot generate fire rewards", 0, 0, 0, 186, 0, 0},
-		{"full fusion exceeds daily listening and base caps", 24 * 3600, 8.5, 8.5, 186, 28.83, 37.33},
-		{"retreat does not reduce additive fire reward", 8 * 3600, 6.4, 7.2, 186, 2.976, 10.176},
+		{"zero credit cannot generate fire rewards", 0, 0, 0, 590, 0, 0},
+		{"full fusion exceeds daily listening and base caps", 24 * 3600, 8.5, 8.5, 590, 91.45, 99.95},
+		{"retreat does not reduce additive fire reward", 8 * 3600, 6.4, 7.2, 590, 9.44, 16.64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, now := fixture(t)
@@ -264,7 +264,7 @@ func TestRefreshDailyUsesCreditedListeningAndKeepsAdditiveBonus(t *testing.T) {
 			stat := model.DailyListeningStat{
 				UserID: 1, DayKey: Day(now), RawSeconds: 24 * 3600,
 				CappedSeconds: tc.credited, EffectiveHours: tc.ordinary,
-				BaseCultivationHours: 8.5, SpiritFireHours: 28.83,
+				BaseCultivationHours: 8.5, SpiritFireHours: 91.45,
 			}
 			must(t, db.Create(&stat).Error)
 			for retry := 0; retry < 2; retry++ {
@@ -509,4 +509,63 @@ func TestGraceRecoveryAndDeletedAccountPreserveMastery(t *testing.T) {
 	if n != 1 {
 		t.Fatal(n)
 	}
+}
+
+func TestPersistedDefaultBonusUpgrade(t *testing.T) {
+	for _, scheduled := range []bool{false, true} {
+		for _, custom := range []bool{false, true} {
+			t.Run(fmt.Sprintf("custom=%v/scheduled=%v", custom, scheduled), func(t *testing.T) {
+				db, now := fixture(t)
+				old := DefaultRules()
+				old.Percents = [4]int{5, 8, 10, 12}
+				old.BossChance = 7
+				if custom {
+					old.Percents = [4]int{21, 26, 31, 36}
+				}
+				must(t, db.Model(&model.SpiritFireState{}).Where("id = 1").Update("default_bonus_upgrade_day", "").Error)
+				must(t, db.Model(&model.SpiritFireRules{}).Where("effective_day = ?", Day(now)).Update("json", Encode(old)).Error)
+				// An already scheduled rule retains its other settings.
+				future := old
+				future.ScrollChance = 17
+				if scheduled {
+					must(t, db.Create(&model.SpiritFireRules{EffectiveDay: Tomorrow(now), JSON: Encode(future)}).Error)
+				}
+				must(t, db.Create(&model.SpiritFireDaily{UserID: 1, DayKey: Day(now), Percent: 186}).Error)
+				must(t, Initialize(db, now))
+				today, err := RulesAt(db, Day(now))
+				must(t, err)
+				if today != old {
+					t.Fatalf("historical rules changed: %+v", today)
+				}
+				next, err := RulesAt(db, Tomorrow(now))
+				must(t, err)
+				want := old
+				if scheduled {
+					want = future
+				}
+				if !custom {
+					want.Percents = [4]int{20, 25, 30, 35}
+				}
+				if next != want {
+					t.Fatalf("next rules=%+v want=%+v", next, want)
+				}
+				var snapshot model.SpiritFireDaily
+				must(t, db.Where("user_id = 1").First(&snapshot).Error)
+				if snapshot.Percent != 186 {
+					t.Fatal("historical snapshot changed", snapshot)
+				}
+				must(t, Initialize(db, now.AddDate(0, 0, 3)))
+				var count int64
+				must(t, db.Model(&model.SpiritFireRules{}).Count(&count).Error)
+				wantCount := int64(2)
+				if custom && !scheduled {
+					wantCount = 1
+				}
+				if count != wantCount {
+					t.Fatal("restart repeated upgrade", count)
+				}
+			})
+		}
+	}
+
 }

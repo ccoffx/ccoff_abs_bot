@@ -465,12 +465,14 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				realmStr := game.GetRealmName(cul)
 				todayEffectiveHours := 0.0
 				todayEffectiveHoursText := "`0.00`"
+				ownerBonusText := game.SectOwnerCultivationPerkText
 				if todayStat, ok, err := game.GetTodayDailyListeningStatChecked(userID, time.Now()); err != nil {
 					log.Printf("⚠️ 我的信息今日净修为读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 					todayEffectiveHoursText = "`读取失败`"
 				} else if ok {
-					todayEffectiveHours = todayStat.EffectiveHours + game.ActiveSectCaveRetreatBonusHours(userID, time.Now()) + todayStat.SpiritFireHours
+					todayEffectiveHours = todayStat.EffectiveHours + game.ActiveSectCaveRetreatBonusHours(userID, time.Now()) + todayStat.SpiritFireHours + todayStat.SectOwnerBonusHours
 					todayEffectiveHoursText = fmt.Sprintf("`%.2f`", todayEffectiveHours)
+					ownerBonusText += game.SectOwnerDailyBonusLine(todayStat)
 				}
 
 				// 🩸 核心新增：天道时间时区计算与周/月度丹毒沉淀勘测
@@ -513,6 +515,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					" ├ 🎧 **闭关苦修**: `%.1f` 小时\n"+
 					" └ 💊 **丹药药力**: `%.1f` 小时\n"+
 					"🌅 **今日净修为**: %s 小时\n"+
+					"%s\n"+
 					"🪵 **渡劫气运**: `%d` 次失败累积\n"+
 					"──────────────\n"+
 					"🩸 **【体内丹毒沉淀】** *(每周一零点重置)*\n"+
@@ -520,7 +523,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					"💊 青灵养气丹: `%s` 次\n"+
 					"🍎 万载灵髓: `%s` 次 *(每月限额)*",
 					textfmt.EscapeMarkdown(u.Username), userID, u.Points, statusText,
-					realmStr, cul.TotalAudioTime+cul.PillAudioTime, cul.TotalAudioTime, cul.PillAudioTime, todayEffectiveHoursText, cul.TribulationFails,
+					realmStr, cul.TotalAudioTime+cul.PillAudioTime, cul.TotalAudioTime, cul.PillAudioTime, todayEffectiveHoursText, ownerBonusText, cul.TribulationFails,
 					game.ManualPillUsageCountText(countHuiQi, 3, errHuiQi == nil),
 					game.ManualPillUsageCountText(countQingLingYangQi, 2, errQingLingYangQi == nil),
 					game.ManualPillUsageCountText(countWanZaiLingSui, 1, errWanZaiLingSui == nil))

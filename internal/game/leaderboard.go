@@ -15,6 +15,7 @@ import (
 	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
+	"ccoff-abs-bot/internal/sectbonus"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -326,7 +327,11 @@ func leaderboardCultivationHours(userID int64, timeframe string, validDates map[
 	total := 0.0
 	for _, stat := range stats {
 		if isLeaderboardDateValid(stat.DayKey, timeframe, validDates, monthPrefix) {
-			total += stat.EffectiveHours + dailySectCaveRetreatBonusHours(stat, retreats) + stat.SpiritFireHours
+			ownerBonus, err := sectbonus.DailyBonus(storage.DB, stat)
+			if err != nil {
+				return 0, err
+			}
+			total += stat.EffectiveHours + dailySectCaveRetreatBonusHours(stat, retreats) + stat.SpiritFireHours + ownerBonus
 		}
 	}
 	return total, nil

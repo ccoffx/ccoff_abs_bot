@@ -124,8 +124,8 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 				spiritFireLine = "\n🔥 今日基础与异火修为读取失败，请稍后重试。"
 			} else if ok {
 				todayRawHours = abs.PositiveListeningSeconds(todayStat.RawSeconds) / 3600.0
-				todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + todayStat.SpiritFireHours
-				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-todayStat.SpiritFireHours, todayStat.SpiritFireHours)
+				todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + todayStat.SpiritFireHours + todayStat.SectOwnerBonusHours
+				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayStat.BaseCultivationHours, todayStat.SpiritFireHours) + SectOwnerDailyBonusLine(todayStat)
 				validationNotice = fmt.Sprintf("\n今日有效计入听书: %.2f 小时", todayStat.CappedSeconds/3600) + dailyListeningValidationNotice(todayStat)
 			}
 		} else {
@@ -134,8 +134,8 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 			if stat, total, ok := cachedDailyListeningReport(u.TelegramID, absUserID, now); ok {
 				effectiveTotalHours = total
 				todayRawHours = abs.PositiveListeningSeconds(stat.RawSeconds) / 3600
-				todayEffectiveHours = stat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + stat.SpiritFireHours
-				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayEffectiveHours-stat.SpiritFireHours, stat.SpiritFireHours)
+				todayEffectiveHours = stat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + stat.SpiritFireHours + stat.SectOwnerBonusHours
+				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", stat.BaseCultivationHours, stat.SpiritFireHours) + SectOwnerDailyBonusLine(stat)
 				validationNotice = fmt.Sprintf("\n今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600) + dailyListeningValidationNotice(stat)
 				refreshNotice = fmt.Sprintf("\n⚠️ 本次刷新失败，今日时长及修为使用上次成功统计（%s）。", stat.LastFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
 			} else {

@@ -166,7 +166,7 @@ func getSectMaxMembersWithTechTxChecked(tx *gorm.DB, sect model.Sect) (int, erro
 	if err != nil {
 		return 0, err
 	}
-	return base + bonusLevel*5, nil
+	return base + bonusLevel*2, nil
 }
 
 func getSectMaxMembersWithTech(sect model.Sect) int {
@@ -211,7 +211,7 @@ func formatSectTechnologyEffect(key string, level int, sect model.Sect) string {
 	case sectTechDailyTaskBonus:
 		return fmt.Sprintf("宗门每日任务奖励：贡献 +%d，声望 +%d", sectDailyTaskRewardContribution+level, sectDailyTaskRewardPrestige+level)
 	case sectTechMemberLimit:
-		return fmt.Sprintf("成员上限 +%d，当前上限 %s 人", level*5, sectMaxMembersDisplayText(sect, "sect_technology_effect", 0))
+		return fmt.Sprintf("名额加成 +%d，当前上限 %s 人", level*2, sectMaxMembersDisplayText(sect, "sect_technology_effect", 0))
 	default:
 		return "未知效果"
 	}

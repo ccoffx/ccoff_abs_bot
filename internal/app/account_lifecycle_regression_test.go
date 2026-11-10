@@ -33,7 +33,7 @@ func lifecycleFixture(t *testing.T, expireAt time.Time, suspended bool, handler 
 	if err := storage.InitializeOrphanAccountDeletionGuards(storage.DB); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.DB.AutoMigrate(spiritfire.Models()...); err != nil {
+	if err := storage.DB.AutoMigrate(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{})...); err != nil {
 		t.Fatal(err)
 	}
 	if err := spiritfire.Initialize(storage.DB, time.Now()); err != nil {

@@ -29,7 +29,7 @@ func setupListeningContributionTest(t *testing.T) (*gorm.DB, time.Time, model.Da
 	old := storage.DB
 	storage.DB = db
 	t.Cleanup(func() { storage.DB = old; pool.Close() })
-	models := append(spiritfire.Models(), &model.User{}, &model.Cultivation{}, &model.DailyListeningStat{}, &model.SectCaveRetreat{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.AuditLog{})
+	models := append(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{}), &model.User{}, &model.Cultivation{}, &model.DailyListeningStat{}, &model.SectCaveRetreat{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.AuditLog{})
 	contributionMust(t, db.AutoMigrate(models...))
 	contributionMust(t, db.Exec("CREATE UNIQUE INDEX ux_contribution_cultivation ON cultivations(user_id)").Error)
 	now := time.Now()
@@ -83,7 +83,7 @@ func TestSpiritFireRetreatAlwaysAddsFullBenefit(t *testing.T) {
 	// including the previously broken >100% range.
 	r := addContributionRetreat(t, db, stat.DayKey)
 	evidence := r.ListeningEvidenceJSON
-	for _, percent := range []int{0, 50, 100, 186, 250} {
+	for _, percent := range []int{0, 50, 100, 590, 250} {
 		contributionMust(t, db.Model(&r).Update("listening_evidence_json", "").Error)
 		contributionMust(t, db.Transaction(func(tx *gorm.DB) error {
 			if err := spiritfire.Lock(tx); err != nil {
@@ -111,7 +111,7 @@ func TestSpiritFireRetreatAlwaysAddsFullBenefit(t *testing.T) {
 		if math.Abs(with-without-.8) > 1e-9 || a.SpiritFireHours != b.SpiritFireHours {
 			t.Fatalf("percent=%d without=%g with=%g bonuses=%g/%g", percent, without, with, a.SpiritFireHours, b.SpiritFireHours)
 		}
-		if percent == 186 && (math.Abs(with-10.176) > 1e-9 || math.Abs(without-9.376) > 1e-9) {
+		if percent == 590 && (math.Abs(with-16.64) > 1e-9 || math.Abs(without-15.84) > 1e-9) {
 			t.Fatal(without, with)
 		}
 	}
@@ -121,28 +121,28 @@ func TestListeningContributionRetreatAndHistoricalCorrection(t *testing.T) {
 	db, now, stat := setupListeningContributionTest(t)
 	_, err := createCultivationIfMissing(1)
 	contributionMust(t, err)
-	assertListeningSync(t, now, 9.376)
+	assertListeningSync(t, now, 15.84)
 	assertContribution(t, db, 6)
 	// Retreat +0.8 increases eligible whole hours from 6 to 7, fire stays fixed.
 	addContributionRetreat(t, db, stat.DayKey)
-	assertListeningSync(t, now, 10.176)
+	assertListeningSync(t, now, 16.64)
 	assertContribution(t, db, 7)
-	assertListeningSync(t, now, 10.176)
+	assertListeningSync(t, now, 16.64)
 	assertContribution(t, db, 7)
 	contributionMust(t, db.Model(&stat).Updates(map[string]interface{}{"raw_seconds": 4 * 3600, "capped_seconds": 4 * 3600, "effective_hours": 4}).Error)
 	assertListeningSync(t, now, 4)
 	assertContribution(t, db, 7)
 	contributionMust(t, db.Model(&stat).Updates(map[string]interface{}{"raw_seconds": 8 * 3600, "capped_seconds": 8 * 3600, "effective_hours": 6.4}).Error)
-	assertListeningSync(t, now, 10.176)
+	assertListeningSync(t, now, 16.64)
 	assertContribution(t, db, 7)
 	contributionMust(t, db.Create(&model.DailyListeningStat{UserID: 1, DayKey: SectDayKey(now), RawSeconds: 2 * 3600, EffectiveHours: 2}).Error)
-	assertListeningSync(t, now, 12.176)
+	assertListeningSync(t, now, 18.64)
 	assertContribution(t, db, 9)
 	updateCultivationAudioHours(1, 99999) // An activity cannot pay based on this total.
 	assertContribution(t, db, 9)
 	var cul model.Cultivation
 	contributionMust(t, db.Where("user_id = 1").First(&cul).Error)
-	if math.Abs(cul.SectListeningSettledHours-9.2) > 1e-9 || math.Abs(cul.TotalAudioTime-12.176) > 1e-9 {
+	if math.Abs(cul.SectListeningSettledHours-9.2) > 1e-9 || math.Abs(cul.TotalAudioTime-18.64) > 1e-9 {
 		t.Fatal(cul)
 	}
 }
@@ -206,8 +206,8 @@ func TestListeningContributionFailureRollsBackAndRetries(t *testing.T) {
 		t.Fatal(sect)
 	}
 	contributionMust(t, db.Exec("DROP TRIGGER reject_listening_log").Error)
-	assertListeningSync(t, now, 9.376)
+	assertListeningSync(t, now, 15.84)
 	assertContribution(t, db, 6)
-	assertListeningSync(t, now, 9.376)
+	assertListeningSync(t, now, 15.84)
 	assertContribution(t, db, 6)
 }

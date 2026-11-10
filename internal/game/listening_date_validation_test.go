@@ -36,6 +36,6 @@ func TestFutureDailyListeningCannotAwardCultivationOrContribution(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	assertListeningSync(t, now, 9.376)
+	assertListeningSync(t, now, 15.84)
 	assertContribution(t, storage.DB, 6)
 }

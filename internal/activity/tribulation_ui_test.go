@@ -237,7 +237,7 @@ func TestTribulationPanelUsesCurrentPhaseAfterSlowEarlierRequest(t *testing.T) {
 	})
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.edits) != 2 || !strings.Contains(f.edits[1], "已停止入阵") {
+	if len(f.edits) != 2 || !strings.Contains(f.edits[1], "正在结算") {
 		t.Fatal("later group's panel used the timestamp from before the slow request", f.edits)
 	}
 }
@@ -360,16 +360,16 @@ func TestTribulationTelegramFlowAndFailedPublication(t *testing.T) {
 		t.Fatal("wrong settlement or single-side title eligibility")
 	}
 	want := 95
-	if r.WinningSide == TribulationYin {
+	if r.WinningSide == TribulationYang {
 		want = 105
 	}
-	if tribulationTestBalance(t, 1) != want || tribulationTestBalance(t, 2) != want {
+	if tribulationTestBalance(t, 1) != want || tribulationTestBalance(t, 2) != 200-want {
 		t.Fatal("wrong callback settlement")
 	}
 	f.mu.Lock()
 	allEdits := strings.Join(f.edits, "\n")
 	f.mu.Unlock()
-	if !strings.Contains(allEdits, "两阵已封锁") || !strings.Contains(allEdits, "避雷成功") || !strings.Contains(allEdits, "玩家1：☀️ 阳阵 → 🌙 阴阵") {
+	if !strings.Contains(allEdits, "避雷成功") || strings.Contains(allEdits, "两阵已封锁") || strings.Contains(allEdits, "→") {
 		t.Fatal("phase, switch or result missing", allEdits)
 	}
 }
@@ -433,6 +433,12 @@ func TestTribulationPublishingPanelHasNoEntryButtons(t *testing.T) {
 
 func seedTribulationTestTitle(t *testing.T, id int64, key string) {
 	t.Helper()
+	// 使用测试专属称号继续覆盖通用群标签同步、限流与权限逻辑。
+	if _, ok := titles.ByKey(key); !ok {
+		previous := titles.UniqueDefinitions
+		titles.UniqueDefinitions = append(append([]titles.Definition{}, previous...), titles.Definition{Key: key, Name: map[string]string{"escape": "临阵脱身", "backfire": "自投雷网", "steadfast": "道心坚定", "lone": "孤胆渡劫"}[key], Source: "tribulation", Unique: true})
+		t.Cleanup(func() { titles.UniqueDefinitions = previous })
+	}
 	if err := storage.DB.Create(&model.TribulationTitleHolder{ChatID: -100, TitleKey: key, UserID: id, UserName: "玩家", Count: 1, AcquiredAt: time.Now()}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -911,7 +917,7 @@ func TestTitlePageOpensDefaultGroupDirectly(t *testing.T) {
 		f.mu.Lock()
 		out, markup := f.panels[len(f.panels)-1], f.markups[len(f.markups)-1]
 		f.mu.Unlock()
-		if !strings.Contains(out, command) || !strings.Contains(out, "天雷猜阵") || strings.Contains(out, "请选择交流群") || strings.Contains(markup, "选择交流群") {
+		if !strings.Contains(out, command) || !strings.Contains(out, "榜首荣誉") || strings.Contains(out, "请选择交流群") || strings.Contains(markup, "选择交流群") {
 			t.Fatal("single-group command still needs group selection", command, out, markup)
 		}
 		if command == "我的称号" && !strings.Contains(markup, "titles:equip:-100:escape") {
@@ -927,7 +933,7 @@ func TestTitlePageOpensDefaultGroupDirectly(t *testing.T) {
 		f.mu.Lock()
 		edits := append([]string(nil), f.edits...)
 		f.mu.Unlock()
-		if len(edits) != before+1 || !strings.Contains(edits[len(edits)-1], "天雷猜阵") || strings.Contains(edits[len(edits)-1], "请选择交流群") {
+		if len(edits) != before+1 || !strings.Contains(edits[len(edits)-1], "榜首荣誉") || strings.Contains(edits[len(edits)-1], "请选择交流群") {
 			t.Fatal("notice or old entry did not open default group", data, edits)
 		}
 	}

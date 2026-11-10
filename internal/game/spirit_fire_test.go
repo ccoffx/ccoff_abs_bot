@@ -27,7 +27,7 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 	old := storage.DB
 	storage.DB = db
 	t.Cleanup(func() { storage.DB = old; conn.Close() })
-	for _, m := range append(spiritfire.Models(), &model.DailyListeningStat{}, &model.SectCaveRetreat{}) {
+	for _, m := range append(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{}), &model.DailyListeningStat{}, &model.SectCaveRetreat{}) {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +54,7 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		got, ok := totalCultivationEffectiveHoursFromDailyStats(1, now)
-		if !ok || math.Abs(got-(8.5+37.33)) > 1e-9 {
+		if !ok || math.Abs(got-(8.5+99.95)) > 1e-9 {
 			t.Fatalf("total %v ok=%v", got, ok)
 		}
 	}
@@ -62,7 +62,7 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("today: %v %v", ok, err)
 	}
-	if stat.EffectiveHours != 8.5 || stat.BaseCultivationHours != 8.5 || math.Abs(stat.SpiritFireHours-28.83) > 1e-9 {
+	if stat.EffectiveHours != 8.5 || stat.BaseCultivationHours != 8.5 || math.Abs(stat.SpiritFireHours-91.45) > 1e-9 {
 		t.Fatal(stat)
 	}
 	// Sect activities still consume ordinary hours; fire does not inflate them.
@@ -76,7 +76,7 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok = totalCultivationEffectiveHoursFromDailyStats(1, now.AddDate(0, 0, 1))
-	if !ok || math.Abs(got-(8.5+6.4+1.6*1.86)) > 1e-9 {
+	if !ok || math.Abs(got-(8.5+6.4+1.6*5.90)) > 1e-9 {
 		t.Fatalf("corrected total %v %v", got, ok)
 	}
 	// Losing a snapshot table must fail instead of replacing cultivation with zero.

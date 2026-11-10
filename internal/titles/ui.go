@@ -31,7 +31,7 @@ func Render(chatID, userID int64, ranking bool) (string, tgbotapi.InlineKeyboard
 			return err
 		}
 		fmt.Fprintf(&b, "🏅 %s · %s\n\n", map[bool]string{false: "我的称号", true: "称号榜"}[ranking], textfmt.LotteryDisplayText(group.Name, 40, "交流群"))
-		b.WriteString("境界称号默认佩戴，不限持有人数。榜首称号全服唯一，猜阵称号群内唯一；并列保留原持有者。\n\n")
+		b.WriteString("境界称号默认佩戴，不限持有人数。榜首称号全服唯一；并列保留原持有者。\n\n")
 		var equipment model.TitleEquipment
 		if !ranking {
 			err := tx.Where("chat_id = ? AND user_id = ?", chatID, userID).First(&equipment).Error
@@ -72,7 +72,9 @@ func Render(chatID, userID int64, ranking bool) (string, tgbotapi.InlineKeyboard
 		if err := renderRankTitlesInTx(tx, &b, &rows, chatID, userID, ranking); err != nil {
 			return err
 		}
-		b.WriteString("⚡ 天雷猜阵 · 唯一称号\n封阵时两边都有人才累计次数。\n\n")
+		if len(UniqueDefinitions) > 0 {
+			b.WriteString("群内唯一称号\n\n")
+		}
 		for _, title := range UniqueDefinitions {
 			fmt.Fprintf(&b, "%s %s｜%s\n", title.Emoji, title.Name, title.Description)
 			var holder model.TribulationTitleHolder

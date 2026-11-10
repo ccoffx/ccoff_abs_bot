@@ -61,6 +61,7 @@ var rebindAssetModels = []struct {
 	{&model.CompensationGrant{}, []string{"UserID"}},
 	{&model.SectShopRenewClaim{}, []string{"UserID"}},
 	{&model.Sect{}, []string{"OwnerID"}},
+	{&model.SectOwnerBonusRevision{}, []string{"UserID"}},
 	{&model.SectMember{}, []string{"UserID"}},
 	{&model.SectContributionLog{}, []string{"UserID"}},
 	{&model.SectDailyTaskClaim{}, []string{"UserID"}},

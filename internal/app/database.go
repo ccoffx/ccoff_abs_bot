@@ -14,6 +14,7 @@ import (
 	"ccoff-abs-bot/internal/game"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/operations"
+	"ccoff-abs-bot/internal/sectbonus"
 	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
@@ -157,6 +158,12 @@ func InitDB() {
 	}
 	if err := storage.DB.AutoMigrate(spiritfire.Models()...); err != nil {
 		log.Fatalf("异火数据库结构初始化失败: %s", textfmt.FormatPlainError(err))
+	}
+	if err := storage.DB.AutoMigrate(sectbonus.Models()...); err != nil {
+		log.Fatalf("宗主修炼加成表初始化失败: %s", err)
+	}
+	if err := sectbonus.Initialize(storage.DB, time.Now()); err != nil {
+		log.Fatalf("宗主修炼加成初始化失败: %s", err)
 	}
 	if err := storage.InitializeAccountLifecycleGuards(storage.DB); err != nil {
 		log.Fatalf("账号生命周期保护初始化失败: %s", err)

@@ -217,7 +217,7 @@ func TestCultivationTreasureExchangeAuditFailureRollsBack(t *testing.T) {
 
 func TestCurrentCultivationIntegration(t *testing.T) {
 	setupCultivationTreasureTestDB(t)
-	if err := storage.DB.AutoMigrate(spiritfire.Models()...); err != nil {
+	if err := storage.DB.AutoMigrate(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{})...); err != nil {
 		t.Fatal(err)
 	}
 	if err := spiritfire.Initialize(storage.DB, time.Now()); err != nil {
