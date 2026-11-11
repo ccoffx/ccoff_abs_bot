@@ -27,7 +27,6 @@ const (
 	gardenStatusHarvest           = "harvested"
 	gardenCallbackPrefix          = "garden:"
 	gardenMarketOfferMax          = 2
-	gardenBaseReturnPct           = 90
 	gardenMaturityNoticeInterval  = 1 * time.Minute
 	gardenMaturityNoticeBatchSize = 200
 )
@@ -114,31 +113,32 @@ func PillEffectMarkdownLine(itemName string) string {
 	return ""
 }
 
+// 普通回收按株整数定价：低阶期望保本，高阶期望利润逐步提高至 5%。
 var GardenSeeds = []gardenSeedConfig{
-	{Key: "huiqicao", SeedName: "回气草种子", HerbName: "回气草", Price: 15, GrowDuration: 2 * time.Hour, YieldMin: 2, YieldMax: 4, SellPrice: 3, DailyLimit: 10, Purchasable: true},
-	{Key: "qingling", SeedName: "青灵叶种子", HerbName: "青灵叶", Price: 25, GrowDuration: 4 * time.Hour, YieldMin: 2, YieldMax: 3, SellPrice: 6, DailyLimit: 8, Purchasable: true},
-	{Key: "chiyang", SeedName: "赤阳花种子", HerbName: "赤阳花", Price: 40, GrowDuration: 6 * time.Hour, YieldMin: 1, YieldMax: 3, SellPrice: 10, DailyLimit: 6, Purchasable: true},
-	{Key: "yueyingteng", SeedName: "月影藤种子", HerbName: "月影藤", Price: 60, GrowDuration: 8 * time.Hour, YieldMin: 1, YieldMax: 2, SellPrice: 16, DailyLimit: 4, Purchasable: true},
-	{Key: "xuanyanshen", SeedName: "玄岩参种子", HerbName: "玄岩参", Price: 90, GrowDuration: 12 * time.Hour, YieldMin: 1, YieldMax: 2, SellPrice: 25, DailyLimit: 3, Purchasable: true},
-	{Key: "zijingzhi", SeedName: "紫晶芝种子", HerbName: "紫晶芝", Price: 140, GrowDuration: 18 * time.Hour, YieldMin: 1, YieldMax: 1, SellPrice: 45, DailyLimit: 1, Purchasable: true},
+	{Key: "huiqicao", SeedName: "回气草种子", HerbName: "回气草", Price: 15, GrowDuration: 2 * time.Hour, YieldMin: 2, YieldMax: 4, SellPrice: 5, DailyLimit: 10, Purchasable: true},
+	{Key: "qingling", SeedName: "青灵叶种子", HerbName: "青灵叶", Price: 25, GrowDuration: 4 * time.Hour, YieldMin: 2, YieldMax: 3, SellPrice: 10, DailyLimit: 8, Purchasable: true},
+	{Key: "chiyang", SeedName: "赤阳花种子", HerbName: "赤阳花", Price: 40, GrowDuration: 6 * time.Hour, YieldMin: 1, YieldMax: 3, SellPrice: 20, DailyLimit: 6, Purchasable: true},
+	{Key: "yueyingteng", SeedName: "月影藤种子", HerbName: "月影藤", Price: 60, GrowDuration: 8 * time.Hour, YieldMin: 1, YieldMax: 2, SellPrice: 41, DailyLimit: 4, Purchasable: true},
+	{Key: "xuanyanshen", SeedName: "玄岩参种子", HerbName: "玄岩参", Price: 90, GrowDuration: 12 * time.Hour, YieldMin: 1, YieldMax: 2, SellPrice: 62, DailyLimit: 3, Purchasable: true},
+	{Key: "zijingzhi", SeedName: "紫晶芝种子", HerbName: "紫晶芝", Price: 140, GrowDuration: 18 * time.Hour, YieldMin: 1, YieldMax: 1, SellPrice: 147, DailyLimit: 1, Purchasable: true},
 	{Key: "longxue", SeedName: "龙血果种子", HerbName: "龙血果", Price: 0, GrowDuration: 24 * time.Hour, YieldMin: 1, YieldMax: 1, SellPrice: 80, DailyLimit: 0, Purchasable: false},
 	{Key: "chixinlian", SeedName: "炽心莲种子", HerbName: "炽心莲", Price: 0, GrowDuration: 36 * time.Hour, YieldMin: 1, YieldMax: 1, SellPrice: 120, DailyLimit: 0, Purchasable: false},
 }
 
 var gardenHerbEconomy = map[string]gardenHerbEconomyConfig{
-	"huiqicao":    {MarketPriceMin: 5, MarketPriceMax: 6, MarketLimitMin: 15, MarketLimitMax: 15},
-	"qingling":    {MarketPriceMin: 10, MarketPriceMax: 11, MarketLimitMin: 12, MarketLimitMax: 12},
-	"chiyang":     {MarketPriceMin: 20, MarketPriceMax: 22, MarketLimitMin: 8, MarketLimitMax: 8},
-	"yueyingteng": {MarketPriceMin: 40, MarketPriceMax: 43, MarketLimitMin: 5, MarketLimitMax: 5},
-	"xuanyanshen": {MarketPriceMin: 60, MarketPriceMax: 64, MarketLimitMin: 3, MarketLimitMax: 3},
-	"zijingzhi":   {MarketPriceMin: 140, MarketPriceMax: 148, MarketLimitMin: 1, MarketLimitMax: 1},
+	"huiqicao":    {MarketPriceMin: 6, MarketPriceMax: 6, MarketLimitMin: 15, MarketLimitMax: 15},
+	"qingling":    {MarketPriceMin: 11, MarketPriceMax: 11, MarketLimitMin: 12, MarketLimitMax: 12},
+	"chiyang":     {MarketPriceMin: 21, MarketPriceMax: 22, MarketLimitMin: 8, MarketLimitMax: 8},
+	"yueyingteng": {MarketPriceMin: 43, MarketPriceMax: 44, MarketLimitMin: 5, MarketLimitMax: 5},
+	"xuanyanshen": {MarketPriceMin: 65, MarketPriceMax: 66, MarketLimitMin: 3, MarketLimitMax: 3},
+	"zijingzhi":   {MarketPriceMin: 153, MarketPriceMax: 154, MarketLimitMin: 1, MarketLimitMax: 1},
 }
 
 var GardenRecipes = []GardenRecipeConfig{
 	{Key: "huiqi", Name: "回气丹方", ProductName: "回气丹", UnlockPrice: 20, AlchemyCost: 3, Materials: []gardenMaterial{{ItemName: "回气草", Quantity: 8}, {ItemName: "青灵叶", Quantity: 5}}},
 	{Key: "ningyuan", Name: "凝元丹方", ProductName: "凝元丹", UnlockPrice: 30, AlchemyCost: 5, Materials: []gardenMaterial{{ItemName: "回气草", Quantity: 3}, {ItemName: "赤阳花", Quantity: 1}}},
 	{Key: "sanwenqingling", Name: "三纹清灵丹方", ProductName: "三纹清灵丹", UnlockPrice: 60, AlchemyCost: 8, Materials: []gardenMaterial{{ItemName: "赤阳花", Quantity: 2}, {ItemName: "月影藤", Quantity: 1}}},
-	{Key: "qinglingyangqi", Name: "青灵养气丹方", ProductName: "青灵养气丹", UnlockPrice: 100, AlchemyCost: 30, Materials: []gardenMaterial{{ItemName: "青灵叶", Quantity: 8}, {ItemName: "玄岩参", Quantity: 3}, {ItemName: "紫晶芝", Quantity: 1}}},
+	{Key: "qinglingyangqi", Name: "青灵养气丹方", ProductName: "青灵养气丹", UnlockPrice: 100, AlchemyCost: 30, Materials: []gardenMaterial{{ItemName: "青灵叶", Quantity: 6}, {ItemName: "玄岩参", Quantity: 1}, {ItemName: "紫晶芝", Quantity: 1}}},
 	{Key: "douling", Name: "斗灵丹方", ProductName: "斗灵丹", UnlockPrice: 160, AlchemyCost: 25, Materials: []gardenMaterial{{ItemName: "玄岩参", Quantity: 2}, {ItemName: "紫晶芝", Quantity: 1}}},
 	{Key: "huangji", Name: "皇极丹方", ProductName: "皇极丹", UnlockPrice: 280, AlchemyCost: 50, Materials: []gardenMaterial{{ItemName: "龙血果", Quantity: 1}, {ItemName: "炽心莲", Quantity: 1}, {ItemName: "紫晶芝", Quantity: 1}}},
 }
@@ -165,26 +165,7 @@ func GardenHerbBaseSellPrice(cfg gardenSeedConfig) int {
 	if cfg.SellPrice < 0 {
 		return 0
 	}
-	if !cfg.Purchasable {
-		return cfg.SellPrice
-	}
-	price := gardenHerbReturnUnitPriceFloor(cfg, gardenBaseReturnPct)
-	if price < cfg.SellPrice {
-		return cfg.SellPrice
-	}
-	return price
-}
-
-func gardenHerbReturnUnitPriceFloor(cfg gardenSeedConfig, returnPct int) int {
-	if !cfg.Purchasable || cfg.Price <= 0 || cfg.YieldMin <= 0 || cfg.YieldMax <= 0 {
-		return cfg.SellPrice
-	}
-
-	denom := cfg.YieldMin + cfg.YieldMax
-	if returnPct <= 0 {
-		returnPct = 100
-	}
-	return cfg.Price * returnPct * 2 / (denom * 100)
+	return cfg.SellPrice
 }
 
 func gardenMarketScore(dayKey string, seedKey string, salt string) int {

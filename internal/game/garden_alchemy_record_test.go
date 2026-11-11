@@ -13,6 +13,19 @@ import (
 )
 
 func TestGardenAlchemyRecordsOnlyCommittedProducts(t *testing.T) {
+	for _, recipeKey := range []string{"ningyuan", "qinglingyangqi"} {
+		t.Run(recipeKey, func(t *testing.T) {
+			testGardenAlchemyRecordsOnlyCommittedProducts(t, recipeKey)
+		})
+	}
+}
+
+func testGardenAlchemyRecordsOnlyCommittedProducts(t *testing.T, recipeKey string) {
+	t.Helper()
+	recipe, ok := gardenRecipeByKey(recipeKey)
+	if !ok {
+		t.Fatal("recipe missing")
+	}
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "alchemy.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
@@ -33,15 +46,18 @@ func TestGardenAlchemyRecordsOnlyCommittedProducts(t *testing.T) {
 	}
 	for _, row := range []any{
 		&model.User{TelegramID: 1, Username: "alchemy", Points: 100},
-		&model.GardenRecipeUnlock{UserID: 1, RecipeKey: "ningyuan"},
-		&model.Inventory{UserID: 1, ItemName: "回气草", Quantity: 9},
-		&model.Inventory{UserID: 1, ItemName: "赤阳花", Quantity: 3},
+		&model.GardenRecipeUnlock{UserID: 1, RecipeKey: recipeKey},
 	} {
 		if err := db.Create(row).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
-	check := func(wantCount int64, wantPoints, wantMaterial, wantProduct int) {
+	for _, material := range recipe.Materials {
+		if err := db.Create(&model.Inventory{UserID: 1, ItemName: material.ItemName, Quantity: material.Quantity * 3}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(wantCount int64, wantPoints, wantProduct int) {
 		t.Helper()
 		var count int64
 		if err := db.Model(&model.GardenAlchemyRecord{}).Where("user_id = ?", 1).Count(&count).Error; err != nil || count != wantCount {
@@ -51,7 +67,11 @@ func TestGardenAlchemyRecordsOnlyCommittedProducts(t *testing.T) {
 		if err := db.Where("telegram_id = ?", 1).First(&user).Error; err != nil || user.Points != wantPoints {
 			t.Fatal("wrong point balance", user.Points, err)
 		}
-		for name, want := range map[string]int{"回气草": wantMaterial, "凝元丹": wantProduct} {
+		quantities := map[string]int{recipe.ProductName: wantProduct}
+		for _, material := range recipe.Materials {
+			quantities[material.ItemName] = material.Quantity * (3 - wantProduct)
+		}
+		for name, want := range quantities {
 			var quantity int
 			if err := db.Model(&model.Inventory{}).Select("COALESCE(SUM(quantity), 0)").Where("user_id = ? AND item_name = ?", 1, name).Scan(&quantity).Error; err != nil || quantity != want {
 				t.Fatal("wrong inventory after alchemy", name, quantity, err)
@@ -62,22 +82,22 @@ func TestGardenAlchemyRecordsOnlyCommittedProducts(t *testing.T) {
 	if err := db.Exec(`CREATE TRIGGER fail_alchemy_record BEFORE INSERT ON garden_alchemy_records BEGIN SELECT RAISE(ABORT,'record unavailable'); END`).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gardenAlchemy(1, "ningyuan"); err == nil {
+	if _, err := gardenAlchemy(1, recipeKey); err == nil {
 		t.Fatal("record failure did not fail alchemy")
 	}
-	check(0, 100, 9, 0)
+	check(0, 100, 0)
 	if err := db.Exec("DROP TRIGGER fail_alchemy_record").Error; err != nil {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 3; i++ {
-		product, err := gardenAlchemy(1, "ningyuan")
-		if err != nil || product != "凝元丹" {
+		product, err := gardenAlchemy(1, recipeKey)
+		if err != nil || product != recipe.ProductName {
 			t.Fatal("alchemy failed", product, err)
 		}
-		check(int64(i), 100-i*5, 9-i*3, i)
+		check(int64(i), 100-i*recipe.AlchemyCost, i)
 	}
-	if _, err := gardenAlchemy(1, "ningyuan"); err == nil {
+	if _, err := gardenAlchemy(1, recipeKey); err == nil {
 		t.Fatal("alchemy with insufficient materials succeeded")
 	}
-	check(3, 85, 0, 3)
+	check(3, 100-3*recipe.AlchemyCost, 3)
 }
