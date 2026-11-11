@@ -3216,6 +3216,15 @@ func cappedListeningSeconds(seconds float64) float64 {
 }
 
 func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
+	listeningRefreshMu.RLock()
+	defer listeningRefreshMu.RUnlock()
+	return recordDailyListeningStatsFromABSDaysUnlocked(userID, absUserID, days, fetchedAt)
+}
+
+// Callers must hold listeningRefreshMu from before the ABS request through
+// persistence. Do not acquire a second read lock: a queued batch writer would
+// block recursive RLock calls while waiting for the caller's first read lock.
+func recordDailyListeningStatsFromABSDaysUnlocked(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
 	adjusted, corrected, _, validation, err := prepareDailyListeningDaysChecked(userID, absUserID, days, fetchedAt)
 	if err != nil {
 		return err
@@ -3538,6 +3547,13 @@ func RefreshDailyListeningStatsFromABS(userID int64, absUserID string) (map[stri
 }
 
 func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force bool, abuseDays ...string) (map[string]float64, bool) {
+	listeningRefreshMu.RLock()
+	defer listeningRefreshMu.RUnlock()
+	return refreshDailyListeningStatsFromABSUnlocked(userID, absUserID, force, abuseDays...)
+}
+
+// Callers must hold listeningRefreshMu for the entire fetch and write.
+func refreshDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, force bool, abuseDays ...string) (map[string]float64, bool) {
 	startedAt := time.Now()
 	outcome, failure := "not_ready", ""
 	statusCode := 0

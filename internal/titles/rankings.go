@@ -33,6 +33,34 @@ func RefreshRankTitles(now time.Time) error {
 }
 
 func refreshRankTitlesInTx(tx *gorm.DB, now time.Time) error {
+	return refreshRankTitlesWithListeningInTx(tx, now, false)
+}
+
+var ErrListeningBatchPeriodChanged = errors.New("听书刷新跨月，等待新月完整刷新后发布称号")
+
+// RefreshRankTitlesAfterListeningBatch publishes listening-dependent titles
+// only after a successful batch that finishes in the same month. publishedAt
+// is the batch end time; lock/connection wait time also counts toward rollover.
+// A cross-month batch releases expired titles but returns an error so callers
+// know that a complete batch in the new month is still needed.
+func RefreshRankTitlesAfterListeningBatch(batchStartedAt, publishedAt time.Time) error {
+	waitStarted := time.Now()
+	periodChanged := false
+	err := Transaction(func(tx *gorm.DB) error {
+		now := publishedAt.Add(time.Since(waitStarted))
+		periodChanged = rankings.TitlePeriodKey(rankings.ListeningTitle, batchStartedAt) != rankings.TitlePeriodKey(rankings.ListeningTitle, now)
+		return refreshRankTitlesWithListeningInTx(tx, now, !periodChanged)
+	})
+	if err != nil {
+		return err
+	}
+	if periodChanged {
+		return ErrListeningBatchPeriodChanged
+	}
+	return nil
+}
+
+func refreshRankTitlesWithListeningInTx(tx *gorm.DB, now time.Time, completedListeningBatch bool) error {
 	var wealth model.User
 	if err := rankings.Wealth(tx).Take(&wealth).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
@@ -65,6 +93,19 @@ func refreshRankTitlesInTx(tx *gorm.DB, now time.Time) error {
 	}
 	candidates = append(candidates, activityCandidates...)
 	for _, candidate := range candidates {
+		if !completedListeningBatch && (candidate.TitleKey == rankings.ListeningTitle || candidate.TitleKey == rankings.CultivationTitle) {
+			// 不用个人刷新或批次中间态重新评选。月榜仍需按时释放旧期
+			// 归属；新期榜首只能由下一次完整批次发布。
+			var old model.RankTitleHolder
+			err := tx.Where("title_key = ?", candidate.TitleKey).Take(&old).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if err == nil && old.PeriodKey == candidate.PeriodKey {
+				continue
+			}
+			candidate.UserID, candidate.UserName, candidate.Score = 0, "", 0
+		}
 		if err := updateRankTitleInTx(tx, candidate, now); err != nil {
 			return err
 		}

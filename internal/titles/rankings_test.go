@@ -15,7 +15,7 @@ import (
 
 func refreshRankTest(t *testing.T) {
 	t.Helper()
-	if err := RefreshRankTitles(time.Now()); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(time.Now(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -214,7 +214,7 @@ func TestRankTitleRefreshRollbackAndConcurrentIdempotency(t *testing.T) {
 	if err := storage.DB.Exec(`CREATE TRIGGER fail_rank_history BEFORE INSERT ON rank_title_histories BEGIN SELECT RAISE(FAIL, 'history unavailable'); END`).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshRankTitles(time.Now()); err == nil {
+	if err := RefreshRankTitlesAfterListeningBatch(time.Now(), time.Now()); err == nil {
 		t.Fatal("history failure ignored")
 	}
 	rankHolderTest(t, rankings.WealthTitle, 1)
@@ -227,7 +227,7 @@ func TestRankTitleRefreshRollbackAndConcurrentIdempotency(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			if err := RefreshRankTitles(time.Now()); err != nil {
+			if err := RefreshRankTitlesAfterListeningBatch(time.Now(), time.Now()); err != nil {
 				t.Error(err)
 			}
 		})
@@ -242,7 +242,7 @@ func TestRankTitleRefreshRollbackAndConcurrentIdempotency(t *testing.T) {
 	if err := storage.DB.Migrator().DropTable(&model.Sect{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshRankTitles(time.Now()); err == nil {
+	if err := RefreshRankTitlesAfterListeningBatch(time.Now(), time.Now()); err == nil {
 		t.Fatal("rank source error treated as empty board")
 	}
 	rankHolderTest(t, rankings.WealthTitle, 2)

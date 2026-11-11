@@ -48,6 +48,111 @@ func newRankNoticeTestBot(t *testing.T, client *rankNoticeTestClient) *tgbotapi.
 	return bot
 }
 
+func TestListeningBatchKeepsPublishedTitlesUntilAllUsersAreRefreshed(t *testing.T) {
+	setupTitleTestDB(t)
+	now := time.Now()
+	day := now.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
+	first := model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: day, CappedSeconds: 10000}
+	second := model.DailyListeningStat{UserID: 2, AbsUserID: "abs2", DayKey: day, CappedSeconds: 9900}
+	createActivityTitleRows(t, &first, &second, &model.Cultivation{UserID: 2, MajorRealm: 2, MinorRealm: 3, TotalAudioTime: 9900.0 / 3600})
+	setScore := func(userID int64, seconds float64) {
+		t.Helper()
+		if err := storage.DB.Model(&model.DailyListeningStat{}).Where("user_id = ?", userID).Update("capped_seconds", seconds).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.DB.Model(&model.Cultivation{}).Where("user_id = ?", userID).Update("total_audio_time", seconds/3600).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	setScore(1, 10000)
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Equip(-100, 1, rankings.ListeningTitle); err != nil {
+		t.Fatal(err)
+	}
+	worn := titleTestEquipment(t, -100, 1)
+	client := &rankNoticeTestClient{}
+	bot := newRankNoticeTestBot(t, client)
+	notify := func() {
+		t.Helper()
+		if err := storage.DB.Model(&model.RankTitleHistory{}).Where("title_key <> ?", rankings.ListeningTitle).Update("notice_state", "sent").Error; err != nil {
+			t.Fatal(err)
+		}
+		NotifyRankTitles(bot, now)
+	}
+	notify()
+	for i := 0; i < 3; i++ {
+		// 用户 2 的新数据暂时超过用户 1 的旧数据，后台/页面/佩戴
+		// 都不能提前发布榜首、撤下佩戴或生成提醒。
+		setScore(2, float64(10500+i*600))
+		if err := RefreshRankTitles(now); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Render(-100, 1, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := Equip(-100, 2, rankings.ListeningTitle); err != ErrNotHeld {
+			t.Fatal("partial refresh allowed challenger to equip title", err)
+		}
+		for _, key := range []string{rankings.ListeningTitle, rankings.CultivationTitle} {
+			rankHolderTest(t, key, 1)
+		}
+		notify()
+		setScore(1, float64(10600+i*600))
+		if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
+			t.Fatal(err)
+		}
+		notify()
+	}
+	if client.sends != 1 {
+		t.Fatal("intermediate snapshots generated acquisition notices", client.sends)
+	}
+	if e := titleTestEquipment(t, -100, 1); e.TitleKey != worn.TitleKey || e.Version != worn.Version {
+		t.Fatal("intermediate snapshots changed equipment", e)
+	}
+	// 真正完整刷新后易主及同月夺回，均应正常提醒。
+	for _, step := range []struct {
+		userID  int64
+		seconds float64
+	}{{2, 13000}, {1, 14000}} {
+		setScore(step.userID, step.seconds)
+		if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{rankings.ListeningTitle, rankings.CultivationTitle} {
+			rankHolderTest(t, key, step.userID)
+		}
+		notify()
+	}
+	if client.sends != 3 {
+		t.Fatal("genuine same-month reacquisition was suppressed", client.sends)
+	}
+}
+
+func TestListeningTitleExpiresBeforeNextCompletedBatch(t *testing.T) {
+	setupTitleTestDB(t)
+	now := time.Date(2026, 11, 30, 15, 59, 0, 0, time.UTC)
+	createActivityTitleRows(t,
+		&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: "2026-11-30", CappedSeconds: 3600},
+		&model.DailyListeningStat{UserID: 2, AbsUserID: "abs2", DayKey: "2026-12-01", CappedSeconds: 7200})
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
+		t.Fatal(err)
+	}
+	rankHolderTest(t, rankings.ListeningTitle, 1)
+	if err := RefreshRankTitles(now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rankHolderTest(t, rankings.ListeningTitle, 0)
+	if err := RefreshRankTitlesAfterListeningBatch(now.Add(time.Minute), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rankHolderTest(t, rankings.ListeningTitle, 2)
+}
+
 func seedRankNoticeTest(t *testing.T) model.RankTitleHistory {
 	t.Helper()
 	refreshRankTest(t)

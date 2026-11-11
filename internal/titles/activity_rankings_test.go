@@ -2,6 +2,7 @@ package titles
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -39,7 +40,7 @@ func TestMonthlyListeningTitleUsesValidatedCurrentBindingAndBeijingDates(t *test
 		&model.DailyListeningStat{UserID: 1, AbsUserID: "old-binding", DayKey: "2026-12-01", CappedSeconds: 999999},
 		&model.DailyListeningStat{UserID: 3, DayKey: "2026-12-01", CappedSeconds: 999999},
 		&model.DailyListeningStat{UserID: 999, AbsUserID: "deleted-user", DayKey: "2026-12-01", CappedSeconds: 999999})
-	if err := RefreshRankTitles(now); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
 		t.Fatal(err)
 	}
 	h := rankHolderTest(t, rankings.ListeningTitle, 2)
@@ -49,18 +50,18 @@ func TestMonthlyListeningTitleUsesValidatedCurrentBindingAndBeijingDates(t *test
 	if err := storage.DB.Model(&first).Update("capped_seconds", 7200).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshRankTitles(now); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
 		t.Fatal(err)
 	}
 	rankHolderTest(t, rankings.ListeningTitle, 2)
 	updateRankUserTest(t, 2, map[string]any{"status": "unbound"})
-	if err := RefreshRankTitles(now); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
 		t.Fatal(err)
 	}
 	rankHolderTest(t, rankings.ListeningTitle, 1)
 }
 
-func TestRankRefreshUsesCurrentPeriodAfterWaitingForDatabase(t *testing.T) {
+func TestRankRefreshRejectsListeningBatchCrossingMonthWhileWaitingForDatabase(t *testing.T) {
 	setupTitleTestDB(t)
 	// 2027-02-01 同时是新月和周一。模拟刷新等待连接时跨过零点。
 	before := time.Date(2027, 1, 31, 15, 59, 59, 0, time.UTC)
@@ -83,29 +84,63 @@ func TestRankRefreshUsesCurrentPeriodAfterWaitingForDatabase(t *testing.T) {
 	defer conn.Close()
 	synctest.Test(t, func(t *testing.T) {
 		done := make(chan error, 1)
-		go func() { done <- RefreshRankTitles(before) }()
+		go func() { done <- RefreshRankTitlesAfterListeningBatch(before, before) }()
 		synctest.Wait() // 刷新已在 database/sql 的连接请求通道上等待。
 		time.Sleep(2 * time.Second)
 		if err := conn.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if err := <-done; err != nil {
-			t.Fatal(err)
+		if err := <-done; !errors.Is(err, ErrListeningBatchPeriodChanged) {
+			t.Fatal("cross-month batch was not rejected", err)
 		}
 	})
-	if h := rankHolderTest(t, rankings.ListeningTitle, 2); h.PeriodKey != "2027-02" {
-		t.Fatal("delayed refresh used the previous month", h)
+	if h := rankHolderTest(t, rankings.ListeningTitle, 0); h.PeriodKey != "2027-02" {
+		t.Fatal("delayed refresh published an incomplete new month", h)
 	}
 	if h := rankHolderTest(t, rankings.BossTitle, 2); h.PeriodKey != "2027-02-01" {
 		t.Fatal("delayed refresh used the previous week", h)
 	}
 }
 
+func TestListeningBatchCrossingMonthExpiresOldHolderWithoutNewAward(t *testing.T) {
+	setupTitleTestDB(t)
+	before := time.Date(2026, 11, 30, 15, 59, 59, 0, time.UTC)
+	after := before.Add(2 * time.Second)
+	createActivityTitleRows(t,
+		&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: "2026-11-30", CappedSeconds: 3600},
+		&model.DailyListeningStat{UserID: 2, AbsUserID: "abs2", DayKey: "2026-12-01", CappedSeconds: 1})
+	if err := RefreshRankTitlesAfterListeningBatch(before, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := setDesiredInTx(storage.DB, -100, 1, rankings.ListeningTitle, "博览群书", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshRankTitlesAfterListeningBatch(before, after); !errors.Is(err, ErrListeningBatchPeriodChanged) {
+		t.Fatal("cross-month batch was not rejected", err)
+	}
+	rankHolderTest(t, rankings.ListeningTitle, 0)
+	if e := titleTestEquipment(t, -100, 1); e.TitleKey != RealmKey {
+		t.Fatal("old-month equipment was not released", e)
+	}
+	var old model.RankTitleHistory
+	if err := storage.DB.Where("title_key = ?", rankings.ListeningTitle).Take(&old).Error; err != nil || old.ReleasedAt == nil || old.NoticeState != "obsolete" {
+		t.Fatal("old-month history was not released", old, err)
+	}
+	var count int64
+	if err := storage.DB.Model(&model.RankTitleHistory{}).Where("title_key = ? AND period_key = ?", rankings.ListeningTitle, "2026-12").Count(&count).Error; err != nil || count != 0 {
+		t.Fatal("incomplete new-month batch generated an award", count, err)
+	}
+	if err := RefreshRankTitlesAfterListeningBatch(after, after); err != nil {
+		t.Fatal(err)
+	}
+	rankHolderTest(t, rankings.ListeningTitle, 2)
+}
+
 func TestActivityTitleRolloverResetsTiesReleasesHistoryAndFallbacks(t *testing.T) {
 	setupTitleTestDB(t)
 	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	createActivityTitleRows(t, &model.DailyListeningStat{UserID: 2, AbsUserID: "abs2", DayKey: "2026-11-08", CappedSeconds: 7200})
-	if err := RefreshRankTitles(now); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := setDesiredInTx(storage.DB, -100, 2, rankings.ListeningTitle, "博览群书", true); err != nil {
@@ -116,7 +151,7 @@ func TestActivityTitleRolloverResetsTiesReleasesHistoryAndFallbacks(t *testing.T
 		&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: "2026-12-01", CappedSeconds: 3600},
 		&model.DailyListeningStat{UserID: 2, AbsUserID: "abs2", DayKey: "2026-12-01", CappedSeconds: 3600})
 	december := time.Date(2026, 11, 30, 16, 0, 0, 0, time.UTC)
-	if err := RefreshRankTitles(december); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(december, december); err != nil {
 		t.Fatal(err)
 	}
 	h := rankHolderTest(t, rankings.ListeningTitle, 1)
@@ -130,14 +165,14 @@ func TestActivityTitleRolloverResetsTiesReleasesHistoryAndFallbacks(t *testing.T
 	if err := storage.DB.Where("title_key = ? AND period_key = ?", rankings.ListeningTitle, "2026-11").Take(&history).Error; err != nil || history.ReleasedAt == nil || history.NoticeState != "obsolete" {
 		t.Fatal("rollover lost old period history or left a pending notice", history, err)
 	}
-	if err := RefreshRankTitles(december); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(december, december); err != nil {
 		t.Fatal(err)
 	}
 	var count int64
 	if err := storage.DB.Model(&model.RankTitleHistory{}).Where("title_key = ?", rankings.ListeningTitle).Count(&count).Error; err != nil || count != 2 {
 		t.Fatal("rollover retried duplicate award", count, err)
 	}
-	if err := RefreshRankTitles(time.Date(2026, 12, 31, 16, 0, 0, 0, time.UTC)); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(time.Date(2026, 12, 31, 16, 0, 0, 0, time.UTC), time.Date(2026, 12, 31, 16, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	rankHolderTest(t, rankings.ListeningTitle, 0)
@@ -164,7 +199,7 @@ func TestWeeklyBossTitleCountsOnlySettledRewardEligibleDamage(t *testing.T) {
 	for _, id := range []string{"old", "active", "settling", "future"} {
 		createActivityTitleRows(t, &model.WorldBossParticipant{BossID: id, UserID: 1, Damage: 999, IsRewarded: true})
 	}
-	if err := RefreshRankTitles(now); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
 		t.Fatal(err)
 	}
 	h := rankHolderTest(t, rankings.BossTitle, 2)
@@ -172,11 +207,11 @@ func TestWeeklyBossTitleCountsOnlySettledRewardEligibleDamage(t *testing.T) {
 		t.Fatal("weekly boss title counted invalid damage", h)
 	}
 	// 北京时间周一 00:00 重新开榜。
-	if err := RefreshRankTitles(now.Add(time.Minute)); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now.Add(time.Minute), now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	rankHolderTest(t, rankings.BossTitle, 0)
-	if err := RefreshRankTitles(now.Add(3 * time.Minute)); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now.Add(3*time.Minute), now.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	rankHolderTest(t, rankings.BossTitle, 1) // future 记录此时才归入新周。
@@ -189,7 +224,7 @@ func TestWeeklyBossTitleUsesActualCutoffForEarlyKillsAndDelayedSettlement(t *tes
 	createActivityTitleRows(t,
 		&model.WorldBossEvent{BossID: "early", Status: "settled", EndAt: now.Add(25 * time.Minute), ListeningCutoffAt: &cutoff, SettledAt: &now},
 		&model.WorldBossParticipant{BossID: "early", UserID: 1, Damage: 100, IsRewarded: true})
-	if err := RefreshRankTitles(now); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
 		t.Fatal(err)
 	}
 	if h := rankHolderTest(t, rankings.BossTitle, 1); h.Score != 100 || h.PeriodKey != "2026-11-02" {
@@ -200,7 +235,7 @@ func TestWeeklyBossTitleUsesActualCutoffForEarlyKillsAndDelayedSettlement(t *tes
 	if err := storage.DB.Model(&model.WorldBossEvent{}).Where("boss_id = ?", "early").Updates(map[string]any{"end_at": monday, "settled_at": monday}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshRankTitles(monday); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(monday, monday); err != nil {
 		t.Fatal(err)
 	}
 	rankHolderTest(t, rankings.BossTitle, 0)
@@ -211,7 +246,7 @@ func TestMonthlyTitleContinuedLeaderGetsOneHistoryPerPeriod(t *testing.T) {
 	createActivityTitleRows(t,
 		&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: "2026-11-08", CappedSeconds: 3600},
 		&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: "2026-12-01", CappedSeconds: 3600})
-	if err := RefreshRankTitles(time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	if err := setDesiredInTx(storage.DB, -100, 1, rankings.ListeningTitle, "博览群书", true); err != nil {
@@ -219,7 +254,7 @@ func TestMonthlyTitleContinuedLeaderGetsOneHistoryPerPeriod(t *testing.T) {
 	}
 	december := time.Date(2026, 11, 30, 16, 0, 0, 0, time.UTC)
 	for range 2 {
-		if err := RefreshRankTitles(december); err != nil {
+		if err := RefreshRankTitlesAfterListeningBatch(december, december); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -259,7 +294,7 @@ func TestLifetimeGardenTitlesUseProducedQuantitiesAndSurviveInventoryChanges(t *
 		t.Fatal("alchemy title used inventory or failed to transfer", h)
 	}
 	// 长期记录跨周跨月保持，不重复发奖。
-	if err := RefreshRankTitles(now.AddDate(1, 0, 0)); err != nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now.AddDate(1, 0, 0), now.AddDate(1, 0, 0)); err != nil {
 		t.Fatal(err)
 	}
 	rankHolderTest(t, rankings.HarvestTitle, 2)
@@ -268,7 +303,7 @@ func TestLifetimeGardenTitlesUseProducedQuantitiesAndSurviveInventoryChanges(t *
 	if err := storage.DB.Migrator().DropTable(&model.GardenAlchemyRecord{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := RefreshRankTitles(now); err == nil {
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err == nil {
 		t.Fatal("source failure treated as an empty leaderboard")
 	}
 	rankHolderTest(t, rankings.WealthTitle, 1)
@@ -290,6 +325,9 @@ func TestNewActivityTitlesAppearAndCanBeEquipped(t *testing.T) {
 	}
 	updateRankUserTest(t, 1, map[string]any{"username": strings.Repeat("😀", 50)})
 	if err := TrackMember(-100, strings.Repeat("😀", 40), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
 		t.Fatal(err)
 	}
 	out, _, err := Render(-100, 1, false)

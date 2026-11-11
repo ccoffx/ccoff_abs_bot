@@ -17,6 +17,10 @@ import (
 )
 
 func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
+	// Wait before fetching, so a batch cannot make this response stale while
+	// the report waits to persist it. Keep the lock through cultivation sync.
+	listeningRefreshMu.RLock()
+	defer listeningRefreshMu.RUnlock()
 	// ==========================================
 	// 1. 获取防作弊的真实听书时长与每日明细 (来自统计接口)
 	// ==========================================
@@ -110,7 +114,7 @@ func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
 		if statsDays == nil {
 			recordErr = fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
 		} else {
-			recordErr = recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, statsDays, statsFetchedAt)
+			recordErr = recordDailyListeningStatsFromABSDaysUnlocked(u.TelegramID, absUserID, statsDays, statsFetchedAt)
 		}
 		now := time.Now()
 		if recordErr == nil {
