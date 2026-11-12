@@ -12,6 +12,7 @@ import (
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/rankings"
 	"ccoff-abs-bot/internal/storage"
+	"gorm.io/gorm"
 )
 
 func createActivityTitleRows(t *testing.T, rows ...any) {
@@ -97,8 +98,9 @@ func TestRankRefreshRejectsListeningBatchCrossingMonthWhileWaitingForDatabase(t 
 	if h := rankHolderTest(t, rankings.ListeningTitle, 0); h.PeriodKey != "2027-02" {
 		t.Fatal("delayed refresh published an incomplete new month", h)
 	}
-	if h := rankHolderTest(t, rankings.BossTitle, 2); h.PeriodKey != "2027-02-01" {
-		t.Fatal("delayed refresh used the previous week", h)
+	var count int64
+	if err := storage.DB.Model(&model.RankTitleHolder{}).Where("title_key = ?", rankings.BossTitle).Count(&count).Error; err != nil || count != 0 {
+		t.Fatal("listening batch published a Boss title", count, err)
 	}
 }
 
@@ -178,7 +180,14 @@ func TestActivityTitleRolloverResetsTiesReleasesHistoryAndFallbacks(t *testing.T
 	rankHolderTest(t, rankings.ListeningTitle, 0)
 }
 
-func TestWeeklyBossTitleCountsOnlySettledRewardEligibleDamage(t *testing.T) {
+func refreshBossTitleTest(t *testing.T, now time.Time) {
+	t.Helper()
+	if err := Transaction(func(tx *gorm.DB) error { return RefreshBossTitleInTx(tx, now) }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBossTitleCountsLatestTwoSettledEvents(t *testing.T) {
 	setupTitleTestDB(t)
 	now := time.Date(2026, 11, 8, 15, 59, 0, 0, time.UTC) // 周日 23:59
 	for _, row := range []struct {
@@ -199,35 +208,37 @@ func TestWeeklyBossTitleCountsOnlySettledRewardEligibleDamage(t *testing.T) {
 	for _, id := range []string{"old", "active", "settling", "future"} {
 		createActivityTitleRows(t, &model.WorldBossParticipant{BossID: id, UserID: 1, Damage: 999, IsRewarded: true})
 	}
-	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
-		t.Fatal(err)
-	}
+	refreshBossTitleTest(t, now)
 	h := rankHolderTest(t, rankings.BossTitle, 2)
-	if h.Score != 9 || h.PeriodKey != "2026-11-02" {
-		t.Fatal("weekly boss title counted invalid damage", h)
+	if h.Score != 9 || h.PeriodKey != "" {
+		t.Fatal("rolling boss title counted invalid damage", h)
 	}
-	// 北京时间周一 00:00 重新开榜。
+	// 北京时间周一 00:00 保留上一期，直到新周有有效成绩。
 	if err := RefreshRankTitlesAfterListeningBatch(now.Add(time.Minute), now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	rankHolderTest(t, rankings.BossTitle, 0)
+	if h := rankHolderTest(t, rankings.BossTitle, 2); h.PeriodKey != "" || h.Score != 9 {
+		t.Fatal("Monday cleared the previous champion", h)
+	}
 	if err := RefreshRankTitlesAfterListeningBatch(now.Add(3*time.Minute), now.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	rankHolderTest(t, rankings.BossTitle, 1) // future 记录此时才归入新周。
+	rankHolderTest(t, rankings.BossTitle, 2) // 普通刷新不能变更 Boss 称号。
+	refreshBossTitleTest(t, now.Add(3*time.Minute))
+	if h := rankHolderTest(t, rankings.BossTitle, 1); h.Score != 1007 {
+		t.Fatal("window did not evict the oldest event", h)
+	}
 }
 
-func TestWeeklyBossTitleUsesActualCutoffForEarlyKillsAndDelayedSettlement(t *testing.T) {
+func TestBossTitleUsesActualCutoffForEarlyKillsAndDelayedSettlement(t *testing.T) {
 	setupTitleTestDB(t)
 	now := time.Date(2026, 11, 8, 13, 35, 0, 0, time.UTC) // 北京时间周日 21:35
 	cutoff := now.Add(-5 * time.Minute)
 	createActivityTitleRows(t,
 		&model.WorldBossEvent{BossID: "early", Status: "settled", EndAt: now.Add(25 * time.Minute), ListeningCutoffAt: &cutoff, SettledAt: &now},
 		&model.WorldBossParticipant{BossID: "early", UserID: 1, Damage: 100, IsRewarded: true})
-	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
-		t.Fatal(err)
-	}
-	if h := rankHolderTest(t, rankings.BossTitle, 1); h.Score != 100 || h.PeriodKey != "2026-11-02" {
+	refreshBossTitleTest(t, now)
+	if h := rankHolderTest(t, rankings.BossTitle, 1); h.Score != 100 || h.PeriodKey != "" {
 		t.Fatal("early kill was not counted immediately", h)
 	}
 	// 实际截止在周日，原定结束与重试结算跨到周一，不能计入新周。
@@ -238,7 +249,104 @@ func TestWeeklyBossTitleUsesActualCutoffForEarlyKillsAndDelayedSettlement(t *tes
 	if err := RefreshRankTitlesAfterListeningBatch(monday, monday); err != nil {
 		t.Fatal(err)
 	}
+	refreshBossTitleTest(t, monday)
+	if h := rankHolderTest(t, rankings.BossTitle, 1); h.Score != 100 {
+		t.Fatal("delayed settlement changed the damage", h)
+	}
+}
+
+func TestBossTitleSurvivesIdleWeeksAndChangesAfterNewSettlement(t *testing.T) {
+	setupTitleTestDB(t)
+	now := time.Date(2026, 11, 8, 14, 0, 0, 0, time.UTC)
+	createActivityTitleRows(t,
+		&model.WorldBossEvent{BossID: "old", Status: "settled", EndAt: now},
+		&model.WorldBossParticipant{BossID: "old", UserID: 2, Damage: 100, IsRewarded: true})
+	refreshBossTitleTest(t, now)
+	if err := setDesiredInTx(storage.DB, -100, 2, rankings.BossTitle, "诛魔魁首", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, days := range []int{1, 5, 15} {
+		if err := RefreshRankTitles(now.AddDate(0, 0, days)); err != nil {
+			t.Fatal(err)
+		}
+		rankHolderTest(t, rankings.BossTitle, 2)
+	}
+	if e := titleTestEquipment(t, -100, 2); e.TitleKey != rankings.BossTitle || e.Version != 1 {
+		t.Fatal("idle weeks reset champion equipment", e)
+	}
+	var count int64
+	if err := storage.DB.Model(&model.RankTitleHistory{}).Where("title_key = ?", rankings.BossTitle).Count(&count).Error; err != nil || count != 1 {
+		t.Fatal("idle weeks duplicated awards", count, err)
+	}
+	next := now.AddDate(0, 0, 20)
+	createActivityTitleRows(t,
+		&model.WorldBossEvent{BossID: "new", Status: "active", EndAt: next},
+		&model.WorldBossParticipant{BossID: "new", UserID: 1, Damage: 10, IsRewarded: true},
+		&model.WorldBossParticipant{BossID: "new", UserID: 2, Damage: 10, IsRewarded: true})
+	if err := RefreshRankTitles(next); err != nil {
+		t.Fatal(err)
+	}
+	rankHolderTest(t, rankings.BossTitle, 2)
+	if err := storage.DB.Model(&model.WorldBossEvent{}).Where("boss_id = ?", "new").Update("status", "settled").Error; err != nil {
+		t.Fatal(err)
+	}
+	refreshBossTitleTest(t, next)
+	if h := rankHolderTest(t, rankings.BossTitle, 2); h.Score != 110 || h.PeriodKey != "" {
+		t.Fatal("window did not include both events across weeks", h)
+	}
+}
+
+func TestOrdinaryRefreshNeverReadsBossRecords(t *testing.T) {
+	setupTitleTestDB(t)
+	now := time.Now()
+	if err := storage.DB.Migrator().DropTable(&model.WorldBossParticipant{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshRankTitles(now); err != nil {
+		t.Fatal("idle poll queried Boss records", err)
+	}
+	if err := RefreshRankTitlesAfterListeningBatch(now, now); err != nil {
+		t.Fatal("listening batch queried Boss records", err)
+	}
+}
+
+func TestBossWindowCountsEmptyEventsAndRetainsIncumbentOnTie(t *testing.T) {
+	setupTitleTestDB(t)
+	now := time.Now()
+	createActivityTitleRows(t,
+		&model.WorldBossEvent{BossID: "first", Status: "settled", EndAt: now.Add(-3 * time.Hour)},
+		&model.WorldBossParticipant{BossID: "first", UserID: 2, Damage: 10, IsRewarded: true})
+	refreshBossTitleTest(t, now)
+	createActivityTitleRows(t,
+		&model.WorldBossEvent{BossID: "second", Status: "settled", EndAt: now.Add(-2 * time.Hour)},
+		&model.WorldBossParticipant{BossID: "second", UserID: 1, Damage: 10, IsRewarded: true})
+	refreshBossTitleTest(t, now)
+	rankHolderTest(t, rankings.BossTitle, 2)
+	createActivityTitleRows(t, &model.WorldBossEvent{BossID: "empty", Status: "settled", EndAt: now.Add(-time.Hour)})
+	refreshBossTitleTest(t, now)
+	if h := rankHolderTest(t, rankings.BossTitle, 1); h.Score != 10 {
+		t.Fatal("empty event did not evict the oldest damage", h)
+	}
+	createActivityTitleRows(t, &model.WorldBossEvent{BossID: "also-empty", Status: "settled", EndAt: now})
+	refreshBossTitleTest(t, now)
 	rankHolderTest(t, rankings.BossTitle, 0)
+}
+
+func TestBossWindowSortsByCutoffRatherThanSettlementTime(t *testing.T) {
+	setupTitleTestDB(t)
+	now := time.Now()
+	cutoff := now.Add(-3 * time.Hour)
+	createActivityTitleRows(t,
+		&model.WorldBossEvent{BossID: "delayed", Status: "settled", EndAt: now, ListeningCutoffAt: &cutoff, SettledAt: &now},
+		&model.WorldBossParticipant{BossID: "delayed", UserID: 1, Damage: 999, IsRewarded: true},
+		&model.WorldBossEvent{BossID: "recent-one", Status: "settled", EndAt: now.Add(-2 * time.Hour)},
+		&model.WorldBossParticipant{BossID: "recent-one", UserID: 2, Damage: 5, IsRewarded: true},
+		&model.WorldBossEvent{BossID: "recent-two", Status: "settled", EndAt: now.Add(-time.Hour)},
+		&model.WorldBossParticipant{BossID: "recent-two", UserID: 2, Damage: 4, IsRewarded: true})
+	refreshBossTitleTest(t, now)
+	if h := rankHolderTest(t, rankings.BossTitle, 2); h.Score != 9 {
+		t.Fatal("delayed settlement displaced a more recent event", h)
+	}
 }
 
 func TestMonthlyTitleContinuedLeaderGetsOneHistoryPerPeriod(t *testing.T) {
@@ -320,6 +428,7 @@ func TestNewActivityTitlesAppearAndCanBeEquipped(t *testing.T) {
 		&model.WorldBossParticipant{BossID: "now", UserID: 1, Damage: 10, IsRewarded: true},
 		&model.GardenPlanting{UserID: 1, Status: "harvested", HarvestedAt: &now, Quantity: 3},
 		&model.GardenAlchemyRecord{UserID: 1, Quantity: 2})
+	refreshBossTitleTest(t, now)
 	if err := RefreshDefaults(); err != nil {
 		t.Fatal(err)
 	}

@@ -25,6 +25,7 @@ import (
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
+	"ccoff-abs-bot/internal/titles"
 )
 
 func createWorldBossEventRecord(db *gorm.DB, event *model.WorldBossEvent) error {
@@ -885,7 +886,7 @@ func grantWorldBossRewards(event *model.WorldBossEvent, participants []model.Wor
 			}
 		}
 
-		return nil
+		return titles.RefreshBossTitleInTx(tx, settledAt)
 	})
 	return totalDamage, err
 }

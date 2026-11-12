@@ -11,6 +11,32 @@ import (
 	"ccoff-abs-bot/internal/rankings"
 )
 
+// RefreshBossTitleInTx is called only by Boss settlement, so rewards and title
+// ownership commit together. Failed settlements retry both on the next attempt.
+func RefreshBossTitleInTx(tx *gorm.DB, now time.Time) error {
+	next, err := rankings.BossTitleCandidate(tx, now)
+	if err != nil {
+		return err
+	}
+	return updateRankTitleInTx(tx, next, now)
+}
+
+// RevokeUserRankTitlesInTx releases ownership without electing successors.
+// Historical honors stay attached to the Telegram identity.
+func RevokeUserRankTitlesInTx(tx *gorm.DB, userID int64, now time.Time) error {
+	var holders []model.RankTitleHolder
+	if err := tx.Where("user_id = ?", userID).Find(&holders).Error; err != nil {
+		return err
+	}
+	for _, holder := range holders {
+		next := model.RankTitleHolder{TitleKey: holder.TitleKey, PeriodKey: holder.PeriodKey}
+		if err := updateRankTitleInTx(tx, next, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func heldInTx(tx *gorm.DB, chatID, userID int64, d Definition) (bool, error) {
 	var count int64
 	var query *gorm.DB
@@ -102,7 +128,13 @@ func refreshRankTitlesWithListeningInTx(tx *gorm.DB, now time.Time, completedLis
 				return err
 			}
 			if err == nil && old.PeriodKey == candidate.PeriodKey {
-				continue
+				eligible, err := listeningRankIncumbentEligibleInTx(tx, old, now)
+				if err != nil {
+					return err
+				}
+				if eligible {
+					continue
+				}
 			}
 			candidate.UserID, candidate.UserName, candidate.Score = 0, "", 0
 		}
@@ -113,6 +145,26 @@ func refreshRankTitlesWithListeningInTx(tx *gorm.DB, now time.Time, completedLis
 	return nil
 }
 
+// Losing source eligibility revokes a published title without selecting a new
+// leader from an incomplete listening batch.
+func listeningRankIncumbentEligibleInTx(tx *gorm.DB, holder model.RankTitleHolder, now time.Time) (bool, error) {
+	if holder.UserID == 0 {
+		return true, nil
+	}
+	var query *gorm.DB
+	switch holder.TitleKey {
+	case rankings.ListeningTitle:
+		query = rankings.ListeningTitleRecords(tx, now).Where("daily_listening_stats.user_id = ?", holder.UserID)
+	case rankings.CultivationTitle:
+		query = rankings.Cultivation(tx).Where("cultivations.user_id = ?", holder.UserID)
+	default:
+		return false, nil
+	}
+	var count int64
+	err := query.Count(&count).Error
+	return count > 0, err
+}
+
 func updateRankTitleInTx(tx *gorm.DB, next model.RankTitleHolder, now time.Time) error {
 	var old model.RankTitleHolder
 	err := tx.Where("title_key = ?", next.TitleKey).Take(&old).Error
@@ -120,6 +172,9 @@ func updateRankTitleInTx(tx *gorm.DB, next model.RankTitleHolder, now time.Time)
 		return err
 	}
 	if err == nil && old.UserID == next.UserID && old.PeriodKey == next.PeriodKey {
+		if old.UserName == next.UserName && old.SubjectID == next.SubjectID && old.Score == next.Score {
+			return nil
+		}
 		return tx.Model(&old).Updates(map[string]any{"user_name": next.UserName, "subject_id": next.SubjectID, "score": next.Score}).Error
 	}
 	if old.UserID > 0 {

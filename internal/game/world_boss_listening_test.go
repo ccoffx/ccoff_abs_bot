@@ -19,7 +19,7 @@ import (
 func bossEvidenceFixture(t *testing.T) (model.WorldBossEvent, model.WorldBossParticipant) {
 	t.Helper()
 	setupListeningAbuseScheduleDB(t)
-	if err := storage.DB.AutoMigrate(&model.WorldBossEvent{}, &model.WorldBossParticipant{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}); err != nil {
 		t.Fatal(err)
 	}
 	end := time.Now().Add(-2 * time.Hour).Truncate(time.Second)

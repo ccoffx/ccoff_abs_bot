@@ -36,7 +36,7 @@ var RankDefinitions = []Definition{
 	{Key: rankings.CultivationTitle, Name: "斗气至尊", Emoji: "🔥", Description: "全服斗气榜第一", Source: "ranking", Unique: true},
 	{Key: rankings.SectTitle, Name: "万宗魁首", Emoji: "🏯", Description: "全服第一宗门的现任宗主", Source: "ranking", Unique: true},
 	{Key: rankings.ListeningTitle, Name: "博览群书", Emoji: "🎧", Description: "本月有效实际听书时长第一", Source: "ranking", Unique: true},
-	{Key: rankings.BossTitle, Name: "诛魔魁首", Emoji: "⚔️", Description: "本周世界 Boss 累计有效伤害第一", Source: "ranking", Unique: true},
+	{Key: rankings.BossTitle, Name: "诛魔魁首", Emoji: "⚔️", Description: "最近两场已结算世界 Boss 累计有效伤害第一", Source: "ranking", Unique: true},
 	{Key: rankings.HarvestTitle, Name: "灵植仙师", Emoji: "🌿", Description: "药园累计成功收获药草株数第一", Source: "ranking", Unique: true},
 	{Key: rankings.AlchemyTitle, Name: "丹道宗师", Emoji: "🔥", Description: "累计成功炼丹数量第一", Source: "ranking", Unique: true},
 }

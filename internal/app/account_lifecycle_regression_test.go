@@ -27,7 +27,13 @@ func lifecycleFixture(t *testing.T, expireAt time.Time, suspended bool, handler 
 	if err := storage.DB.AutoMigrate(&model.AccountLifecycleClaim{}, &model.AccountLifecycleNotice{}, &model.OrphanAccountDeletion{}, &model.RenewCode{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.DailyListeningStat{}, &model.ABSCrossDaySessionScanCursor{}, &model.ABSCrossDaySessionAdjustment{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}, &model.WorldBossParticipant{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}); err != nil {
+		t.Fatal(err)
+	}
 	if err := storage.InitializeAccountLifecycleGuards(storage.DB); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DB.AutoMigrate(&model.Sect{}, &model.SectMember{}, &model.SectCaveRetreat{}, &model.GardenPlot{}, &model.GardenRecipeUnlock{}, &model.Inventory{}, &model.GardenSeedPurchase{}, &model.GardenHerbMarketSale{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.InitializeOrphanAccountDeletionGuards(storage.DB); err != nil {

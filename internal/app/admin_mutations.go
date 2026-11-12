@@ -14,6 +14,7 @@ import (
 	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/textfmt"
+	"ccoff-abs-bot/internal/titles"
 )
 
 type adminMutationStatus string
@@ -274,6 +275,12 @@ func deleteLocalUserWithAuditDB(db *gorm.DB, actorID int64, targetID int64, expe
 		}
 		if deleteRes.RowsAffected == 0 {
 			return fmt.Errorf("target_state_changed")
+		}
+		if err := clearDeletedAccountRankSourcesInTx(tx, targetID); err != nil {
+			return err
+		}
+		if err := titles.RevokeUserRankTitlesInTx(tx, targetID, time.Now()); err != nil {
+			return err
 		}
 
 		detail := fmt.Sprintf("deleted local user record: username=%s tg=%d abs_user_id=%s", textfmt.FormatPlainValue(target.Username), target.TelegramID, textfmt.FormatPlainValue(target.AbsUserID))

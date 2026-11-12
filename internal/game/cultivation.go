@@ -18,6 +18,7 @@ import (
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/rankings"
 	"ccoff-abs-bot/internal/realm"
+	"ccoff-abs-bot/internal/sectbonus"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -993,20 +994,26 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 
 func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 	type RankResult struct {
-		Username       string
-		SectName       string
-		MajorRealm     int
-		MinorRealm     int
-		TotalAudioTime float64
-		PillAudioTime  float64
+		Username            string
+		SectName            string
+		MajorRealm          int
+		MinorRealm          int
+		TotalAudioTime      float64
+		PillAudioTime       float64
+		IsSectOwner         bool
+		SectOwnerBonusHours float64
 	}
 
 	var results []RankResult
+	ownerBonuses := storage.DB.Model(&model.DailyListeningStat{}).
+		Select("user_id, SUM(sect_owner_bonus_hours) AS hours").
+		Where("day_key <= ?", SectDayKey(time.Now())).Group("user_id")
 
 	err := rankings.Cultivation(storage.DB).
-		Select("users.username, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time").
+		Select("users.username, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time, COALESCE(sects.owner_id = cultivations.user_id, 0) AS is_sect_owner, COALESCE(owner_bonus.hours, 0) AS sect_owner_bonus_hours").
 		Joins("left join sect_members on sect_members.user_id = cultivations.user_id and sect_members.deleted_at is null").
 		Joins("left join sects on sects.id = sect_members.sect_id and sects.deleted_at is null").
+		Joins("LEFT JOIN (?) AS owner_bonus ON owner_bonus.user_id = cultivations.user_id", ownerBonuses).
 		Limit(10).
 		Scan(&results).Error
 
@@ -1034,10 +1041,18 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 
 		totalShow := r.TotalAudioTime + r.PillAudioTime
 
-		reply += fmt.Sprintf("%s **第%d名**: **%s**\n └ %s | 总修为 `%.1f` 小时\n   *(苦修: `%.1f` 小时 | 药力: `%.1f` 小时)*\n\n",
+		reply += fmt.Sprintf("%s **第%d名**: **%s**\n └ %s | 总修为 `%.1f` 小时\n   *(苦修: `%.1f` 小时 | 药力: `%.1f` 小时)*\n",
 			medals[i], i+1, displayName, realmName, totalShow, r.TotalAudioTime, r.PillAudioTime)
+		if r.IsSectOwner {
+			reply += fmt.Sprintf("   👑 宗主专享：每日基础净修为 **+%d%%**\n", sectbonus.Percent)
+		}
+		if r.IsSectOwner || r.SectOwnerBonusHours > 0 {
+			reply += fmt.Sprintf("   累计宗主额外修为：`+%.3f` 小时\n", r.SectOwnerBonusHours)
+		}
+		reply += "\n"
 	}
 
+	reply += fmt.Sprintf("👑 创建宗门成为宗主，可享每日基础净修为 **+%d%%**；身份变更次日生效，转让后保留历史加成。\n\n", sectbonus.Percent)
 	reply += "*(💡 发送 `突破` 引动雷劫，提升境界排位！)*"
 	msg := tgbotapi.NewMessage(chatID, reply)
 	msg.ParseMode = "Markdown"

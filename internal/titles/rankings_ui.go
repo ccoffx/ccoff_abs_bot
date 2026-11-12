@@ -14,21 +14,22 @@ import (
 )
 
 func rankTitlePeriodText(key, period string) string {
+	if key == rankings.BossTitle {
+		return "统计范围：最近两场已结算 Boss\n"
+	}
 	if period == "" {
 		return ""
 	}
 	switch key {
 	case rankings.ListeningTitle:
 		return "统计月份：" + period + "（北京时间）\n"
-	case rankings.BossTitle:
-		return "统计周：" + period + " 起（北京时间，周一至周日）\n"
 	default:
 		return ""
 	}
 }
 
 func renderRankTitlesInTx(tx *gorm.DB, b *strings.Builder, rows *[][]tgbotapi.InlineKeyboardButton, chatID, userID int64, ranking bool) error {
-	b.WriteString("🏆 榜首荣誉 · 全服唯一\n随榜单和宗主身份转移；当期并列保留原第一，周期榜换期重新评选。\n\n")
+	b.WriteString("🏆 榜首荣誉 · 全服唯一\n随榜单和宗主身份转移；并列保留原第一，Boss 称号仅在每次结算后更新。\n\n")
 	for _, d := range RankDefinitions {
 		fmt.Fprintf(b, "%s %s｜%s\n", d.Emoji, d.Name, d.Description)
 		var holder model.RankTitleHolder

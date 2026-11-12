@@ -252,17 +252,18 @@ func TestRankNoticeSkipsExpiredPeriodsBeforeOwnershipRefresh(t *testing.T) {
 	for i := range rows {
 		createActivityTitleRows(t, &rows[i])
 	}
+	createActivityTitleRows(t, &model.RankTitleHolder{TitleKey: rankings.BossTitle, PeriodKey: "2026-11-23", UserID: 1})
 	client := &rankNoticeTestClient{}
 	NotifyRankTitles(newRankNoticeTestBot(t, client), now)
 	if client.sends != 3 {
-		t.Fatal("expired monthly/weekly awards were sent", client.sends)
+		t.Fatal("expired month or non-current Boss award was sent", client.sends)
 	}
 	for i, row := range rows {
 		if err := storage.DB.First(&row, row.ID).Error; err != nil {
 			t.Fatal(err)
 		}
 		want := "sent"
-		if i < 2 {
+		if i == 0 || i == 3 {
 			want = "obsolete"
 		}
 		if row.NoticeState != want {

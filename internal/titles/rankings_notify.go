@@ -44,9 +44,22 @@ func notifyRankTitles(bot *tgbotapi.BotAPI, currentTime func() time.Time) {
 		if !ok {
 			continue
 		}
+		if h.TitleKey == rankings.BossTitle {
+			var count int64
+			if err := storage.DB.Model(&model.RankTitleHolder{}).Where("title_key = ? AND user_id = ? AND period_key = ?", h.TitleKey, h.UserID, h.PeriodKey).Count(&count).Error; err != nil {
+				log.Printf("⚠️ 核对 Boss 称号提醒失败: %s", textfmt.FormatPlainError(err))
+				continue
+			}
+			if count == 0 {
+				if err := storage.DB.Model(&model.RankTitleHistory{}).Where("id = ? AND notice_state = ?", h.ID, "pending").Update("notice_state", "obsolete").Error; err != nil {
+					log.Printf("⚠️ 撤销旧 Boss 称号提醒失败: %s", textfmt.FormatPlainError(err))
+				}
+				continue
+			}
+		}
 		// 提醒任务独立于归属刷新运行；发送前重新检查周期，避免换期或
 		// 上一条网络请求跨过零点后，仍提醒用户获得上一期的当前榜首。
-		if period := rankings.TitlePeriodKey(h.TitleKey, currentTime()); period != "" && h.PeriodKey != period {
+		if period := rankings.TitlePeriodKey(h.TitleKey, currentTime()); h.TitleKey != rankings.BossTitle && period != "" && h.PeriodKey != period {
 			if err := storage.DB.Model(&model.RankTitleHistory{}).Where("id = ? AND notice_state = ?", h.ID, "pending").Update("notice_state", "obsolete").Error; err != nil {
 				log.Printf("⚠️ 撤销过期称号提醒失败: %s", textfmt.FormatPlainError(err))
 			}

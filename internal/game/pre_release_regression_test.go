@@ -240,6 +240,19 @@ func TestBossBindingChangedBeforePayoutCannotContributeToKill(t *testing.T) {
 	if err := storage.DB.Create(&model.User{TelegramID: p.UserID, Username: "replacement", AbsUserID: "replacement-abs"}).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.DB.Migrator().DropTable(&model.RankTitleHolder{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := grantWorldBossRewards(&event, []model.WorldBossParticipant{p}); err == nil {
+		t.Fatal("Boss settlement committed despite title update failure")
+	}
+	var persisted model.WorldBossEvent
+	if err := storage.DB.First(&persisted, event.ID).Error; err != nil || persisted.Status != "settling" {
+		t.Fatal("title failure did not roll back settlement", persisted, err)
+	}
+	if err := storage.DB.AutoMigrate(&model.RankTitleHolder{}); err != nil {
+		t.Fatal(err)
+	}
 	damage, err := grantWorldBossRewards(&event, []model.WorldBossParticipant{p})
 	if err != nil || damage != 0 || event.IsKilled || event.CurrentHP != 100 {
 		t.Fatalf("stale identity caused a kill: damage=%v event=%+v error=%v", damage, event, err)
