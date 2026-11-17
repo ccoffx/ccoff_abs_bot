@@ -27,10 +27,13 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 	old := storage.DB
 	storage.DB = db
 	t.Cleanup(func() { storage.DB = old; conn.Close() })
-	for _, m := range append(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{}), &model.DailyListeningStat{}, &model.SectCaveRetreat{}) {
+	for _, m := range append(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{}), &model.User{}, &model.DailyListeningStat{}, &model.SectCaveRetreat{}) {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := db.Create(&model.User{TelegramID: 1, AbsUserID: "abs1"}).Error; err != nil {
+		t.Fatal(err)
 	}
 	now := time.Now()
 	launch := now.AddDate(0, 0, -2)
@@ -46,8 +49,8 @@ func TestSpiritFireCultivationIntegrationAndHistoricalCorrection(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []model.DailyListeningStat{
-		{UserID: 1, DayKey: SectDayKey(launch.AddDate(0, 0, -1)), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5},
-		{UserID: 1, DayKey: SectDayKey(now), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5},
+		{UserID: 1, AbsUserID: "abs1", DayKey: SectDayKey(launch.AddDate(0, 0, -1)), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5},
+		{UserID: 1, AbsUserID: "abs1", DayKey: SectDayKey(now), RawSeconds: 24 * 3600, CappedSeconds: 24 * 3600, EffectiveHours: 8.5},
 	}
 	if err := db.Create(&records).Error; err != nil {
 		t.Fatal(err)

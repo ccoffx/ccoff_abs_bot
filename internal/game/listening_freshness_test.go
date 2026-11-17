@@ -48,7 +48,7 @@ func TestListeningFreshnessCutoffAndMidnight(t *testing.T) {
 		age   time.Duration
 		fresh bool
 	}{
-		{0, true}, {5*time.Minute - time.Nanosecond, true}, {5 * time.Minute, false}, {6 * time.Minute, false}, {-time.Second, false},
+		{0, true}, {7 * time.Minute, true}, {10*time.Minute - time.Nanosecond, true}, {10 * time.Minute, false}, {11 * time.Minute, false}, {-time.Second, false},
 	} {
 		if got := listeningTimestampFresh(now.Add(-tc.age), now, ListeningMaxAge); got != tc.fresh {
 			t.Fatalf("age=%s fresh=%t", tc.age, got)
@@ -135,7 +135,7 @@ func TestSectTaskFallbackRequiresFreshCurrentBinding(t *testing.T) {
 	if hours, ok := freshTodaySectListeningHoursFromCache(1, now); !ok || hours != .5 {
 		t.Fatalf("fresh current binding was rejected: hours=%v ok=%t", hours, ok)
 	}
-	contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", now.Add(-6*time.Minute)).Error)
+	contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", now.Add(-11*time.Minute)).Error)
 	if _, ok := freshTodaySectListeningHoursFromCache(1, now); ok {
 		t.Fatal("stale listening cache was accepted for a sect task")
 	}
@@ -248,7 +248,7 @@ func TestExpiredListeningQueryRefreshesOrLabelsOldData(t *testing.T) {
 	for _, failure := range []bool{false, true} {
 		t.Run(fmt.Sprint("failure=", failure), func(t *testing.T) {
 			setupListeningFreshnessTest(t)
-			seedListeningFreshnessUser(t, 1, 6*time.Minute, .5)
+			seedListeningFreshnessUser(t, 1, 11*time.Minute, .5)
 			var before model.DailyListeningStat
 			contributionMust(t, storage.DB.First(&before).Error)
 			var stats, sessions atomic.Int32
@@ -331,7 +331,7 @@ func TestFreshListeningRebuildsUninitializedProfileWithoutNetwork(t *testing.T) 
 
 func TestConcurrentListeningRefreshSharesOneABSResponse(t *testing.T) {
 	setupListeningFreshnessTest(t)
-	seedListeningFreshnessUser(t, 1, 6*time.Minute, .5)
+	seedListeningFreshnessUser(t, 1, 11*time.Minute, .5)
 	started, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(release) })
@@ -382,11 +382,11 @@ func TestConcurrentListeningRefreshSharesOneABSResponse(t *testing.T) {
 func TestDueListeningQueueRefreshesOnlyExpiredUsersAndProgress(t *testing.T) {
 	setupListeningFreshnessTest(t)
 	for id := int64(1); id <= 9; id++ {
-		seedListeningFreshnessUser(t, id, 4*time.Minute, .5)
+		seedListeningFreshnessUser(t, id, 6*time.Minute, .5)
 	}
 	seedListeningFreshnessUser(t, 10, time.Minute, .5)
 	seedListeningFreshnessUser(t, 11, time.Minute, .5)
-	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=11").UpdateColumn("progress_fetched_at", time.Now().Add(-4*time.Minute)).Error)
+	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=11").UpdateColumn("progress_fetched_at", time.Now().Add(-6*time.Minute)).Error)
 	var current, maximum, stats, progress, freshStats atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		n := current.Add(1)
@@ -421,7 +421,7 @@ func TestDueListeningQueueRefreshesOnlyExpiredUsersAndProgress(t *testing.T) {
 func TestExpiredBookProgressIsRefreshedAndFailureIsLabelled(t *testing.T) {
 	setupListeningFreshnessTest(t)
 	seedListeningFreshnessUser(t, 1, time.Minute, .5)
-	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=1").Updates(map[string]any{"finished_books": 3, "progress_fetched_at": time.Now().Add(-6 * time.Minute)}).Error)
+	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=1").Updates(map[string]any{"finished_books": 3, "progress_fetched_at": time.Now().Add(-11 * time.Minute)}).Error)
 	var fail atomic.Bool
 	var requests atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -439,7 +439,7 @@ func TestExpiredBookProgressIsRefreshedAndFailureIsLabelled(t *testing.T) {
 		t.Fatal(report)
 	}
 	fail.Store(true)
-	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=1").UpdateColumn("progress_fetched_at", time.Now().Add(-6*time.Minute)).Error)
+	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=1").UpdateColumn("progress_fetched_at", time.Now().Add(-11*time.Minute)).Error)
 	if report := GetPersonalReport(nil, "abs1"); !strings.Contains(report, "已经听完书籍: 1 本") || !strings.Contains(report, "更新失败，展示旧数据") {
 		t.Fatal(report)
 	}
@@ -451,7 +451,7 @@ func TestExpiredBookProgressIsRefreshedAndFailureIsLabelled(t *testing.T) {
 func TestBreakthroughDoesNotSpendUsingExpiredListeningData(t *testing.T) {
 	setupGuardTestDB(t)
 	before := guardTestBalance(t, 1)
-	contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", time.Now().Add(-6*time.Minute)).Error)
+	contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", time.Now().Add(-11*time.Minute)).Error)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) })
 	if _, err := ResolveBreakthrough(1, "USE_INVENTORY", 0, time.Now()); !errors.Is(err, ErrListeningNotFresh) {
 		t.Fatalf("stale breakthrough accepted: %v", err)
@@ -475,7 +475,7 @@ func TestInvalidBreakthroughRitualCanCancelDuringABSOutage(t *testing.T) {
 			setupGuardTestDB(t)
 			ritual := guardTestRitual(t)
 			contributionMust(t, guardTestJoin(ritual.ID, 2))
-			contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", time.Now().Add(-6*time.Minute)).Error)
+			contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", time.Now().Add(-11*time.Minute)).Error)
 			switch invalid {
 			case "deleted_account":
 				contributionMust(t, storage.DB.Where("telegram_id=1").Delete(&model.User{}).Error)
@@ -505,7 +505,7 @@ func TestValidBreakthroughRitualRemainsRetryableDuringABSOutage(t *testing.T) {
 	setupGuardTestDB(t)
 	ritual := guardTestRitual(t)
 	contributionMust(t, guardTestJoin(ritual.ID, 2))
-	contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", time.Now().Add(-6*time.Minute)).Error)
+	contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id=1").UpdateColumn("last_fetched_at", time.Now().Add(-11*time.Minute)).Error)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) })
 	_, err := ResolveBreakthrough(1, ritual.Mode, ritual.ID, time.Now().Add(2*time.Minute))
 	if !errors.Is(err, ErrListeningNotFresh) || isBreakthroughCancellationError(err) {
@@ -525,7 +525,7 @@ func TestRankFreshnessIncludesUsersOutsideTopTen(t *testing.T) {
 			for id := int64(1); id <= 11; id++ {
 				age := time.Minute
 				if id == 11 {
-					age = 6 * time.Minute
+					age = 11 * time.Minute
 				}
 				seedListeningFreshnessUser(t, id, age, .5)
 			}
@@ -558,6 +558,36 @@ func TestRankFreshnessIncludesUsersOutsideTopTen(t *testing.T) {
 				}
 			} else if notice != "" || err != nil || holder.UserID != 11 {
 				t.Fatalf("stale user outside top ten did not become first: notice=%s holder=%+v err=%v", notice, holder, err)
+			}
+		})
+	}
+}
+
+func TestSevenMinuteSourceCanSettleWithoutABS(t *testing.T) {
+	setupListeningFreshnessTest(t)
+	seedListeningFreshnessUser(t, 1, 7*time.Minute, .5)
+	contributionMust(t, storage.DB.Model(&model.Cultivation{}).Where("user_id=1").UpdateColumn("listening_initialized", false).Error)
+	var requests atomic.Int32
+	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(503) })
+	state := EnsureListeningFresh(1)
+	if !state.Fresh || requests.Load() != 0 {
+		t.Fatalf("fresh=%v requests=%d notice=%s", state.Fresh, requests.Load(), state.Notice)
+	}
+}
+
+func TestTodayListeningReaderRejectsPreviousBinding(t *testing.T) {
+	for _, binding := range []string{"replacement", "", "   "} {
+		t.Run(fmt.Sprintf("binding=%q", binding), func(t *testing.T) {
+			setupListeningFreshnessTest(t)
+			seedListeningFreshnessUser(t, 1, time.Minute, .5)
+			contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", binding).Error)
+			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) })
+			EnsureListeningFresh(1)
+			if stat, ok, err := GetTodayDailyListeningStatChecked(1, time.Now()); err != nil || ok {
+				t.Fatalf("previous binding accepted: stat=%+v ok=%v err=%v", stat, ok, err)
+			}
+			if _, ok := GetTodaySectListeningHoursFromCache(1, time.Now()); ok {
+				t.Fatal("previous binding accepted for sect listening")
 			}
 		})
 	}

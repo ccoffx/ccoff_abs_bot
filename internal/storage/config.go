@@ -68,7 +68,7 @@ const (
 
 	AutoBackupMaxRetryCount           = 5
 	DailyListeningRefreshInterval     = 30 * time.Minute
-	DailyListeningRefreshFreshTTL     = 5 * time.Minute
+	DailyListeningRefreshFreshTTL     = 10 * time.Minute
 	DailyListeningRefreshRequestDelay = 80 * time.Millisecond
 )
 

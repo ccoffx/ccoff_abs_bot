@@ -94,13 +94,16 @@ func TestCombinedDailyRetreatCap(t *testing.T) {
 		storage.DB = previousDB
 		_ = connection.Close()
 	})
-	if err := db.AutoMigrate(&model.DailyListeningStat{}, &model.SectCaveRetreat{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.DailyListeningStat{}, &model.SectCaveRetreat{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{})...); err != nil {
 		t.Fatal(err)
 	}
 	if err := spiritfire.Initialize(db, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.User{TelegramID: 1, AbsUserID: "abs1"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	todayStart, _ := sectDayRange(time.Now())
@@ -123,7 +126,7 @@ func TestCombinedDailyRetreatCap(t *testing.T) {
 	if err := db.Create(&yesterday).Error; err != nil {
 		t.Fatal(err)
 	}
-	stat := model.DailyListeningStat{UserID: 1, DayKey: SectDayKey(now)}
+	stat := model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: SectDayKey(now)}
 	if err := db.Create(&stat).Error; err != nil {
 		t.Fatal(err)
 	}

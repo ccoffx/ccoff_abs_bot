@@ -2262,8 +2262,8 @@ func getSectSecretRealmListeningSnapshot(absUserID string) (sectSecretRealmListe
 		return snapshot, nil
 	}
 
-	// ABS 重启/闪断时进入和实时刷新不应硬失败：本地每日统计仍是 5 分钟内官方数据时降级使用，
-	// 避免把 ABS 短暂抖动放大成用户无法进入秘境。结算路径不走本兜底，读取失败保留活动并等待重试；超过 5 分钟或本地无数据时维持原报错。
+	// ABS 重启/闪断时进入和实时刷新不应硬失败：本地每日统计仍是 10 分钟内官方数据时降级使用，
+	// 避免把 ABS 短暂抖动放大成用户无法进入秘境。结算路径不走本兜底，读取失败保留活动并等待重试；满 10 分钟或本地无数据时维持原报错。
 	if degraded, ok := freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID); ok {
 		log.Printf("⚠️ 宗门秘境读取 ABS 失败，降级使用本地每日统计: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
 		return degraded, nil
@@ -2271,7 +2271,7 @@ func getSectSecretRealmListeningSnapshot(absUserID string) (sectSecretRealmListe
 	return sectSecretRealmListeningSnapshot{}, err
 }
 
-// freshSectSecretRealmSnapshotFromLocalDailyStats 复用宗门任务路径的 5 分钟新鲜度口径
+// freshSectSecretRealmSnapshotFromLocalDailyStats 复用宗门任务路径的 10 分钟新鲜度口径
 // （dailyListeningABSFetchMinInterval），用本地每日统计汇总出与 ABS 直读同语义的快照。
 func freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID string) (sectSecretRealmListeningSnapshot, bool) {
 	if storage.DB == nil || strings.TrimSpace(absUserID) == "" {

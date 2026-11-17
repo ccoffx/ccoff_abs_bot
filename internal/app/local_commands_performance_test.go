@@ -64,7 +64,7 @@ func TestFreshAccountAndListeningQueriesDoNotWaitForABS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"签到", "斗气榜", "我的信息", "听书报告"} {
+	for _, command := range []string{"签到", "斗气榜", "我的信息", "听书报告", "刷新我的今日净修为"} {
 		mu.Lock()
 		before := len(texts)
 		mu.Unlock()
@@ -78,8 +78,68 @@ func TestFreshAccountAndListeningQueriesDoNotWaitForABS(t *testing.T) {
 			}
 		}
 	}
+	// A seven-minute snapshot is within the shared ten-minute query cache.
+	if err := storage.DB.Model(&model.DailyListeningStat{}).Where("user_id = ?", 1).Update("last_fetched_at", time.Now().Add(-7*time.Minute)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id = ?", 1).Update("progress_fetched_at", time.Now().Add(-7*time.Minute)).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"刷新我的今日净修为", "听书报告", "我的信息"} {
+		handleInteractiveMessage(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1, FirstName: "Listener"}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: command})
+	}
 	if requests.Load() != 0 {
 		t.Fatalf("local commands made %d ABS requests", requests.Load())
+	}
+	for _, command := range []string{"刷新我的今日净修为", "听书报告", "我的信息"} {
+		if err := storage.DB.Model(&model.DailyListeningStat{}).Where("user_id = ?", 1).Update("last_fetched_at", time.Now().Add(-11*time.Minute)).Error; err != nil {
+			t.Fatal(err)
+		}
+		before := requests.Load()
+		handleInteractiveMessage(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1, FirstName: "Listener"}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: command})
+		if requests.Load() <= before {
+			t.Fatalf("%s did not refresh an expired snapshot", command)
+		}
+	}
+	// A failed refresh after a binding change must not expose the old account's row.
+	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", "replacement").Error; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	before := len(texts)
+	mu.Unlock()
+	handleInteractiveMessage(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: "刷新我的今日净修为"})
+	mu.Lock()
+	reply := strings.Join(texts[before:], "\n")
+	mu.Unlock()
+	if !strings.Contains(reply, "今日暂无听书统计") || strings.Contains(reply, "今日净修为：") {
+		t.Fatalf("old binding's daily statistics were displayed: %s", reply)
+	}
+	// Admin queries use the current binding for today, while history remains readable.
+	for _, historical := range []bool{false, true} {
+		command := "查看每日净修为 1"
+		if historical {
+			var old model.DailyListeningStat
+			if err := storage.DB.Where("user_id = ?", 1).First(&old).Error; err != nil {
+				t.Fatal(err)
+			}
+			old.ID = 0
+			old.DayKey = game.SectDayKey(time.Now().AddDate(0, 0, -1))
+			if err := storage.DB.Create(&old).Error; err != nil {
+				t.Fatal(err)
+			}
+			command += " " + old.DayKey
+		}
+		mu.Lock()
+		before := len(texts)
+		mu.Unlock()
+		game.HandleDailyListeningStatCommand(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}}, command, "admin")
+		mu.Lock()
+		reply := strings.Join(texts[before:], "\n")
+		mu.Unlock()
+		if historical != strings.Contains(reply, "今日净修为：") {
+			t.Fatalf("historical=%v unexpected admin reply: %s", historical, reply)
+		}
 	}
 	mu.Lock()
 	joined := strings.Join(texts, "\n")

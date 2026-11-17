@@ -3496,6 +3496,11 @@ func getTodayDailyListeningStat(userID int64, now time.Time) (model.DailyListeni
 	return stat, ok
 }
 
+// Match the current binding in the same SQL snapshot as the daily row.
+const currentListeningBindingSQL = `EXISTS (SELECT 1 FROM users WHERE users.telegram_id = ?
+ AND users.deleted_at IS NULL AND TRIM(users.abs_user_id) <> ''
+ AND users.abs_user_id = daily_listening_stats.abs_user_id)`
+
 func GetTodayDailyListeningStatChecked(userID int64, now time.Time) (model.DailyListeningStat, bool, error) {
 	if storage.DB == nil {
 		return model.DailyListeningStat{}, false, fmt.Errorf("DB_NOT_READY")
@@ -3504,6 +3509,7 @@ func GetTodayDailyListeningStatChecked(userID int64, now time.Time) (model.Daily
 	var stat model.DailyListeningStat
 	if err := storage.DB.
 		Where("user_id = ? AND day_key = ?", userID, SectDayKey(now)).
+		Where(currentListeningBindingSQL, userID).
 		First(&stat).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return model.DailyListeningStat{}, false, nil
@@ -3556,9 +3562,9 @@ func sumDailyListeningRawSeconds(userID int64) (float64, bool) {
 }
 
 // dailyListeningABSFetchMinInterval 限制同一用户连续两次真实 ABS 拉取的间隔。
-// 宗门任务、领奖等消息路径会按需刷新今日净修为；若 5 分钟内已有当日官方数据，
+// 宗门任务、领奖等消息路径会按需刷新今日净修为；若 10 分钟内已有当日官方数据，
 // 直接复用缓存，避免每次点击都同步打 ABS（最多 1 次统计 + 5 页会话历史）。
-const dailyListeningABSFetchMinInterval = 5 * time.Minute
+const dailyListeningABSFetchMinInterval = ListeningMaxAge
 
 // sectTaskViewMemberRefreshLimit 限制宗门任务整体页单次刷新的成员上限，
 // 避免宗主/长老每次打开页面都同步拉取全宗门成员的 ABS 数据。

@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	ListeningSyncInterval = 3 * time.Minute
-	ListeningMaxAge       = 5 * time.Minute
+	ListeningSyncInterval = 5 * time.Minute
+	ListeningMaxAge       = 10 * time.Minute
 	listeningSyncWorkers  = 4
 	listeningQueryWait    = 20 * time.Second
 )
@@ -263,7 +263,7 @@ func RefreshDueListeningUsers(now time.Time) error {
 		}
 	}
 	if staleStats+staleProgress > 0 {
-		return fmt.Errorf("听书同步未达到5分钟新鲜度：修为 %d 人，书籍进度 %d 人", staleStats, staleProgress)
+		return fmt.Errorf("听书同步未达到10分钟新鲜度：修为 %d 人，书籍进度 %d 人", staleStats, staleProgress)
 	}
 	return nil
 }

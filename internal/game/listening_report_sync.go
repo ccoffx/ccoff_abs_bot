@@ -44,7 +44,7 @@ func saveListeningReportStatsInTx(tx *gorm.DB, userID int64, absID string, total
 }
 
 // Book progress is only needed by reports, so fetch it in the background, once
-// per three minutes, without adding requests to manual daily-listening refreshes.
+// per five minutes, without adding requests to manual daily-listening refreshes.
 func refreshListeningReportProgress(userID int64, absID string, now time.Time) {
 	coalesceListeningFetch(fmt.Sprintf("progress:%d:%q", userID, absID), func() listeningFetchResult {
 		refreshListeningReportProgressOnce(userID, absID, now)

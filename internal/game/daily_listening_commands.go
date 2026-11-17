@@ -285,21 +285,42 @@ func RefreshSpiritFireDailyStat(stat *model.DailyListeningStat, now time.Time) e
 }
 
 func handleRefreshMyDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	stat, totalEffective, ok, err := refreshUserDailyListeningAndCultivation(msg.From.ID)
-	if err != nil && !ok {
-		telegram.ReplyText(bot, msg.Chat.ID, "❌ 刷新今日净修为失败，请稍后再试。")
+	// Share the cache policy with listening reports and other personal queries.
+	freshness := EnsureListeningFresh(msg.From.ID)
+	if storage.DB == nil {
+		telegram.ReplyText(bot, msg.Chat.ID, "❌ 今日净修为读取失败，请稍后再试。")
 		return
 	}
-	if !ok {
-		telegram.ReplyText(bot, msg.Chat.ID, "📭 今日暂无有效听书记录。")
+	var stat model.DailyListeningStat
+	var cultivation model.Cultivation
+	statFound := false
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		var user model.User
+		if err := tx.Select("telegram_id", "abs_user_id").Where("telegram_id = ?", msg.From.ID).First(&user).Error; err != nil {
+			return err
+		}
+		if strings.TrimSpace(user.AbsUserID) == "" {
+			return gorm.ErrRecordNotFound
+		}
+		if err := tx.Where("user_id = ? AND abs_user_id = ? AND day_key = ?", msg.From.ID, user.AbsUserID, SectDayKey(time.Now())).First(&stat).Error; err != nil {
+			return err
+		}
+		statFound = true
+		return tx.Where("user_id = ?", msg.From.ID).First(&cultivation).Error
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) && !statFound {
+		telegram.ReplyText(bot, msg.Chat.ID, "📭 今日暂无听书统计，请等待后台自动更新（约每 5 分钟一次）。\n"+freshness.Notice)
 		return
 	}
-
-	title := "✅ 今日净修为已刷新"
-	if errors.Is(err, storage.ErrAbsRefreshFailedUsingCache) {
-		title = "⚠️ 本次刷新失败，展示上次成功统计"
+	if err != nil {
+		telegram.ReplyText(bot, msg.Chat.ID, "❌ 今日净修为读取失败，请稍后再试。")
+		return
 	}
-	telegram.ReplyText(bot, msg.Chat.ID, formatDailyListeningStat(title, stat, totalEffective))
+	reply := formatDailyListeningStat("📊 今日净修为（后台约每 5 分钟自动更新）", stat, cultivation.TotalAudioTime)
+	if freshness.Notice != "" {
+		reply += "\n\n" + freshness.Notice
+	}
+	telegram.ReplyText(bot, msg.Chat.ID, reply)
 }
 
 func handleRefreshSectDailyListeningStatsCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -367,7 +388,11 @@ func handleQueryDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, 
 	var totalEffective float64
 	statFound := false
 	err = storage.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("user_id = ? AND day_key = ?", targetID, dayKey).First(&stat).Error; err != nil {
+		query := tx.Where("user_id = ? AND day_key = ?", targetID, dayKey)
+		if dayKey == todayKey {
+			query = query.Where(currentListeningBindingSQL, targetID)
+		}
+		if err := query.First(&stat).Error; err != nil {
 			return err
 		}
 		statFound = true

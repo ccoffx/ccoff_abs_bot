@@ -231,13 +231,16 @@ func TestCurrentCultivationIntegration(t *testing.T) {
 		}
 	}
 	// 宗门科技影响 Boss 伤害，听书使用当日统计。
+	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", "abs1").Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := storage.DB.AutoMigrate(&model.DailyListeningStat{}, &model.SectCaveRetreat{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range []interface{}{
 		&model.SectMember{SectID: 1, UserID: 1},
 		&model.SectTechnology{SectID: 1, TechKey: game.SectTechBossDamageBonus, Level: 3},
-		&model.DailyListeningStat{UserID: 1, DayKey: game.SectDayKey(time.Now()), EffectiveHours: 2},
+		&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: game.SectDayKey(time.Now()), EffectiveHours: 2},
 	} {
 		if err := storage.DB.Create(record).Error; err != nil {
 			t.Fatal(err)
