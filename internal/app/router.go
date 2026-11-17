@@ -41,10 +41,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	telegram.SweeperOnce.Do(func() {
-		telegram.StartMessageSweeper(bot)
-	})
-
 	userID := msg.From.ID
 	chatID := msg.Chat.ID
 	text := strings.TrimSpace(msg.Text)
