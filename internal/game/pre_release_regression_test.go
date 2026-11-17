@@ -199,7 +199,7 @@ func TestBossChangedBindingMustNotBlockOtherParticipants(t *testing.T) {
 	old := config.AppConfig
 	config.AppConfig = &config.Config{}
 	t.Cleanup(func() { config.AppConfig = old })
-	if err := storage.DB.AutoMigrate(&model.SectMember{}, &model.Sect{}, &model.Cultivation{}, &model.Inventory{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.SectMember{}, &model.Sect{}, &model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.Inventory{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Create(&model.User{TelegramID: p.UserID, Username: "new-account", AbsUserID: "replacement-abs"}).Error; err != nil {

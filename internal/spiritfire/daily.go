@@ -78,9 +78,65 @@ func RefreshDaily(tx *gorm.DB, stat *model.DailyListeningStat, base float64, now
 	if err != nil {
 		return err
 	}
+	return refreshDailyWithPercent(tx, stat, base, snap.Percent)
+}
+
+// RefreshDailyBatch reuses immutable daily snapshots in a single user's locked
+// transaction. Only previously unseen dates need to resolve historical loadouts.
+func RefreshDailyBatch(tx *gorm.DB, stats []model.DailyListeningStat, bases map[string]float64, now time.Time) error {
+	if len(stats) == 0 {
+		return nil
+	}
+	user := stats[0].UserID
+	var state model.SpiritFireState
+	if err := tx.First(&state, 1).Error; err != nil {
+		return err
+	}
+	var snapshots []model.SpiritFireDaily
+	days := make([]string, 0, len(stats))
+	for _, stat := range stats {
+		days = append(days, stat.DayKey)
+	}
+	if err := tx.Where("user_id = ? AND day_key IN ?", user, days).Find(&snapshots).Error; err != nil {
+		return err
+	}
+	byDay := make(map[string]model.SpiritFireDaily, len(snapshots))
+	for _, snap := range snapshots {
+		byDay[snap.DayKey] = snap
+	}
+	today := Day(now)
+	for i := range stats {
+		stat := &stats[i]
+		if stat.UserID != user {
+			return fmt.Errorf("SPIRIT_FIRE_BATCH_USER_MISMATCH")
+		}
+		if stat.DayKey > today {
+			continue
+		}
+		percent := 0
+		if stat.DayKey >= state.LaunchDay {
+			snap, ok := byDay[stat.DayKey]
+			if !ok {
+				var err error
+				snap, err = Snapshot(tx, user, stat.DayKey)
+				if err != nil {
+					return err
+				}
+				byDay[stat.DayKey] = snap
+			}
+			percent = snap.Percent
+		}
+		if err := refreshDailyWithPercent(tx, stat, bases[stat.DayKey], percent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func refreshDailyWithPercent(tx *gorm.DB, stat *model.DailyListeningStat, base float64, percent int) error {
 	oldBase, oldBonus := stat.BaseCultivationHours, stat.SpiritFireHours
 	stat.BaseCultivationHours = base
-	stat.SpiritFireHours = Bonus(stat.CappedSeconds, stat.EffectiveHours, snap.Percent)
+	stat.SpiritFireHours = Bonus(stat.CappedSeconds, stat.EffectiveHours, percent)
 	if stat.ID == 0 || (oldBase == base && oldBonus == stat.SpiritFireHours) {
 		return nil
 	}

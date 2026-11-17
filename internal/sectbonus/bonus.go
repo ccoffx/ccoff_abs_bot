@@ -2,7 +2,9 @@ package sectbonus
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"ccoff-abs-bot/internal/model"
@@ -70,6 +72,38 @@ func RefreshDaily(tx *gorm.DB, stat *model.DailyListeningStat) error {
 	if err != nil {
 		return err
 	}
+	return refreshDailyBonus(tx, stat, bonus)
+}
+
+// RefreshDailyBatch reads one user's entitlement history once for a listening
+// transaction, retaining next-day activation and historical corrections.
+func RefreshDailyBatch(tx *gorm.DB, stats []model.DailyListeningStat) error {
+	if len(stats) == 0 {
+		return nil
+	}
+	user := stats[0].UserID
+	var revisions []model.SectOwnerBonusRevision
+	if err := tx.Where("user_id = ?", user).Order("day_key DESC").Find(&revisions).Error; err != nil {
+		return err
+	}
+	for i := range stats {
+		stat := &stats[i]
+		if stat.UserID != user {
+			return fmt.Errorf("SECT_OWNER_BONUS_BATCH_USER_MISMATCH")
+		}
+		index := sort.Search(len(revisions), func(j int) bool { return revisions[j].DayKey <= stat.DayKey })
+		bonus := 0.0
+		if index < len(revisions) && revisions[index].Enabled && !math.IsNaN(stat.EffectiveHours) && !math.IsInf(stat.EffectiveHours, 0) {
+			bonus = math.Max(0, stat.EffectiveHours) * Percent / 100
+		}
+		if err := refreshDailyBonus(tx, stat, bonus); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func refreshDailyBonus(tx *gorm.DB, stat *model.DailyListeningStat, bonus float64) error {
 	old := stat.SectOwnerBonusHours
 	stat.SectOwnerBonusHours = bonus
 	if stat.ID == 0 || old == bonus {

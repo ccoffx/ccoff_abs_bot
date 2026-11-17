@@ -148,9 +148,13 @@ func TestCombinedDailyRetreatCap(t *testing.T) {
 		if !ok || math.Abs(total-(8.5+tc.want)) > 1e-9 {
 			t.Errorf("raw %gh: cumulative value %g (ok=%t), want %g", tc.raw, total, ok, 8.5+tc.want)
 		}
+		if err := db.First(&stat, stat.ID).Error; err != nil {
+			t.Fatal(err)
+		}
 		report := formatDailyListeningStat("test", stat, total)
-		if tc.want == 8.5 && !strings.Contains(report, "今日净修为：`8.50` 小时") {
-			t.Errorf("report does not show combined daily cap: %s", report)
+		// Computing components alone has not committed the profile's ledger.
+		if !strings.Contains(report, "今日净修为：待结算") {
+			t.Errorf("report presented unapplied components as settled: %s", report)
 		}
 	}
 }

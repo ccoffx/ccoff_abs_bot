@@ -483,12 +483,8 @@ func HandleUserSignIn(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	var u model.User
-	if err := storage.DB.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
-		log.Printf("⚠️ 签到成功后本地档案读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-	} else if u.AbsUserID != "" {
-		game.FetchReportAndCheckUpgrade(bot, userID, u.AbsUserID)
-	}
+	// Rewards are already committed; refresh only an expired listening snapshot.
+	listeningFreshness := game.EnsureListeningFresh(userID)
 
 	cul := game.GetOrCreateCultivation(userID)
 	realmStr := game.GetRealmName(cul)
@@ -532,5 +528,8 @@ func HandleUserSignIn(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		result.BalanceAfterAll,
 	)
 
+	if listeningFreshness.Notice != "" {
+		reply += "\n\n" + listeningFreshness.Notice
+	}
 	telegram.ReplyText(bot, chatID, reply)
 }

@@ -19,7 +19,9 @@ func clearDeletedAccountRankSourcesInTx(tx *gorm.DB, userID int64) error {
 	}
 	for _, source := range []any{
 		&model.Cultivation{},
+		&model.CultivationUpgradeEvent{},
 		&model.DailyListeningStat{},
+		&model.ListeningReportSnapshot{},
 		&model.ABSCrossDaySessionScanCursor{},
 		&model.ABSCrossDaySessionAdjustment{},
 		&model.GardenPlanting{},

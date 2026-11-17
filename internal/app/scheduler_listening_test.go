@@ -37,3 +37,16 @@ func TestDailyListeningSchedulerKeepsPartialRefreshError(t *testing.T) {
 		t.Fatalf("scheduler cleared a failed refresh: value=%q err=%v", stored, err)
 	}
 }
+
+func TestListeningBatchFutureTimestampDoesNotBlockRefresh(t *testing.T) {
+	now := time.Now()
+	if listeningBatchRecentlyRan(now.Add(time.Hour), now) {
+		t.Fatal("future batch timestamp blocked the scheduler")
+	}
+	if !listeningBatchRecentlyRan(now.Add(-time.Minute), now) {
+		t.Fatal("recent completed batch was not recognized")
+	}
+	if listeningBatchRecentlyRan(now.Add(-storage.DailyListeningRefreshInterval), now) {
+		t.Fatal("expired batch timestamp blocked refresh")
+	}
+}

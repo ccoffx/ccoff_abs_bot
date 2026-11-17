@@ -19,7 +19,7 @@ import (
 func setupRetreatBackfillDB(t *testing.T) {
 	t.Helper()
 	setupListeningAbuseScheduleDB(t)
-	if err := storage.DB.AutoMigrate(&model.ABSCrossDaySessionScanCursor{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.ABSCrossDaySessionScanCursor{}, &model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Create(&model.User{TelegramID: 1, AbsUserID: "abs1", Role: "user", Status: "active"}).Error; err != nil {

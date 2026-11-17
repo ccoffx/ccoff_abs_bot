@@ -8,16 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
 )
 
 func TestExternalListeningRefreshWaitsBeforeFetchingDuringBatch(t *testing.T) {
-	for _, kind := range []string{"secret_realm", "personal_report"} {
+	for _, kind := range []string{"secret_realm", "explicit_refresh"} {
 		t.Run(kind, func(t *testing.T) {
 			setupRetreatBackfillDB(t)
-			if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.SectMember{}, &model.Sect{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
+			if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.SectMember{}, &model.Sect{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
 				t.Fatal(err)
 			}
 			if err := storage.DB.Exec("CREATE UNIQUE INDEX ux_external_refresh_cultivation ON cultivations(user_id)").Error; err != nil {
@@ -39,7 +38,7 @@ func TestExternalListeningRefreshWaitsBeforeFetchingDuringBatch(t *testing.T) {
 				seconds := 3600
 				if strings.Contains(r.URL.Path, "/abs1/") {
 					// The batch is holding the exclusive lock while fetching user 1.
-					// Start another operation for user 2 before the batch reaches them.
+					// A concurrent external operation must wait even when batch workers overlap.
 					go func() {
 						close(started)
 						if kind == "secret_realm" {
@@ -49,12 +48,8 @@ func TestExternalListeningRefreshWaitsBeforeFetchingDuringBatch(t *testing.T) {
 							}
 							done <- err
 						} else {
-							report := GetPersonalReport(abs.DefaultClient, "abs2")
-							if strings.Contains(report, "刷新失败") || !strings.Contains(report, "累计实际听书: 3.00 小时") {
-								done <- fmt.Errorf("report used a failed/stale refresh: %s", report)
-							} else {
-								done <- nil
-							}
+							_, _, _, err := refreshUserDailyListeningAndCultivation(2)
+							done <- err
 						}
 					}()
 					<-started
@@ -64,9 +59,9 @@ func TestExternalListeningRefreshWaitsBeforeFetchingDuringBatch(t *testing.T) {
 					case <-time.After(50 * time.Millisecond):
 					}
 				} else {
-					requested <- struct{}{}
 					seconds = 7200
 					if secondRequests.Add(1) > 1 {
+						requested <- struct{}{}
 						seconds = 10800
 					}
 				}

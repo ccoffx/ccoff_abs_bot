@@ -2281,16 +2281,24 @@ func freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID string) (sectSecr
 	if err := storage.DB.Select("telegram_id", "abs_user_id").Where("abs_user_id = ?", absUserID).First(&u).Error; err != nil {
 		return sectSecretRealmListeningSnapshot{}, false
 	}
-	var stat model.DailyListeningStat
-	if err := storage.DB.Where("user_id = ?", u.TelegramID).
-		Order("last_fetched_at DESC").
-		First(&stat).Error; err != nil {
+	now := time.Now()
+	var stats []model.DailyListeningStat
+	if err := storage.DB.Where("user_id = ? AND abs_user_id = ? AND day_key IN ?", u.TelegramID, absUserID,
+		[]string{SectDayKey(now), SectDayKey(now.In(storage.DailyOperationsLocation).AddDate(0, 0, -1))}).
+		Find(&stats).Error; err != nil {
 		return sectSecretRealmListeningSnapshot{}, false
 	}
-	if stat.LastFetchedAt.IsZero() || time.Since(stat.LastFetchedAt) >= dailyListeningABSFetchMinInterval {
+	fresh := false
+	for _, stat := range stats {
+		if listeningTimestampFresh(stat.LastFetchedAt, now, dailyListeningABSFetchMinInterval) {
+			fresh = true
+			break
+		}
+	}
+	if !fresh {
 		return sectSecretRealmListeningSnapshot{}, false
 	}
-	effectiveHours, okHours := totalCultivationEffectiveHoursFromDailyStats(u.TelegramID, time.Now())
+	effectiveHours, okHours := totalCultivationEffectiveHoursFromDailyStats(u.TelegramID, now)
 	rawSeconds, okRaw := sumDailyListeningRawSeconds(u.TelegramID)
 	if !okHours || !okRaw {
 		return sectSecretRealmListeningSnapshot{}, false

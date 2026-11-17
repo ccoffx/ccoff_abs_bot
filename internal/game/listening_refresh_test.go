@@ -20,7 +20,7 @@ import (
 
 func TestListeningBatchIsolatesConcurrentPersonalRefreshUntilPublication(t *testing.T) {
 	setupRetreatBackfillDB(t)
-	if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.SectMember{}, &model.Sect{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.SectMember{}, &model.Sect{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Exec("CREATE UNIQUE INDEX ux_isolated_cultivation ON cultivations(user_id)").Error; err != nil {
@@ -118,7 +118,7 @@ func TestListeningReportWriteWaitsForBatch(t *testing.T) {
 
 func TestListeningBatchPublishesOnlyAfterAllAccountsSucceed(t *testing.T) {
 	setupRetreatBackfillDB(t)
-	if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.SectMember{}, &model.Sect{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.SectMember{}, &model.Sect{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Exec("CREATE UNIQUE INDEX ux_refresh_cultivation ON cultivations(user_id)").Error; err != nil {

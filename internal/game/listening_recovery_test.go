@@ -264,10 +264,16 @@ func TestPersonalReportUsesCorrectedCacheWhenRefreshFails(t *testing.T) {
 					if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
 						t.Fatal("initial refresh failed")
 					}
+					if _, ok := syncCultivationFromDailyListeningStats(1); !ok {
+						t.Fatal("settlement failed")
+					}
 					before := recoveryListeningDay(t, today)
 					fail.Store(true)
+					if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+						t.Fatal("injected failure accepted")
+					}
 					report := GetPersonalReport(abs.DefaultClient, "abs1")
-					for _, want := range []string{"今日实际听书: 1.00 小时", "今日净修为: " + clock.todayHours + " 小时", "净修炼时长: " + clock.totalHours + " 小时", "本次刷新失败", "使用上次成功统计"} {
+					for _, want := range []string{"今日实际听书: 1.00 小时", "今日净修为: " + clock.todayHours + " 小时", "净修炼时长: " + clock.totalHours + " 小时", "使用上次成功统计"} {
 						if !strings.Contains(report, want) {
 							t.Errorf("report missing %q: %s", want, report)
 						}
@@ -296,7 +302,7 @@ func TestPersonalReportWithoutCacheDoesNotDisplayUncorrectedZero(t *testing.T) {
 		}
 	})
 	report := GetPersonalReport(abs.DefaultClient, "abs1")
-	for _, want := range []string{"今日实际听书: 读取失败", "今日净修为: 读取失败", "净修炼时长: 读取失败", "暂无可用的每日统计缓存"} {
+	for _, want := range []string{"今日实际听书: 待同步", "今日净修为: 待同步", "净修炼时长: 读取失败", "暂无今日每日统计缓存"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing %q: %s", want, report)
 		}

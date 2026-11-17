@@ -80,6 +80,31 @@ func GetOrCreateCultivation(userID int64) *model.Cultivation {
 }
 
 func createCultivationIfMissing(userID int64) (*model.Cultivation, error) {
+	var cul *model.Cultivation
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockCultivationAccountInTx(tx, userID); err != nil {
+			return err
+		}
+		var err error
+		cul, err = createCultivationIfMissingInTx(tx, userID)
+		return err
+	})
+	return cul, err
+}
+
+func lockCultivationAccountInTx(tx *gorm.DB, userID int64) error {
+	res := tx.Model(&model.User{}).Where("telegram_id = ?", userID).UpdateColumn("id", gorm.Expr("id"))
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return storage.ErrUserNotFound
+	}
+	return nil
+}
+
+// The caller holds the live-account write guard through commit.
+func createCultivationIfMissingInTx(tx *gorm.DB, userID int64) (*model.Cultivation, error) {
 	if userID == 0 {
 		return nil, fmt.Errorf("CULTIVATION_CREATE_INVALID")
 	}
@@ -92,13 +117,13 @@ func createCultivationIfMissing(userID int64) (*model.Cultivation, error) {
 		TribulationFails: 0,
 		ConsolidateUntil: time.Now().Add(-24 * time.Hour),
 	}
-	res := storage.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&cul)
+	res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&cul)
 	if res.Error != nil {
 		return nil, res.Error
 	}
 	if res.RowsAffected == 0 {
 		var existing model.Cultivation
-		if err := storage.DB.Where("user_id = ?", userID).First(&existing).Error; err != nil {
+		if err := tx.Where("user_id = ?", userID).First(&existing).Error; err != nil {
 			return nil, err
 		}
 		return &existing, nil
@@ -124,9 +149,43 @@ func SyncCultivationRealm(cul *model.Cultivation) {
 		return
 	}
 
+	previous := *cul
+	oldMajor, oldMinor := cul.MajorRealm, cul.MinorRealm
+	calculateCultivationRealm(cul)
+
+	if oldMajor != cul.MajorRealm || oldMinor != cul.MinorRealm {
+		// 只更新本函数负责的列（小段位，以及斗之气自动进阶时的大境界），
+		// 并校验读取时的段位及修为，避免旧快照覆盖同一大境界内的新段位。
+		// 后台批量同步（notifier/宗门刷新/世界Boss加成）不持有用户级锁，
+		// 若沿用全行 DB.Save(cul)，会用陈旧快照覆盖用户刚突破写入的
+		// major_realm / consolidate_until / tribulation_fails，
+		// 造成“扣了资源却退回原境界”的资产损失；这里改为定向条件更新规避。
+		updates := map[string]interface{}{"minor_realm": cul.MinorRealm}
+		if oldMajor != cul.MajorRealm {
+			updates["major_realm"] = cul.MajorRealm
+		}
+		res := storage.DB.Model(&model.Cultivation{}).
+			Where("id = ? AND user_id = ? AND major_realm = ? AND minor_realm = ? AND total_audio_time = ? AND pill_audio_time = ?",
+				previous.ID, cul.UserID, oldMajor, oldMinor, previous.TotalAudioTime, previous.PillAudioTime).
+			Updates(updates)
+		if res.Error != nil {
+			*cul = previous
+			log.Printf("⚠️ 同步斗气段位失败: user=%d err=%s", cul.UserID, textfmt.FormatPlainError(res.Error))
+		} else if res.RowsAffected == 0 {
+			// Return the winning writer's profile rather than our rejected result.
+			*cul = previous
+			var current model.Cultivation
+			if err := storage.DB.Where("user_id = ?", cul.UserID).First(&current).Error; err == nil {
+				*cul = current
+			} else {
+				log.Printf("⚠️ 重读斗气段位失败: user=%d err=%s", cul.UserID, textfmt.FormatPlainError(err))
+			}
+		}
+	}
+}
+
+func calculateCultivationRealm(cul *model.Cultivation) {
 	h := cul.TotalAudioTime + cul.PillAudioTime
-	oldMajor := cul.MajorRealm
-	oldMinor := cul.MinorRealm
 
 	rules := GetCultivationRules()
 	if rules == nil {
@@ -135,7 +194,7 @@ func SyncCultivationRealm(cul *model.Cultivation) {
 
 	// 斗之气阶段只允许按配置从 0 进入第一个突破目标，不自动跨越后续大境界。
 	if cul.MajorRealm == 0 {
-		if req, ok := getBreakthroughSettingFromRules(0); ok && h >= req.MinHours {
+		if req, ok := getBreakthroughSettingFromRules(0); ok && cultivationHoursMeetThreshold(h, req.MinHours) {
 			cul.MajorRealm = req.ToMajorRealm
 			cul.MinorRealm = 1
 		}
@@ -147,7 +206,7 @@ func SyncCultivationRealm(cul *model.Cultivation) {
 		if len(minors) > 0 {
 			bestMinor := 1
 			for _, minor := range minors {
-				if h >= minor.RequiredHours && minor.MinorRealm > bestMinor {
+				if cultivationHoursMeetThreshold(h, minor.RequiredHours) && minor.MinorRealm > bestMinor {
 					bestMinor = minor.MinorRealm
 				}
 			}
@@ -162,26 +221,21 @@ func SyncCultivationRealm(cul *model.Cultivation) {
 		cul.MinorRealm = maximum
 	}
 
-	if oldMajor != cul.MajorRealm || oldMinor != cul.MinorRealm {
-		// 只更新本函数负责的列（小段位，以及斗之气自动进阶时的大境界），
-		// 并以读取时的大境界为条件做乐观锁。
-		// 后台批量同步（notifier/宗门刷新/世界Boss加成）不持有用户级锁，
-		// 若沿用全行 DB.Save(cul)，会用陈旧快照覆盖用户刚突破写入的
-		// major_realm / consolidate_until / tribulation_fails，
-		// 造成“扣了资源却退回原境界”的资产损失；这里改为定向条件更新规避。
-		updates := map[string]interface{}{"minor_realm": cul.MinorRealm}
-		if oldMajor != cul.MajorRealm {
-			updates["major_realm"] = cul.MajorRealm
-		}
-		res := storage.DB.Model(&model.Cultivation{}).
-			Where("user_id = ? AND major_realm = ?", cul.UserID, oldMajor).
-			Updates(updates)
-		if res.Error != nil {
-			log.Printf("⚠️ 同步斗气段位失败: user=%d err=%s", cul.UserID, textfmt.FormatPlainError(res.Error))
-		} else if res.RowsAffected == 0 {
-			log.Printf("⚠️ 同步斗气段位未命中: user=%d old_major=%d new_major=%d new_minor=%d", cul.UserID, oldMajor, cul.MajorRealm, cul.MinorRealm)
-		}
-	}
+}
+
+// Hours are summed from fractional seconds. Ignore at most 3.6 microseconds
+// of binary rounding when comparing a cumulative amount with a threshold.
+const cultivationHoursEpsilon = 1e-9
+
+func cultivationHoursMeetThreshold(hours, required float64) bool {
+	return hours+cultivationHoursEpsilon >= required
+}
+
+// Normalize the contribution cursor upward only within the rounding tolerance.
+// Its ordinary floor then records the amount actually paid, including when
+// repairing an old cursor that was persisted just below an integer.
+func cultivationContributionHighWater(hours float64) float64 {
+	return math.Max(hours, math.Floor(hours+cultivationHoursEpsilon))
 }
 
 // persistCultivationAudioTime 只更新 total_audio_time 列。
@@ -306,6 +360,11 @@ func createBreakthroughAttemptInTx(tx *gorm.DB, attempt *model.BreakthroughAttem
 
 // 1. 渡劫前置扫描预检
 func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	freshness := EnsureListeningFresh(msg.From.ID)
+	if !freshness.Fresh {
+		telegram.ReplyTextToMessage(bot, msg, freshness.Notice+"\n请成功刷新听书修为后再尝试突破。")
+		return
+	}
 	userID := msg.From.ID
 	chatID := msg.Chat.ID
 	userName := msg.From.UserName
@@ -341,7 +400,7 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	// 🚨 判定标准升级：苦修 + 药力 双轨总修为
 	totalH := cul.TotalAudioTime + cul.PillAudioTime
-	if totalH < req.MinHours {
+	if !cultivationHoursMeetThreshold(totalH, req.MinHours) {
 		telegram.SendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("❌ @%s 突破需要总修为满 `%.1f` 小时！您当前总计仅有 `%.1f` 小时，强行渡劫必遭反噬！", safeName, req.MinHours, totalH))
 		return
 	}
@@ -422,6 +481,28 @@ type BreakthroughOutcome struct {
 }
 
 func ResolveBreakthrough(userID int64, mode string, ritualID uint, now time.Time) (*BreakthroughOutcome, error) {
+	if ritualID != 0 && storage.DB != nil {
+		// Terminal account changes must reach the cancellation/refund path even
+		// when ABS is unavailable. Settlement still rechecks inside its transaction.
+		var user model.User
+		if err := storage.DB.Where("telegram_id = ?", userID).First(&user).Error; err != nil {
+			return nil, err
+		}
+		usable, err := storage.UserHasUsableLocalAbsAccountTxAt(storage.DB, user, now)
+		if err != nil {
+			return nil, err
+		}
+		if !usable || !storage.IsFormalAccount(user) {
+			return nil, ErrBreakthroughGuardIneligible
+		}
+		var cul model.Cultivation
+		if err := storage.DB.Select("id").Where("user_id = ?", userID).First(&cul).Error; err != nil {
+			return nil, err
+		}
+	}
+	if err := requireFreshListening(userID); err != nil {
+		return nil, err
+	}
 	return resolveBreakthroughWithRoll(userID, mode, ritualID, now, func() (int, error) {
 		value, err := rand.Int(rand.Reader, big.NewInt(100))
 		if err != nil {
@@ -531,7 +612,7 @@ func resolveBreakthroughWithRoll(userID int64, mode string, ritualID uint, now t
 
 		// 事务内再次校验总修为。
 		totalH := cul.TotalAudioTime + cul.PillAudioTime
-		if totalH < req.MinHours {
+		if !cultivationHoursMeetThreshold(totalH, req.MinHours) {
 			return storage.ErrInsufficientCultivation
 		}
 
@@ -810,19 +891,23 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 	if err != nil && ritualID != 0 {
 		if isBreakthroughCancellationError(err) {
 			if cancelErr := CancelBreakthroughRitual(ritualID, userID); cancelErr != nil {
-				log.Printf("取消互道突破失败: ritual=%d err=%s", ritualID, textfmt.FormatPlainError(cancelErr))
+				log.Printf("取消护道突破失败: ritual=%d err=%s", ritualID, textfmt.FormatPlainError(cancelErr))
 				return
 			}
-			telegram.ReplyTextToMessage(bot, msg, "⚠️ 突破条件已变化，本次突破取消；互道投入已原额退还。请重新发起突破。")
+			telegram.ReplyTextToMessage(bot, msg, "⚠️ 突破条件已变化，本次突破取消；护道投入已原额退还。请重新发起突破。")
 			refreshBreakthroughRitualPanel(bot, ritualID, nil)
 			return
 		}
-		log.Printf("互道突破结算暂时失败，将重试: ritual=%d err=%s", ritualID, textfmt.FormatPlainError(err))
+		log.Printf("护道突破结算暂时失败，将重试: ritual=%d err=%s", ritualID, textfmt.FormatPlainError(err))
 		return
 	}
 
+	if errors.Is(err, ErrListeningNotFresh) {
+		telegram.ReplyTextToMessage(bot, msg, err.Error()+"\n突破未执行，请成功刷新听书修为后重试。")
+		return
+	}
 	if errors.Is(err, ErrBreakthroughRitualPending) {
-		telegram.ReplyTextToMessage(bot, msg, "⚠️ 您已有待结算的互道突破，请等待本局结束。")
+		telegram.ReplyTextToMessage(bot, msg, "⚠️ 您已有待结算的护道突破，请等待本局结束。")
 		return
 	}
 	if err != nil {
@@ -918,7 +1003,7 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 		)
 
 		if result.GuardCount > 0 {
-			announce += fmt.Sprintf("\n🤝 互道 %d 人：基础 %.0f%% → 最终 %.0f%%；互道者各到账10积分（净赚5分）。", result.GuardCount, result.BaseSuccessRate*100, result.SuccessRate*100)
+			announce += fmt.Sprintf("\n🤝 护道 %d 人：基础 %.0f%% → 最终 %.0f%%；护道者各到账10积分（净赚5分）。", result.GuardCount, result.BaseSuccessRate*100, result.SuccessRate*100)
 		}
 		func() {
 			msg := tgbotapi.NewMessage(chatID, announce)
@@ -973,7 +1058,7 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 	)
 
 	if result.GuardCount > 0 {
-		failText += fmt.Sprintf("\n🤝 互道 %d 人：基础 %.0f%% → 最终 %.0f%%；仅互道者损失投入的5积分，未参与者不受影响。", result.GuardCount, result.BaseSuccessRate*100, result.SuccessRate*100)
+		failText += fmt.Sprintf("\n🤝 护道 %d 人：基础 %.0f%% → 最终 %.0f%%；仅护道者损失投入的5积分，未参与者不受影响。", result.GuardCount, result.BaseSuccessRate*100, result.SuccessRate*100)
 	}
 	if config.AppConfig != nil && config.AppConfig.NoticeGroupID != 0 && chatID != config.AppConfig.NoticeGroupID {
 		telegram.SendGroupAutoDeleteMessageAsync(bot, config.AppConfig.NoticeGroupID, failText, "cultivation_breakthrough_fail_notice", fmt.Sprintf("cultivation_fail_notice:%d", attemptID))
@@ -993,7 +1078,9 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 }
 
 func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
+	freshnessNotice := ensureListeningRankFresh()
 	type RankResult struct {
+		UserID              int64
 		Username            string
 		SectName            string
 		MajorRealm          int
@@ -1005,17 +1092,66 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 	}
 
 	var results []RankResult
-	ownerBonuses := storage.DB.Model(&model.DailyListeningStat{}).
-		Select("user_id, SUM(sect_owner_bonus_hours) AS hours").
-		Where("day_key <= ?", SectDayKey(time.Now())).Group("user_id")
-
-	err := rankings.Cultivation(storage.DB).
-		Select("users.username, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time, COALESCE(sects.owner_id = cultivations.user_id, 0) AS is_sect_owner, COALESCE(owner_bonus.hours, 0) AS sect_owner_bonus_hours").
-		Joins("left join sect_members on sect_members.user_id = cultivations.user_id and sect_members.deleted_at is null").
-		Joins("left join sects on sects.id = sect_members.sect_id and sects.deleted_at is null").
-		Joins("LEFT JOIN (?) AS owner_bonus ON owner_bonus.user_id = cultivations.user_id", ownerBonuses).
-		Limit(10).
-		Scan(&results).Error
+	// A full batch writes users one by one. Pin both ranking reads outside its
+	// publication window so a query cannot observe a half-finished batch.
+	listeningRefreshMu.RLock()
+	locked := true
+	defer func() {
+		if locked {
+			listeningRefreshMu.RUnlock()
+		}
+	}()
+	if freshnessNotice == "" {
+		users, freshnessErr := listeningSyncUsers(time.Now())
+		if freshnessErr != nil {
+			freshnessNotice = "⚠️ 榜单新鲜度检查失败，以下为已保存数据。"
+		} else {
+			for _, user := range users {
+				if !user.Settled || !listeningDailyTimestampFresh(user.LastFetchedAt, time.Now(), ListeningMaxAge) {
+					freshnessNotice = "⚠️ 榜单数据可能滞后，以下为已保存数据。\n" + staleListeningNotice(user.LastFetchedAt)
+					break
+				}
+			}
+		}
+	}
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := rankings.Cultivation(tx).
+			Select("cultivations.user_id, users.username, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time, COALESCE(sects.owner_id = cultivations.user_id, 0) AS is_sect_owner").
+			Joins("left join sect_members on sect_members.user_id = cultivations.user_id and sect_members.deleted_at is null").
+			Joins("left join sects on sects.id = sect_members.sect_id and sects.deleted_at is null").
+			Limit(10).
+			Scan(&results).Error; err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			return nil
+		}
+		// Aggregate history only for the displayed users, after selecting the top ten.
+		ids := make([]int64, 0, len(results))
+		for _, r := range results {
+			ids = append(ids, r.UserID)
+		}
+		var bonuses []struct {
+			UserID int64
+			Hours  float64
+		}
+		if err := tx.Model(&model.DailyListeningStat{}).
+			Select("user_id, SUM(sect_owner_bonus_hours) AS hours").
+			Where("user_id IN ? AND day_key <= ?", ids, SectDayKey(time.Now())).
+			Group("user_id").Scan(&bonuses).Error; err != nil {
+			return err
+		}
+		byUser := make(map[int64]float64, len(bonuses))
+		for _, bonus := range bonuses {
+			byUser[bonus.UserID] = bonus.Hours
+		}
+		for i := range results {
+			results[i].SectOwnerBonusHours = byUser[results[i].UserID]
+		}
+		return nil
+	})
+	listeningRefreshMu.RUnlock()
+	locked = false
 
 	if err != nil {
 		if _, sendErr := telegram.SendAutoDelete(bot, tgbotapi.NewMessage(chatID, "❌ 天机阁拉取榜单异常，请联系管理员查看后台日志！")); sendErr != nil {
@@ -1031,6 +1167,9 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 	}
 
 	reply := "📜 **【斗气风云榜·万界至尊】** 📜\n\n"
+	if freshnessNotice != "" {
+		reply += freshnessNotice + "\n\n"
+	}
 	medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"}
 
 	for i, r := range results {

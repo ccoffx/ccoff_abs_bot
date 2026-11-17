@@ -88,7 +88,7 @@ func refreshUserDailyListeningAndCultivation(userID int64) (model.DailyListening
 	now := time.Now()
 	if !refreshOK {
 		if stat, cacheOK := getTodayDailyListeningStat(userID, now); cacheOK {
-			totalEffective, totalOK := totalCultivationEffectiveHoursFromDailyStats(userID, now)
+			totalEffective, totalOK := cachedCultivationTotal(userID)
 			if !totalOK {
 				return model.DailyListeningStat{}, 0, false, storage.ErrDailyListeningStatsReadFailed
 			}
@@ -110,7 +110,7 @@ func syncCultivationFromDailyListeningStats(userID int64) (float64, bool) {
 }
 
 func syncCultivationFromDailyListeningStatsAt(userID int64, now time.Time) (float64, bool) {
-	if storage.DB == nil || GetOrCreateCultivation(userID) == nil {
+	if storage.DB == nil || userID == 0 {
 		return 0, false
 	}
 	total := 0.0
@@ -121,30 +121,49 @@ func syncCultivationFromDailyListeningStatsAt(userID int64, now time.Time) (floa
 		if err := spiritfire.Lock(tx); err != nil {
 			return err
 		}
+		// Account cleanup/rebinding and profile initialization must serialize.
+		// A late queued refresh must not recreate a deleted account's profile.
+		if err := lockCultivationAccountInTx(tx, userID); err != nil {
+			return err
+		}
+		if _, err := createCultivationIfMissingInTx(tx, userID); err != nil {
+			return err
+		}
 		if err := lockCultivationListeningTx(tx, userID); err != nil {
 			return err
 		}
 		if err := tx.Where("user_id = ?", userID).First(&cul).Error; err != nil {
 			return err
 		}
+		// Adopt pill/manual changes before considering listening upgrades, within
+		// this same transaction rather than through a read-side realm write.
+		calculateCultivationRealm(&cul)
 		var base float64
 		var err error
-		total, base, err = dailyCultivationTotalsInTx(tx, userID, now)
+		var version string
+		total, base, version, err = settleListeningDaysInTx(tx, &cul, now)
 		if err != nil {
 			return err
 		}
 		settled := cul.SectListeningSettledHours
-		if base > settled {
-			delta := int(math.Floor(base)) - int(math.Floor(settled))
+		nextSettled := cultivationContributionHighWater(base)
+		if nextSettled > settled {
+			delta := int(math.Floor(nextSettled)) - int(math.Floor(settled))
 			if delta > 0 {
 				if err := AwardSectContributionInTx(tx, userID, delta, fmt.Sprintf("听书增长奖励 %d 贡献（不含异火修为）", delta), "listening_hours", SectDayKey(now)); err != nil {
 					return err
 				}
 			}
-			settled = base
+			settled = nextSettled
+		}
+		cul.TotalAudioTime = total
+		if err := recordListeningUpgradeInTx(tx, &cul, now); err != nil {
+			return err
 		}
 		res := tx.Model(&model.Cultivation{}).Where("id = ?", cul.ID).Updates(map[string]interface{}{
 			"total_audio_time": total, "sect_listening_settled_hours": settled,
+			"listening_initialized": true, "listening_base_hours": base, "listening_retreat_version": version,
+			"major_realm": cul.MajorRealm, "minor_realm": cul.MinorRealm, "listening_reward_realm": cul.ListeningRewardRealm,
 		})
 		if res.Error != nil {
 			return res.Error
@@ -160,7 +179,6 @@ func syncCultivationFromDailyListeningStatsAt(userID int64, now time.Time) (floa
 		log.Printf("修为与宗门听书贡献结算失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return 0, false
 	}
-	SyncCultivationRealm(&cul)
 	return total, true
 }
 
@@ -191,19 +209,26 @@ func dailyCultivationTotalsInTx(tx *gorm.DB, userID int64, now time.Time) (total
 			return
 		}
 	}
+	validStats := stats[:0]
+	bases := make(map[string]float64, len(stats))
+	today := SectDayKey(now)
 	for _, stat := range stats {
-		if !validDailyListeningDayKey(stat.DayKey) || stat.DayKey > SectDayKey(now) {
+		if !validDailyListeningDayKey(stat.DayKey) || stat.DayKey > today {
 			continue
 		}
 		base := stat.EffectiveHours + dailySectCaveRetreatBonusHours(stat, retreats)
-		if err = spiritfire.RefreshDaily(tx, &stat, base, now); err != nil {
-			return
-		}
-		if err = sectbonus.RefreshDaily(tx, &stat); err != nil {
-			return
-		}
-		baseTotal += base
-		total += base + stat.SpiritFireHours + stat.SectOwnerBonusHours
+		bases[stat.DayKey] = base
+		validStats = append(validStats, stat)
+	}
+	if err = spiritfire.RefreshDailyBatch(tx, validStats, bases, now); err != nil {
+		return
+	}
+	if err = sectbonus.RefreshDailyBatch(tx, validStats); err != nil {
+		return
+	}
+	for _, stat := range validStats {
+		baseTotal += stat.BaseCultivationHours
+		total += stat.BaseCultivationHours + stat.SpiritFireHours + stat.SectOwnerBonusHours
 	}
 	return
 }
@@ -328,15 +353,38 @@ func handleQueryDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, 
 		return
 	}
 
-	dayKey := SectDayKey(time.Now())
+	todayKey := SectDayKey(time.Now())
+	dayKey := todayKey
 	if len(fields) >= 3 {
 		dayKey = strings.TrimSpace(fields[2])
 	}
 
+	var freshness ListeningFreshness
+	if dayKey == todayKey {
+		freshness = EnsureListeningFresh(targetID)
+	}
 	var stat model.DailyListeningStat
-	if err := storage.DB.Where("user_id = ? AND day_key = ?", targetID, dayKey).First(&stat).Error; err != nil {
+	var totalEffective float64
+	statFound := false
+	err = storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ? AND day_key = ?", targetID, dayKey).First(&stat).Error; err != nil {
+			return err
+		}
+		statFound = true
+		var cul model.Cultivation
+		if err := tx.Where("user_id = ?", targetID).First(&cul).Error; err != nil {
+			return err
+		}
+		totalEffective = cul.TotalAudioTime
+		return nil
+	})
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			telegram.ReplyText(bot, msg.Chat.ID, "📭 未找到该用户该日期的每日净修为记录。")
+			if statFound {
+				telegram.ReplyText(bot, msg.Chat.ID, "❌ 每日净修为累计读取失败，请稍后重试。")
+			} else {
+				telegram.ReplyText(bot, msg.Chat.ID, "📭 未找到该用户该日期的每日净修为记录。")
+			}
 		} else {
 			log.Printf("⚠️ 查询每日净修为记录失败: user=%d day=%s err=%s", targetID, textfmt.FormatPlainValue(dayKey), textfmt.FormatPlainError(err))
 			telegram.ReplyText(bot, msg.Chat.ID, "❌ 每日净修为记录读取失败，请稍后再试。")
@@ -344,19 +392,14 @@ func handleQueryDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, 
 		return
 	}
 
-	now := time.Now()
-	totalEffective, totalOK := totalCultivationEffectiveHoursFromDailyStats(targetID, now)
-	if !totalOK {
-		telegram.ReplyText(bot, msg.Chat.ID, "❌ 每日净修为累计读取失败，请稍后再试。")
-		return
+	reply := formatDailyListeningStat(fmt.Sprintf("📊 用户 `%d` 每日净修为", targetID), stat, totalEffective)
+	if freshness.Notice != "" {
+		reply += "\n\n" + freshness.Notice
 	}
-	telegram.ReplyText(bot, msg.Chat.ID, formatDailyListeningStat(fmt.Sprintf("📊 用户 `%d` 每日净修为", targetID), stat, totalEffective))
+	telegram.ReplyText(bot, msg.Chat.ID, reply)
 }
 
 func formatDailyListeningStat(title string, stat model.DailyListeningStat, totalEffective float64) string {
-	if err := RefreshSpiritFireDailyStat(&stat, time.Now()); err != nil {
-		return "❌ 每日修为及异火加成读取失败，请稍后重试。"
-	}
 	fetchStatus := stat.FetchStatus
 	if fetchStatus == "" {
 		fetchStatus = "unknown"
@@ -376,14 +419,22 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 	if retreatBonus > 0 {
 		retreatLine += fmt.Sprintf("\n洞府闭关加成：`+%.2f` 小时", retreatBonus)
 	}
+	dailyText := fmt.Sprintf("`%.2f` 小时", stat.BaseCultivationHours+stat.SpiritFireHours+stat.SectOwnerBonusHours)
+	if !DailyListeningCultivationSettled(stat) {
+		dailyText = "待结算"
+		retreatLine = "\n⏳ 听书数据已同步，净修为待结算；总净修为为上次结算值。"
+		if stat.ValidationJSON != "" {
+			retreatLine += fmt.Sprintf("\nABS 原始归属统计：`%.2f` 小时", stat.OfficialRawSeconds/3600) + dailyListeningValidationNotice(stat)
+		}
+	}
 
 	return fmt.Sprintf(
-		"%s\n\n日期：`%s`\n分日听书统计：`%.2f` 小时\n有效计入听书：`%.2f` 小时\n今日净修为：`%.2f` 小时%s\n总净修为：`%.2f` 小时\n更新时间：`%s`\n来源：`%s`\n刷新状态：`%s`\n刷新原因：`%s`",
+		"%s\n\n日期：`%s`\n分日听书统计：`%.2f` 小时\n有效计入听书：`%.2f` 小时\n今日净修为：%s%s\n总净修为：`%.2f` 小时\n更新时间：`%s`\n来源：`%s`\n刷新状态：`%s`\n刷新原因：`%s`",
 		title,
 		stat.DayKey,
 		stat.RawSeconds/3600.0,
 		stat.CappedSeconds/3600.0,
-		stat.EffectiveHours+retreatBonus+stat.SpiritFireHours+stat.SectOwnerBonusHours,
+		dailyText,
 		retreatLine,
 		totalEffective,
 		stat.LastFetchedAt.Format("2006-01-02 15:04:05"),

@@ -113,8 +113,27 @@ type DailyListeningStat struct {
 	Source               string
 	FetchStatus          string
 	RefreshReason        string
+
+	// Last applied amounts are independent of the mutable display caches.
+	AppliedEligible       bool    `gorm:"not null;default:false"`
+	CultivationApplied    bool    `gorm:"not null;default:false"`
+	AppliedEffectiveHours float64 `gorm:"not null;default:0"`
+	AppliedCappedSeconds  float64 `gorm:"not null;default:0"`
+	AppliedBaseHours      float64 `gorm:"not null;default:0"`
+	AppliedTotalHours     float64 `gorm:"not null;default:0"`
 }
 
 func (DailyListeningStat) TableName() string {
 	return "daily_listening_stats"
+}
+
+// ABS metadata is synchronized separately from report rendering.
+type ListeningReportSnapshot struct {
+	UserID            int64 `gorm:"primaryKey"`
+	AbsUserID         string
+	RawTotalSeconds   float64
+	StatsFetchedAt    time.Time
+	FinishedBooks     int
+	ListeningBooks    int
+	ProgressFetchedAt time.Time
 }

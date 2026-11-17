@@ -38,6 +38,7 @@ var dailyFusionPoolLocation = storage.DailyOperationsLocation
 
 func startBackgroundJobs(bot *tgbotapi.BotAPI) {
 	game.StartBreakthroughGuardScheduler(bot)
+	startListeningBackgroundJobs(bot)
 	go func() {
 		for {
 			runBackgroundSchedulerTickSafely(bot)
@@ -46,6 +47,44 @@ func startBackgroundJobs(bot *tgbotapi.BotAPI) {
 	}()
 
 	log.Println("✅ 后台任务调度器已启动：播放异常风控每日北京时间 00:10 后执行；备份与生命周期任务每日 03:00 后执行。")
+}
+
+// Listening must not wait for backups, account lifecycle scans or abuse scans.
+func startListeningBackgroundJobs(bot *tgbotapi.BotAPI) {
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("听书增量调度异常: %v", r)
+					}
+				}()
+				if err := game.RefreshDueListeningUsers(time.Now()); err != nil {
+					log.Printf("听书增量调度失败: %s", textfmt.FormatPlainError(err))
+				}
+			}()
+			<-ticker.C
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("听书完整批次调度异常: %v", r)
+					}
+				}()
+				game.DeliverListeningUpgrades(bot)
+				runDailyListeningRefreshIfNeeded(bot, time.Now())
+				game.DeliverListeningUpgrades(bot)
+			}()
+			<-ticker.C
+		}
+	}()
 }
 
 func runBackgroundSchedulerTickSafely(bot *tgbotapi.BotAPI) {
@@ -76,12 +115,13 @@ func runBackgroundSchedulerTickSafely(bot *tgbotapi.BotAPI) {
 	// 风控自带北京时间 00:10 门槛与重试节流，不依赖 03:00 运营窗口。
 	game.RunListeningAbuseMonitorIfNeeded(bot, now)
 
+	if isDailyOperationsWindowOpen(now) {
+		runDailyLifecycleIfNeeded(bot, now)
+	}
 	if !isDailyOperationsWindowOpen(now) {
 		return
 	}
 
-	runDailyLifecycleIfNeeded(bot, now)
-	runDailyListeningRefreshIfNeeded(bot, now)
 	runSectWeeklyTaskAutoSettlementIfNeeded(bot, now)
 	runDailyFusionPoolCollectIfNeeded(bot, now)
 	runAutoBackupIfNeeded(bot, now)
@@ -247,7 +287,7 @@ func runDailyListeningRefreshIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 		recordDailyListeningRefreshStateReadFailure(bot, storage.DailyListeningRefreshLastAtKey, err)
 		return
 	}
-	if !lastAt.IsZero() && now.Sub(lastAt) < storage.DailyListeningRefreshInterval {
+	if listeningBatchRecentlyRan(lastAt, now) {
 		return
 	}
 
@@ -261,7 +301,7 @@ func runDailyListeningRefreshIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 		recordDailyListeningRefreshStateReadFailure(bot, storage.DailyListeningRefreshLastAtKey, err)
 		return
 	}
-	if !lastAt.IsZero() && now.Sub(lastAt) < storage.DailyListeningRefreshInterval {
+	if listeningBatchRecentlyRan(lastAt, now) {
 		return
 	}
 
@@ -295,6 +335,10 @@ func runDailyListeningRefreshIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
 		return
 	}
 	log.Printf("✅ 后台每日净修为刷新完成: success=%d total=%d skipped=%d", success, total, skipped)
+}
+
+func listeningBatchRecentlyRan(lastAt, now time.Time) bool {
+	return !lastAt.IsZero() && !now.Before(lastAt) && now.Sub(lastAt) < storage.DailyListeningRefreshInterval
 }
 
 func recordDailyListeningRefreshStateReadFailure(bot *tgbotapi.BotAPI, key string, err error) {
@@ -888,7 +932,8 @@ func formatBackgroundStatusReport() string {
 			"生命周期巡检：%s\n"+
 			"最近完成日期：`%s`\n"+
 			"生命周期错误：`%s`\n\n"+
-			"每日听书刷新：`%s`\n"+
+			"听书同步：按用户约每 3 分钟，查询超过 5 分钟尝试更新\n"+
+			"完整听书批次（全天，每 30 分钟）：`%s`\n"+
 			"刷新结果：成功 `%s` / 总数 `%s` / 跳过 `%s`\n"+
 			"刷新错误：`%s`\n\n"+
 			"自动备份：%s\n"+

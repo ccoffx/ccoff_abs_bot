@@ -22,7 +22,7 @@ func TestCultivationRankShowsOwnerPerkAndHistoricalBonus(t *testing.T) {
 	for id := int64(1); id <= 4; id++ {
 		for _, row := range []any{
 			&model.User{TelegramID: id, Username: fmt.Sprintf("rank%d", id), AbsUserID: fmt.Sprintf("abs%d", id)},
-			&model.Cultivation{UserID: id, MajorRealm: 2, MinorRealm: 1, TotalAudioTime: float64(100 - id), PillAudioTime: 10},
+			&model.Cultivation{UserID: id, ListeningInitialized: true, MajorRealm: 2, MinorRealm: 1, TotalAudioTime: float64(100 - id), PillAudioTime: 10},
 		} {
 			if err := db.Create(row).Error; err != nil {
 				t.Fatal(err)
@@ -50,16 +50,31 @@ func TestCultivationRankShowsOwnerPerkAndHistoricalBonus(t *testing.T) {
 		{UserID: 1, DayKey: "2099-01-01", SectOwnerBonusHours: 999},
 		{UserID: 2, DayKey: today, SectOwnerBonusHours: .125},
 	} {
+		row.CultivationApplied = true
+		row.AppliedEligible = row.DayKey <= today
+		if row.AppliedEligible {
+			row.AppliedTotalHours = row.SectOwnerBonusHours
+		}
 		if err := db.Create(&row).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
-	deleted := model.DailyListeningStat{UserID: 1, DayKey: "2020-01-02", SectOwnerBonusHours: 888}
+	deleted := model.DailyListeningStat{UserID: 1, DayKey: "2020-01-02", SectOwnerBonusHours: 888, CultivationApplied: true}
 	if err := db.Create(&deleted).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Delete(&deleted).Error; err != nil {
 		t.Fatal(err)
+	}
+	// Seed fresh settled daily rows: this test focuses on ranking formatting.
+	for id := int64(1); id <= 4; id++ {
+		var stat model.DailyListeningStat
+		if err := db.Where("user_id = ? AND day_key = ?", id, today).FirstOrCreate(&stat, model.DailyListeningStat{UserID: id, DayKey: today}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&stat).UpdateColumns(map[string]any{"abs_user_id": fmt.Sprint("abs", id), "last_fetched_at": time.Now(), "cultivation_applied": true, "applied_eligible": true, "applied_total_hours": stat.SectOwnerBonusHours}).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	texts := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

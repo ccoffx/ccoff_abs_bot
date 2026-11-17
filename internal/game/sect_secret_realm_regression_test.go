@@ -23,7 +23,7 @@ func secretRealmSettlementFixture(t *testing.T, users int) model.SectSecretRealm
 	old := config.AppConfig
 	config.AppConfig = &config.Config{}
 	t.Cleanup(func() { config.AppConfig = old })
-	if err := storage.DB.AutoMigrate(&model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.SectSecretRealmEvent{}, &model.SectSecretRealmParticipant{}, &model.Cultivation{}, &model.PointTransaction{}, &model.Inventory{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.SectSecretRealmEvent{}, &model.SectSecretRealmParticipant{}, &model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.PointTransaction{}, &model.Inventory{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Exec("CREATE UNIQUE INDEX idx_test_realm_inventory ON inventories(user_id, item_name) WHERE deleted_at IS NULL").Error; err != nil {

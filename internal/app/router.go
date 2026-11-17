@@ -293,13 +293,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if text == "斗气榜" || text == "斗气排行榜" {
 		telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
 
-		var u model.User
-		if err := storage.DB.Where("telegram_id = ?", userID).First(&u).Error; err == nil && u.AbsUserID != "" {
-			game.FetchReportAndCheckUpgrade(bot, userID, u.AbsUserID)
-		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("⚠️ 斗气榜刷新用户档案读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		}
-
 		game.HandleCultivationRank(bot, msg.Chat.ID)
 		return
 	}
@@ -452,11 +445,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			var u model.User
 			userErr := storage.DB.Where("telegram_id = ?", userID).First(&u).Error
 			if userErr == nil {
-				statusText := account.ResolveUserAccountStatusDisplay(u, time.Now(), account.AccountStatusDisplaySelf, true).Text
+				statusText := account.ResolveUserAccountStatusDisplay(u, time.Now(), account.AccountStatusDisplaySelf, false).Text
+				listeningFreshness := game.EnsureListeningFresh(userID)
 
-				if u.AbsUserID != "" {
-					game.FetchReportAndCheckUpgrade(bot, userID, u.AbsUserID)
-				}
 				cul := game.GetOrCreateCultivation(userID)
 				if cul == nil {
 					telegram.ReplyText(bot, chatID, "⚠️ 斗气档案暂时读取失败，请稍后重试。")
@@ -464,13 +455,15 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				}
 				realmStr := game.GetRealmName(cul)
 				todayEffectiveHours := 0.0
-				todayEffectiveHoursText := "`0.00`"
+				todayEffectiveHoursText := "`待同步`"
 				ownerBonusText := game.SectOwnerCultivationPerkText
 				if todayStat, ok, err := game.GetTodayDailyListeningStatChecked(userID, time.Now()); err != nil {
 					log.Printf("⚠️ 我的信息今日净修为读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 					todayEffectiveHoursText = "`读取失败`"
+				} else if ok && !game.DailyListeningCultivationSettled(todayStat) {
+					todayEffectiveHoursText = "`待结算`"
 				} else if ok {
-					todayEffectiveHours = todayStat.EffectiveHours + game.ActiveSectCaveRetreatBonusHours(userID, time.Now()) + todayStat.SpiritFireHours + todayStat.SectOwnerBonusHours
+					todayEffectiveHours = todayStat.BaseCultivationHours + todayStat.SpiritFireHours + todayStat.SectOwnerBonusHours
 					todayEffectiveHoursText = fmt.Sprintf("`%.2f`", todayEffectiveHours)
 					ownerBonusText += game.SectOwnerDailyBonusLine(todayStat)
 				}
@@ -508,7 +501,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					"🏷️ **当前名称**: `%s`\n"+
 					"🆔 **TG 绑定ID**: `%d`\n"+
 					"🌍 **当前积分**: `%d`\n"+
-					"⏳ **账号状态**: %s\n"+
+					"⏳ **账号状态（本地）**: %s\n"+
 					"──────────────\n"+
 					"📿 **斗气境界**: %s\n"+
 					"⏱ **总计修为**: `%.1f` 小时\n"+
@@ -528,6 +521,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					game.ManualPillUsageCountText(countQingLingYangQi, 2, errQingLingYangQi == nil),
 					game.ManualPillUsageCountText(countWanZaiLingSui, 1, errWanZaiLingSui == nil))
 
+				if listeningFreshness.Notice != "" {
+					info += "\n\n" + listeningFreshness.Notice
+				}
 				telegram.ReplyText(bot, chatID, info)
 			} else if errors.Is(userErr, gorm.ErrRecordNotFound) {
 				telegram.ReplyText(bot, chatID, "⚠️ 您还没有任何资产记录。")

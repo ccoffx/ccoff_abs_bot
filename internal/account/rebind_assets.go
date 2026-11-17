@@ -36,6 +36,8 @@ var rebindAssetModels = []struct {
 	{&model.ExchangeCodeReceipt{}, []string{"UserID"}},
 	{&model.BookRequest{}, []string{"UserID", "AssigneeID"}},
 	{&model.Cultivation{}, []string{"UserID"}},
+	{&model.CultivationUpgradeEvent{}, []string{"UserID"}},
+	{&model.ListeningReportSnapshot{}, []string{"UserID"}},
 	{&model.BreakthroughAttempt{}, []string{"UserID"}},
 	{&model.BreakthroughRitual{}, []string{"UserID"}},
 	{&model.BreakthroughGuard{}, []string{"UserID"}},

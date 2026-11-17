@@ -34,16 +34,16 @@ const (
 )
 
 var (
-	ErrBreakthroughRitualPending     = errors.New("您已有待结算的互道突破，请等待本局结束")
-	ErrBreakthroughRitualClosed      = errors.New("本次互道已结束或尚未开放")
-	ErrBreakthroughRitualNotDue      = errors.New("互道招募尚未结束")
-	ErrBreakthroughGuardUnavailable  = errors.New("必成或保底突破不开放互道")
-	ErrBreakthroughGuardIneligible   = errors.New("互道需要有效且未暂停的正式听书账号")
-	ErrBreakthroughGuardSelf         = errors.New("不能为自己的突破互道")
-	ErrBreakthroughGuardFull         = errors.New("本次互道人数已满")
-	ErrBreakthroughGuardJoined       = errors.New("您已参加本次互道，请勿重复点击")
-	ErrBreakthroughGuardDailyLimit   = errors.New("您今天已参加三次互道，请明天再来")
-	ErrBreakthroughGuardRulesInvalid = errors.New("互道规则快照异常，本次突破取消")
+	ErrBreakthroughRitualPending     = errors.New("您已有待结算的护道突破，请等待本局结束")
+	ErrBreakthroughRitualClosed      = errors.New("本次护道已结束或尚未开放")
+	ErrBreakthroughRitualNotDue      = errors.New("护道招募尚未结束")
+	ErrBreakthroughGuardUnavailable  = errors.New("必成或保底突破不开放护道")
+	ErrBreakthroughGuardIneligible   = errors.New("护道需要有效且未暂停的正式听书账号")
+	ErrBreakthroughGuardSelf         = errors.New("不能为自己的突破护道")
+	ErrBreakthroughGuardFull         = errors.New("本次护道人数已满")
+	ErrBreakthroughGuardJoined       = errors.New("您已参加本次护道，请勿重复点击")
+	ErrBreakthroughGuardDailyLimit   = errors.New("您今天已参加三次护道，请明天再来")
+	ErrBreakthroughGuardRulesInvalid = errors.New("护道规则快照异常，本次突破取消")
 	breakthroughGuardSweepMu         sync.Mutex
 	breakthroughGuardPanelMu         sync.Mutex
 )
@@ -53,7 +53,7 @@ func decodeBreakthroughRitualRules(ritual model.BreakthroughRitual) (Breakthroug
 	if err := json.Unmarshal([]byte(ritual.RulesJSON), &rules); err != nil {
 		return rules, ErrBreakthroughGuardRulesInvalid
 	}
-	if rules.FromMajorRealm != ritual.FromMajor || rules.ToMajorRealm != rules.FromMajorRealm+1 || rules.FromMajorRealm < 1 || rules.MinHours <= 0 || rules.PointsCost <= 0 || rules.SuccessRate <= 0 || rules.SuccessRate > .95 || rules.Cooldown < time.Hour || rules.GuaranteeFailCount < 0 || rules.RefundRate < 0 || rules.RefundRate > 1 || rules.FailPenaltyPoints < 0 || strings.TrimSpace(rules.PillName) == "" {
+	if rules.FromMajorRealm != ritual.FromMajor || rules.ToMajorRealm != rules.FromMajorRealm+1 || rules.FromMajorRealm < 1 || rules.MinHours <= 0 || rules.PointsCost <= 0 || rules.SuccessRate <= 0 || rules.SuccessRate >= 1 || rules.Cooldown < time.Hour || rules.GuaranteeFailCount < 0 || rules.RefundRate < 0 || rules.RefundRate > 1 || rules.FailPenaltyPoints < 0 || strings.TrimSpace(rules.PillName) == "" {
 		return rules, ErrBreakthroughGuardRulesInvalid
 	}
 	return rules, nil
@@ -67,10 +67,13 @@ func BreakthroughGuardSuccessRate(base float64, count int) float64 {
 	if count > BreakthroughGuardMax {
 		count = BreakthroughGuardMax
 	}
-	return math.Min(.95, math.Round(base*100+float64(count))/100)
+	return math.Min(1, math.Round(base*100+float64(count))/100)
 }
 
 func CreateBreakthroughRitual(userID int64, name string, originChatID, groupID int64, mode string, now time.Time) (*model.BreakthroughRitual, error) {
+	if err := requireFreshListening(userID); err != nil {
+		return nil, err
+	}
 	var ritual model.BreakthroughRitual
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		var active int64
@@ -100,7 +103,7 @@ func CreateBreakthroughRitual(userID int64, name string, originChatID, groupID i
 		if !IsCultivationAtPeak(&cul) {
 			return storage.ErrBreakthroughNotReady
 		}
-		if cul.TotalAudioTime+cul.PillAudioTime < req.MinHours {
+		if !cultivationHoursMeetThreshold(cul.TotalAudioTime+cul.PillAudioTime, req.MinHours) {
 			return storage.ErrInsufficientCultivation
 		}
 		var user model.User
@@ -229,7 +232,7 @@ func JoinBreakthroughGuard(ritualID uint, chatID int64, messageID int, user *tgb
 		if err := tx.Create(&guard).Error; err != nil {
 			return err
 		}
-		if err := storage.ApplyPointDeltaInTx(tx, user.ID, -BreakthroughGuardCost, "breakthrough_guard_stake", "参与互道，投入5积分；成功到账10积分，失败不返还", "breakthrough_guard", fmt.Sprint(guard.ID)); err != nil {
+		if err := storage.ApplyPointDeltaInTx(tx, user.ID, -BreakthroughGuardCost, "breakthrough_guard_stake", "参与护道，投入5积分；成功到账10积分，失败不返还", "breakthrough_guard", fmt.Sprint(guard.ID)); err != nil {
 			return err
 		}
 		if joined+1 == BreakthroughGuardMax {
@@ -246,9 +249,9 @@ func settleBreakthroughGuardPaymentsInTx(tx *gorm.DB, ritualID uint, status stri
 	}
 	for _, guard := range guards {
 		if payout > 0 {
-			txType, detail := "breakthrough_guard_reward", "互道成功，到账10积分（含投入的5积分），净赚5积分"
+			txType, detail := "breakthrough_guard_reward", "护道成功，到账10积分（含投入的5积分），净赚5积分"
 			if status == "cancelled" {
-				txType, detail = "breakthrough_guard_refund", "突破取消，退还互道投入5积分"
+				txType, detail = "breakthrough_guard_refund", "突破取消，退还护道投入5积分"
 			}
 			if err := storage.ApplyPointDeltaInTx(tx, guard.UserID, payout, txType, detail, "breakthrough_guard", fmt.Sprint(guard.ID)); err != nil {
 				// A deliberately deleted account cannot receive a refund or reward;
@@ -320,9 +323,9 @@ func isBreakthroughCancellationError(err error) bool {
 func formatBreakthroughRitualPanel(ritual model.BreakthroughRitual, guards []model.BreakthroughGuard) string {
 	var rules BreakthroughSetting
 	if err := json.Unmarshal([]byte(ritual.RulesJSON), &rules); err != nil {
-		return "互道规则读取失败，请稍后再试。"
+		return "护道规则读取失败，请稍后再试。"
 	}
-	text := fmt.Sprintf("⚡ 互道招募 #%d\n\n道友：%s\n基础成功率：%.0f%% → 当前成功率：%.0f%%\n互道人数：%d/%d（每人 +1 个百分点，最高95%%）\n截止：%s（北京时间）；满5人提前渡劫\n\n参与先扣5积分；成功到账10积分，净赚5分；失败不返还，净损失5分。每人每天最多3次。\n未能执行突破时，互道投入原额退还。", ritual.ID, ritual.UserName, BreakthroughGuardSuccessRate(rules.SuccessRate, 0)*100, BreakthroughGuardSuccessRate(rules.SuccessRate, len(guards))*100, len(guards), BreakthroughGuardMax, ritual.Deadline.In(storage.DailyOperationsLocation).Format("15:04:05"))
+	text := fmt.Sprintf("⚡ 护道招募 #%d\n\n道友：%s\n基础成功率：%.0f%% → 当前成功率：%.0f%%\n护道人数：%d/%d（每人 +1 个百分点）\n截止：%s（北京时间）；满5人提前渡劫\n\n参与先扣5积分；成功到账10积分，净赚5分；失败不返还，净损失5分。每人每天最多3次。\n未能执行突破时，护道投入原额退还。", ritual.ID, ritual.UserName, BreakthroughGuardSuccessRate(rules.SuccessRate, 0)*100, BreakthroughGuardSuccessRate(rules.SuccessRate, len(guards))*100, len(guards), BreakthroughGuardMax, ritual.Deadline.In(storage.DailyOperationsLocation).Format("15:04:05"))
 	for _, guard := range guards {
 		text += "\n🤝 " + guard.UserName
 	}
@@ -331,7 +334,7 @@ func formatBreakthroughRitualPanel(ritual model.BreakthroughRitual, guards []mod
 
 func breakthroughRitualMarkup(id uint) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🤝 互道（投入5积分）", fmt.Sprintf("btguard:%d:join", id))),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🤝 护道（投入5积分）", fmt.Sprintf("btguard:%d:join", id))),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("立即渡劫（仅发起人）", fmt.Sprintf("btguard:%d:start", id)), tgbotapi.NewInlineKeyboardButtonData("取消突破", fmt.Sprintf("btguard:%d:cancel", id))),
 	)
 }
@@ -351,7 +354,7 @@ func BeginBreakthroughWithGuards(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mo
 		return
 	}
 	if err != nil {
-		if errors.Is(err, ErrBreakthroughRitualPending) || errors.Is(err, ErrBreakthroughGuardIneligible) {
+		if errors.Is(err, ErrBreakthroughRitualPending) || errors.Is(err, ErrBreakthroughGuardIneligible) || errors.Is(err, ErrListeningNotFresh) {
 			telegram.ReplyTextToMessage(bot, msg, err.Error())
 		} else {
 			telegram.ReplyTextToMessage(bot, msg, "❌ 无法发起突破，请检查修为、冷却和资源后重试。")
@@ -366,12 +369,12 @@ func BeginBreakthroughWithGuards(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mo
 	}
 	if err != nil {
 		if cancelErr := CancelBreakthroughRitual(ritual.ID, ritual.UserID); cancelErr != nil {
-			log.Printf("互道招募发布后取消失败: ritual=%d err=%s", ritual.ID, textfmt.FormatPlainError(cancelErr))
+			log.Printf("护道招募发布后取消失败: ritual=%d err=%s", ritual.ID, textfmt.FormatPlainError(cancelErr))
 		}
-		telegram.ReplyTextToMessage(bot, msg, "❌ 互道招募未能完成，突破未执行、资源未扣除，请稍后重试。")
+		telegram.ReplyTextToMessage(bot, msg, "❌ 护道招募未能完成，突破未执行、资源未扣除，请稍后重试。")
 		return
 	}
-	telegram.ReplyTextToMessage(bot, msg, "⚡ 已在交流群发起60秒互道招募，结束后自动渡劫；无人互道也会按基础成功率执行。可在群面板立即渡劫或取消。")
+	telegram.ReplyTextToMessage(bot, msg, "⚡ 已在交流群发起60秒护道招募，结束后自动渡劫；无人护道也会按基础成功率执行。可在群面板立即渡劫或取消。")
 }
 
 func refreshBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *BreakthroughOutcome) {
@@ -400,18 +403,18 @@ func refreshBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *Break
 	if ritual.Status == BreakthroughRitualWaiting {
 		markup = breakthroughRitualMarkup(id)
 	} else if ritual.Status == BreakthroughRitualCancelled {
-		text = fmt.Sprintf("互道突破 #%d 已取消，参与积分已退还。", id)
+		text = fmt.Sprintf("护道突破 #%d 已取消，参与积分已退还。", id)
 	} else if result != nil {
-		outcome := "失败；互道者各损失投入的5积分"
+		outcome := "失败；护道者各损失投入的5积分"
 		if result.IsSuccess {
-			outcome = "成功；互道者各到账10积分（净赚5积分）"
+			outcome = "成功；护道者各到账10积分（净赚5积分）"
 		}
-		text = fmt.Sprintf("⚡ 互道突破 #%d 已结算\n道友：%s\n结果：%s\n互道人数：%d\n最终成功率：%.0f%%，掷点：%d/100\n突破记录：#%d", id, ritual.UserName, outcome, result.GuardCount, result.SuccessRate*100, result.Roll, result.AttemptID)
+		text = fmt.Sprintf("⚡ 护道突破 #%d 已结算\n道友：%s\n结果：%s\n护道人数：%d\n最终成功率：%.0f%%，掷点：%d/100\n突破记录：#%d", id, ritual.UserName, outcome, result.GuardCount, result.SuccessRate*100, result.Roll, result.AttemptID)
 	}
 	edit := tgbotapi.NewEditMessageText(ritual.ChatID, ritual.MessageID, text)
 	edit.ReplyMarkup = &markup
 	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil {
-		log.Printf("互道面板刷新失败: ritual=%d err=%s", id, textfmt.FormatTelegramSendError(err))
+		log.Printf("护道面板刷新失败: ritual=%d err=%s", id, textfmt.FormatTelegramSendError(err))
 	}
 }
 
@@ -428,18 +431,18 @@ func HandleBreakthroughGuardCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Callback
 	}
 	parts := strings.Split(cb.Data, ":")
 	if len(parts) != 3 {
-		telegram.AnswerCallback(bot, cb.ID, "无效互道面板")
+		telegram.AnswerCallback(bot, cb.ID, "无效护道面板")
 		return true
 	}
 	parsed, err := strconv.ParseUint(parts[1], 10, 32)
 	if err != nil || parsed == 0 {
-		telegram.AnswerCallback(bot, cb.ID, "无效互道面板")
+		telegram.AnswerCallback(bot, cb.ID, "无效护道面板")
 		return true
 	}
 	id := uint(parsed)
 	var ritual model.BreakthroughRitual
 	if err := storage.DB.First(&ritual, id).Error; err != nil {
-		telegram.AnswerCallback(bot, cb.ID, "互道状态暂时读取失败，请稍后重试")
+		telegram.AnswerCallback(bot, cb.ID, "护道状态暂时读取失败，请稍后重试")
 		return true
 	}
 	if ritual.ChatID != cb.Message.Chat.ID || ritual.MessageID != cb.Message.MessageID {
@@ -469,14 +472,14 @@ func HandleBreakthroughGuardCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Callback
 			}
 		}
 		if errors.Is(err, storage.ErrPointsNotEnough) {
-			message = "积分不足，互道需投入5积分"
+			message = "积分不足，护道需投入5积分"
 		}
 		telegram.AnswerCallback(bot, cb.ID, message)
 		return true
 	}
 	message := "操作成功"
 	if parts[2] == "join" {
-		message = "互道成功加入，已扣5分；突破成功到账10分，失败不返还"
+		message = "护道成功加入，已扣5分；突破成功到账10分，失败不返还"
 	}
 	telegram.AnswerCallback(bot, cb.ID, message)
 	refreshBreakthroughRitualPanel(bot, id, nil)
@@ -490,13 +493,13 @@ func ProcessDueBreakthroughRituals(bot *tgbotapi.BotAPI, now time.Time) {
 	defer breakthroughGuardSweepMu.Unlock()
 	var rituals []model.BreakthroughRitual
 	if err := storage.DB.Where("(status = ? AND deadline <= ?) OR (status = ? AND created_at <= ?)", BreakthroughRitualWaiting, now, BreakthroughRitualPublishing, now.Add(-5*time.Minute)).Order("id").Limit(30).Find(&rituals).Error; err != nil {
-		log.Printf("互道到期巡检失败: %s", textfmt.FormatPlainError(err))
+		log.Printf("护道到期巡检失败: %s", textfmt.FormatPlainError(err))
 		return
 	}
 	for _, ritual := range rituals {
 		if ritual.Status == BreakthroughRitualPublishing {
 			if err := CancelBreakthroughRitual(ritual.ID, ritual.UserID); err != nil {
-				log.Printf("互道未发布活动回收失败: ritual=%d err=%s", ritual.ID, textfmt.FormatPlainError(err))
+				log.Printf("护道未发布活动回收失败: ritual=%d err=%s", ritual.ID, textfmt.FormatPlainError(err))
 			}
 			continue
 		}
@@ -513,7 +516,7 @@ func StartBreakthroughGuardScheduler(bot *tgbotapi.BotAPI) {
 			func() {
 				defer func() {
 					if recovered := recover(); recovered != nil {
-						log.Printf("互道巡检异常: %v", recovered)
+						log.Printf("护道巡检异常: %v", recovered)
 					}
 				}()
 				ProcessDueBreakthroughRituals(bot, now)

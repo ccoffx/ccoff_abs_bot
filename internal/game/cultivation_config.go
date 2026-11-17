@@ -798,7 +798,7 @@ func FormatBreakthroughConfigs() string {
 		builder.WriteString(fmt.Sprintf("成功返还比例：%.0f%%\n", cfg.RefundRate*100))
 		builder.WriteString(fmt.Sprintf("失败调养费：%d\n", cfg.FailPenaltyPoints))
 
-		builder.WriteString("互道：60秒招募，每人+1个百分点，最多5人，成功率最高95%；参与5分，成功到账10分，失败不返还；必成/保底不开放\n")
+		builder.WriteString("护道：60秒招募，每人+1个百分点，最多5人；参与5分，成功到账10分，失败不返还；必成/保底不开放\n")
 	}
 
 	return builder.String()

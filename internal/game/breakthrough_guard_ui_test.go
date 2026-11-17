@@ -75,7 +75,7 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 			if ritual.Status != BreakthroughRitualWaiting || ritual.ChatID != -100 || ritual.MessageID != 123 {
 				t.Fatalf("recruitment not activated: %+v", ritual)
 			}
-			cb := &tgbotapi.CallbackQuery{ID: "guard", From: &tgbotapi.User{ID: 2, FirstName: "互道者"}, Message: &tgbotapi.Message{MessageID: 123, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}}, Data: fmt.Sprintf("btguard:%d:join", ritual.ID)}
+			cb := &tgbotapi.CallbackQuery{ID: "guard", From: &tgbotapi.User{ID: 2, FirstName: "护道者"}, Message: &tgbotapi.Message{MessageID: 123, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}}, Data: fmt.Sprintf("btguard:%d:join", ritual.ID)}
 			if !HandleBreakthroughGuardCallback(bot, cb) || guardTestBalance(t, 2) != 95 {
 				t.Fatal("callback did not charge exactly five points")
 			}

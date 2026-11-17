@@ -214,6 +214,9 @@ func TestDailyListeningValidationReportAndAtomicFailure(t *testing.T) {
 			fmt.Fprint(w, `{"mediaProgress":[]}`)
 		}
 	})
+	if _, _, _, err := refreshUserDailyListeningAndCultivation(1); err != nil {
+		t.Fatal(err)
+	}
 	report := GetPersonalReport(abs.DefaultClient, "abs1")
 	stat := recoveryListeningDay(t, day)
 	for _, want := range []string{"今日实际听书: 24.00 小时", fmt.Sprintf("今日有效计入听书: %.2f 小时", span.Hours()), "已去除重叠听书"} {

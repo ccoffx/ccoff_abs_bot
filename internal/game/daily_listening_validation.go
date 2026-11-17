@@ -134,21 +134,31 @@ func validateDailyListeningCredit(official, adjusted map[string]float64, session
 	// Collect all session boundary dates before allocating any playback. A date
 	// introduced by a later session must also receive earlier overlapping playback
 	// on the first refresh, without depending on previously cached daily rows.
+	type dayWindow struct {
+		key        string
+		start, end time.Time
+	}
+	dates := make([]dayWindow, 0, len(result.Seconds))
+	for day := range result.Seconds {
+		start, err := time.ParseInLocation("2006-01-02", day, storage.DailyOperationsLocation)
+		if err == nil {
+			dates = append(dates, dayWindow{day, start, start.AddDate(0, 0, 1)})
+		}
+	}
+	sort.Slice(dates, func(i, j int) bool { return dates[i].start.Before(dates[j].start) })
 	segments := make(map[string][]dailyListeningSegment)
 	for _, window := range windows {
 		session, end, wall, listened := window.session, window.end, window.wall, window.listened
-		// Bound the work by the collected dates instead of traversing an
-		// arbitrarily long or malicious session timestamp range.
-		for day := range result.Seconds {
-			dayStart, err := time.ParseInLocation("2006-01-02", day, storage.DailyOperationsLocation)
-			if err != nil {
-				continue
-			}
+		// Visit only collected dates intersecting this session. Do not compare
+		// every session with every historical day or walk untrusted time ranges.
+		first := sort.Search(len(dates), func(i int) bool { return dates[i].end.After(session.StartedAt) })
+		for i := first; i < len(dates) && dates[i].start.Before(end); i++ {
+			day, dayStart := dates[i].key, dates[i].start
 			a, b := session.StartedAt, end
 			if a.Before(dayStart) {
 				a = dayStart
 			}
-			if next := dayStart.AddDate(0, 0, 1); b.After(next) {
+			if next := dates[i].end; b.After(next) {
 				b = next
 			}
 			if !b.After(a) {

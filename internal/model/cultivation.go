@@ -10,8 +10,12 @@ import (
 // 📿 昔风听书斗气系统专属数据表
 // ==========================================
 type Cultivation struct {
-	ID     uint  `gorm:"primaryKey"`
-	UserID int64 `gorm:"index"` // 绑定 TelegramID
+	ID                      uint    `gorm:"primaryKey"`
+	UserID                  int64   `gorm:"index"` // 绑定 TelegramID
+	ListeningInitialized    bool    `gorm:"not null;default:false"`
+	ListeningBaseHours      float64 `gorm:"not null;default:0"`
+	ListeningRetreatVersion string
+	ListeningRewardRealm    int `gorm:"not null;default:0"`
 	// Independent high-water mark for contribution-eligible hours (no spirit fire).
 	SectListeningSettledHours float64   `gorm:"not null;default:0"`
 	TotalAudioTime            float64   `gorm:"default:0"` // 🎧 累计听书修为（小时），包含闭关与异火，不含丹药
@@ -20,6 +24,26 @@ type Cultivation struct {
 	MinorRealm                int       `gorm:"default:1"` // 小境界：段/星 1-9，斗尊巅峰 1-10 转，半圣 1-4 阶，斗帝固定 1
 	TribulationFails          int       `gorm:"default:0"` // 渡劫失败次数计数器（暗藏天道保底）
 	ConsolidateUntil          time.Time // 境界巩固期（防止老玩家光速吃药连升的冷却时间）
+}
+
+// Durable notification and pool-payment intent, committed with listening settlement.
+type CultivationUpgradeEvent struct {
+	ID            uint  `gorm:"primaryKey"`
+	UserID        int64 `gorm:"index;not null"`
+	FromMajor     int
+	FromMinor     int
+	ToMajor       int
+	ToMinor       int
+	CreatedAt     time.Time
+	NextAttemptAt *time.Time `gorm:"index"`
+	Attempts      int
+	RewardSettled bool
+	PoolPoints    int
+	PoolCurrent   int
+	PoolBurst     bool
+	PrivateSent   bool
+	GroupSent     bool
+	Completed     bool `gorm:"index;not null;default:false"`
 }
 
 // BreakthroughAttempt 记录每一次突破尝试。

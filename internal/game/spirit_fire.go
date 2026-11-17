@@ -102,7 +102,11 @@ func HandleSpiritFireCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 			send(text)
 		}
 	case "我的异火", "焚诀":
+		freshness := EnsureListeningFresh(user)
 		text, err := spiritFirePanel(user, now)
+		if freshness.Notice != "" {
+			text += "\n" + freshness.Notice
+		}
 		if err != nil {
 			fail(err)
 		} else {
@@ -366,7 +370,9 @@ func spiritFirePanel(user int64, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if ok {
+	if ok && !DailyListeningCultivationSettled(stat) {
+		b.WriteString("\n今日净修为：待结算，可发送「刷新我的今日净修为」重试。\n")
+	} else if ok {
 		fmt.Fprintf(&b, "\n今日基础净修为：%.2f小时\n异火额外修为：%.2f小时\n最终净修为：%.2f小时\n", stat.BaseCultivationHours, stat.SpiritFireHours, stat.BaseCultivationHours+stat.SpiritFireHours+stat.SectOwnerBonusHours)
 		b.WriteString(SectOwnerDailyBonusLine(stat))
 	}

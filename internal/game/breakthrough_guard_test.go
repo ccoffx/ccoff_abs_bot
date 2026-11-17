@@ -43,7 +43,7 @@ func setupGuardTestDB(t *testing.T) {
 		cultivationRuleCache.mu.Unlock()
 		_ = connection.Close()
 	})
-	if err := db.AutoMigrate(&model.User{}, &model.Cultivation{}, &model.Inventory{}, &model.BreakthroughRitual{}, &model.BreakthroughGuard{}, &model.BreakthroughAttempt{}, &model.PointTransaction{}, &model.AuditLog{}, &model.ListeningAbuseRecord{}, &model.SectMember{}, &model.Sect{}, &model.SectContributionLog{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Cultivation{}, &model.DailyListeningStat{}, &model.Inventory{}, &model.BreakthroughRitual{}, &model.BreakthroughGuard{}, &model.BreakthroughAttempt{}, &model.PointTransaction{}, &model.AuditLog{}, &model.ListeningAbuseRecord{}, &model.SectMember{}, &model.Sect{}, &model.SectContributionLog{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec(`CREATE UNIQUE INDEX idx_guard_active_test ON breakthrough_rituals(user_id) WHERE status IN ('publishing','waiting')`).Error; err != nil {
@@ -53,9 +53,13 @@ func setupGuardTestDB(t *testing.T) {
 		if err := db.Create(&model.User{TelegramID: id, Username: fmt.Sprint("user", id), AbsUserID: fmt.Sprint("abs", id), Points: 100, Status: "active", AccountType: "formal"}).Error; err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Create(&model.Cultivation{UserID: id, MajorRealm: 2, MinorRealm: 9, TotalAudioTime: 150, ConsolidateUntil: time.Now().Add(-time.Hour)}).Error; err != nil {
+		if err := db.Create(&model.Cultivation{UserID: id, ListeningInitialized: true, MajorRealm: 2, MinorRealm: 9, TotalAudioTime: 150, ConsolidateUntil: time.Now().Add(-time.Hour)}).Error; err != nil {
 			t.Fatal(err)
 		}
+		if err := db.Create(&model.DailyListeningStat{UserID: id, AbsUserID: fmt.Sprint("abs", id), DayKey: SectDayKey(time.Now()), LastFetchedAt: time.Now(), CultivationApplied: true, AppliedEligible: true}).Error; err != nil {
+			t.Fatal(err)
+		}
+
 	}
 	if err := db.Model(&model.User{}).Where("telegram_id = ?", 1).Update("points", 5000).Error; err != nil {
 		t.Fatal(err)
@@ -98,7 +102,7 @@ func TestBreakthroughGuardRates(t *testing.T) {
 		base  float64
 		count int
 		want  float64
-	}{{.1, 0, .1}, {.1, 1, .11}, {.1, 5, .15}, {.1, 8, .15}, {.8, 5, .85}, {.94, 5, .95}, {1, 0, 1}} {
+	}{{.1, 0, .1}, {.1, 1, .11}, {.1, 5, .15}, {.1, 8, .15}, {.8, 5, .85}, {.94, 5, .99}, {.95, 5, 1}, {.98, 5, 1}, {.96, 1, .97}, {1, 0, 1}} {
 		if got := BreakthroughGuardSuccessRate(item.base, item.count); got != item.want {
 			t.Errorf("rate(%v,%d)=%v want %v", item.base, item.count, got, item.want)
 		}
@@ -416,5 +420,32 @@ func TestBreakthroughGuardAdmissionIsCertainAndTimeBound(t *testing.T) {
 	var snapshot BreakthroughSetting
 	if err := json.Unmarshal([]byte(ritual.RulesJSON), &snapshot); err != nil || snapshot.SuccessRate != .1 {
 		t.Fatalf("snapshot: %+v %v", snapshot, err)
+	}
+}
+
+func TestBreakthroughGuardsCanReachOneHundredPercent(t *testing.T) {
+	setupGuardTestDB(t)
+	cultivationRuleCache.mu.Lock()
+	rules := cultivationRuleCache.rules.Breakthroughs[5]
+	rules.SuccessRate = .95
+	cultivationRuleCache.rules.Breakthroughs[5] = rules
+	cultivationRuleCache.mu.Unlock()
+	ritual := guardTestRitual(t)
+	for id := int64(2); id <= 6; id++ {
+		if err := guardTestJoin(ritual.ID, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := resolveBreakthroughWithRoll(1, "USE_INVENTORY", ritual.ID, time.Now(), func() (int, error) { return 100, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsSuccess || result.SuccessRate != 1 || result.GuardCount != 5 {
+		t.Fatalf("guard rate was capped: %+v", result)
+	}
+	for id := int64(2); id <= 6; id++ {
+		if got := guardTestBalance(t, id); got != 105 {
+			t.Fatalf("guard %d balance=%d want=105", id, got)
+		}
 	}
 }

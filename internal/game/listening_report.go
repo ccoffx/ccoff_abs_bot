@@ -1,191 +1,127 @@
 package game
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"time"
-
-	"gorm.io/gorm"
 
 	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
-	"ccoff-abs-bot/internal/textfmt"
+	"gorm.io/gorm"
 )
 
-func GetPersonalReport(c *abs.AbsClient, absUserID string) string {
-	// Wait before fetching, so a batch cannot make this response stale while
-	// the report waits to persist it. Keep the lock through cultivation sync.
-	listeningRefreshMu.RLock()
-	defer listeningRefreshMu.RUnlock()
-	// ==========================================
-	// 1. 获取防作弊的真实听书时长与每日明细 (来自统计接口)
-	// ==========================================
-	statsEndpoint := abs.AbsUserListeningStatsPath(absUserID)
-	statsFetchedAt := time.Now()
-	statsBody, statsCode, statsErr := c.SendRequest("GET", statsEndpoint, nil)
-	if statsErr != nil {
-		log.Printf("⚠️ 听书报告 ABS 统计读取失败: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(statsErr))
+// Render fresh snapshots locally; synchronize only expired data before reading.
+// Keep the client argument for callers compiled against the existing API.
+func GetPersonalReport(_ *abs.AbsClient, absUserID string) string {
+	if storage.DB == nil {
 		return "❌ 听书统计暂时读取失败，请稍后再试。"
 	}
-	if statsCode != 200 {
-		log.Printf("⚠️ 听书报告 ABS 统计状态异常: abs=%s status=%d", textfmt.FormatPlainValue(absUserID), statsCode)
+	var user model.User
+	if err := storage.DB.Where("abs_user_id = ?", absUserID).First(&user).Error; err != nil {
 		return "❌ 听书统计暂时读取失败，请稍后再试。"
 	}
-
-	var rawTotalSeconds float64 = 0
-	var effectiveTotalHours float64 = 0 // 经过天道法则压制后的总修为时长
-	var todayEffectiveHours float64 = 0
-	var todayRawHours float64 = 0
-	spiritFireLine := ""
-	todayUnavailable := false
-	totalUnavailable := false
-	refreshNotice := ""
-	validationNotice := ""
-	var statsDays map[string]float64
-
-	// 精准映射 ABS 的统计数据结构
-	var stats struct {
-		TotalTime float64            `json:"totalTime"`
-		Days      map[string]float64 `json:"days"`
+	freshness := EnsureListeningFresh(user.TelegramID)
+	var snapshot model.ListeningReportSnapshot
+	if err := storage.DB.Where("user_id = ? AND abs_user_id = ?", user.TelegramID, absUserID).First(&snapshot).Error; (err == nil || errors.Is(err, gorm.ErrRecordNotFound)) && !listeningTimestampFresh(snapshot.ProgressFetchedAt, time.Now(), ListeningMaxAge) {
+		refreshListeningReportProgress(user.TelegramID, absUserID, time.Now())
 	}
-
-	if err := json.Unmarshal(statsBody, &stats); err != nil {
-		log.Printf("⚠️ 听书报告 ABS 统计解析失败: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
-		return "❌ 听书统计暂时读取失败，请稍后再试。"
+	report := personalReportFromCache(absUserID)
+	if freshness.Notice != "" {
+		report += "\n\n" + freshness.Notice
 	}
-
-	// 累计实际时长优先使用 ABS 官方 totalTime；未提供累计值时汇总官方 days。
-	rawTotalSeconds = abs.AuthoritativeABSListeningTotalSeconds(stats.TotalTime, stats.Days)
-
-	statsDays = stats.Days
-	effectiveTotalHours = calculateEffectiveCultivationHoursFromABSDays(stats.Days)
-	todaySeconds := abs.PositiveListeningSeconds(stats.Days[SectDayKey(time.Now())])
-	todayRawHours = todaySeconds / 3600.0
-	todayEffectiveHours = calculateSectEffectiveHoursFromSeconds(todaySeconds)
-
-	if rawTotalSeconds <= 0 {
-		return "💤 暂无您的有效收听记录，去听本书再来吧！"
-	}
-
-	// ==========================================
-	// 2. 获取书籍完成状态 (保持原逻辑不变)
-	// ==========================================
-	userEndpoint := abs.AbsUserPath(absUserID)
-	userBody, userCode, userErr := c.SendRequest("GET", userEndpoint, nil)
-
-	finishedCount := 0
-	listeningCount := 0
-	finishedCountText := "读取失败"
-	listeningCountText := "读取失败"
-
-	if userErr != nil {
-		log.Printf("⚠️ 听书报告 ABS 书籍进度读取失败: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(userErr))
-	} else if userCode != 200 {
-		log.Printf("⚠️ 听书报告 ABS 书籍进度状态异常: abs=%s status=%d", textfmt.FormatPlainValue(absUserID), userCode)
-	} else {
-		var userData struct {
-			MediaProgress []struct {
-				IsFinished bool `json:"isFinished"`
-			} `json:"mediaProgress"`
-		}
-		if err := json.Unmarshal(userBody, &userData); err != nil {
-			log.Printf("⚠️ 听书报告 ABS 书籍进度解析失败: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
-		} else {
-			for _, mp := range userData.MediaProgress {
-				if mp.IsFinished {
-					finishedCount++
-				} else {
-					listeningCount++
-				}
-			}
-			finishedCountText = strconv.Itoa(finishedCount)
-			listeningCountText = strconv.Itoa(listeningCount)
-		}
-	}
-
-	// 👇 --- 核心新增：注入经过折算的斗气系统 --- 👇
-	var u model.User
-	if err := storage.DB.Where("abs_user_id = ?", absUserID).First(&u).Error; err == nil {
-		var recordErr error
-		if statsDays == nil {
-			recordErr = fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
-		} else {
-			recordErr = recordDailyListeningStatsFromABSDaysUnlocked(u.TelegramID, absUserID, statsDays, statsFetchedAt)
-		}
-		now := time.Now()
-		if recordErr == nil {
-			if syncedEffectiveTotalHours, ok := syncCultivationFromDailyListeningStatsAt(u.TelegramID, now); ok {
-				effectiveTotalHours = syncedEffectiveTotalHours
-			} else if cul := GetOrCreateCultivation(u.TelegramID); cul != nil {
-				effectiveTotalHours = cul.TotalAudioTime
-			}
-			if todayStat, ok, readErr := GetTodayDailyListeningStatChecked(u.TelegramID, now); readErr != nil {
-				todayUnavailable = true
-				spiritFireLine = "\n🔥 今日基础与异火修为读取失败，请稍后重试。"
-			} else if ok {
-				todayRawHours = abs.PositiveListeningSeconds(todayStat.RawSeconds) / 3600.0
-				todayEffectiveHours = todayStat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + todayStat.SpiritFireHours + todayStat.SectOwnerBonusHours
-				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", todayStat.BaseCultivationHours, todayStat.SpiritFireHours) + SectOwnerDailyBonusLine(todayStat)
-				validationNotice = fmt.Sprintf("\n今日有效计入听书: %.2f 小时", todayStat.CappedSeconds/3600) + dailyListeningValidationNotice(todayStat)
-			}
-		} else {
-			log.Printf("⚠️ 听书报告刷新失败，读取上次成功统计: user=%d abs=%s err=%s",
-				u.TelegramID, textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(recordErr))
-			if stat, total, ok := cachedDailyListeningReport(u.TelegramID, absUserID, now); ok {
-				effectiveTotalHours = total
-				todayRawHours = abs.PositiveListeningSeconds(stat.RawSeconds) / 3600
-				todayEffectiveHours = stat.EffectiveHours + ActiveSectCaveRetreatBonusHours(u.TelegramID, now) + stat.SpiritFireHours + stat.SectOwnerBonusHours
-				spiritFireLine = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", stat.BaseCultivationHours, stat.SpiritFireHours) + SectOwnerDailyBonusLine(stat)
-				validationNotice = fmt.Sprintf("\n今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600) + dailyListeningValidationNotice(stat)
-				refreshNotice = fmt.Sprintf("\n⚠️ 本次刷新失败，今日时长及修为使用上次成功统计（%s）。", stat.LastFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
-			} else {
-				todayUnavailable, totalUnavailable = true, true
-				refreshNotice = "\n⚠️ 本次刷新失败，暂无可用的每日统计缓存，请稍后重试。"
-			}
-		}
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		log.Printf("⚠️ 听书报告本地用户读取失败，跳过净修为同步: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
-	}
-	// 👆 --------------------------------------- 👆
-
-	// ==========================================
-	// 3. 严格按照专属排版输出 (展示真假时长的差异)
-	// ==========================================
-	rawHours := rawTotalSeconds / 3600.0
-
-	// 如果由于天道压制导致折算时长明显小于真实时长，我们在文案上给予反馈
-	suppressNotice := ""
-	if refreshNotice == "" && rawHours-effectiveTotalHours > 1.0 {
-		suppressNotice = "\n*(⚠️ 天道法则感应：您的部分修炼涉嫌强行吸收灵气，转化率已受压制)*"
-	}
-
-	todayText := fmt.Sprintf("%.2f 小时", todayEffectiveHours)
-	todayRawText := fmt.Sprintf("%.2f 小时", todayRawHours)
-	totalText := fmt.Sprintf("%.2f 小时", effectiveTotalHours)
-	if todayUnavailable {
-		todayText, todayRawText = "读取失败", "读取失败"
-		validationNotice = ""
-	}
-	if totalUnavailable {
-		totalText = "读取失败"
-	}
-	return fmt.Sprintf("📊 你的专属听书战绩%s\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %s\n✨ 净修炼时长: %s\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
-		refreshNotice, rawHours, todayRawText, totalText, todayText, spiritFireLine+validationNotice+suppressNotice, finishedCountText, listeningCountText)
+	return report
 }
 
-func cachedDailyListeningReport(userID int64, absUserID string, now time.Time) (model.DailyListeningStat, float64, bool) {
-	stat, ok, err := GetTodayDailyListeningStatChecked(userID, now)
-	if err != nil || !ok || stat.AbsUserID != absUserID {
-		return model.DailyListeningStat{}, 0, false
+// Pin the rendering reads to one database version after any network work.
+func personalReportFromCache(absUserID string) string {
+	if storage.DB == nil {
+		return "❌ 听书统计暂时读取失败，请稍后再试。"
 	}
-	var bindings int64
-	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ? AND abs_user_id = ?", userID, absUserID).Count(&bindings).Error; err != nil || bindings != 1 {
-		return model.DailyListeningStat{}, 0, false
+	now := time.Now()
+	var user model.User
+	var snapshot model.ListeningReportSnapshot
+	var stat model.DailyListeningStat
+	var cul model.Cultivation
+	var raw float64
+	var ok, totalOK bool
+	// A short read transaction pins one SQLite snapshot without the batch lock.
+	// A concurrent settlement or rebind cannot mix different database versions.
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("abs_user_id = ?", absUserID).First(&user).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ? AND abs_user_id = ?", user.TelegramID, absUserID).First(&snapshot).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		err := tx.Where("user_id = ? AND abs_user_id = ? AND day_key = ?", user.TelegramID, absUserID, SectDayKey(now)).First(&stat).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		ok = err == nil
+		raw = snapshot.RawTotalSeconds
+		if snapshot.StatsFetchedAt.IsZero() {
+			if err := tx.Model(&model.DailyListeningStat{}).Where("user_id = ? AND abs_user_id = ?", user.TelegramID, absUserID).Select("COALESCE(SUM(raw_seconds),0)").Scan(&raw).Error; err != nil {
+				return err
+			}
+		}
+		err = tx.Where("user_id = ?", user.TelegramID).First(&cul).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		totalOK = err == nil
+		return nil
+	})
+	if err != nil {
+		return "❌ 听书统计暂时读取失败，请稍后再试。"
 	}
-	total, ok := totalCultivationEffectiveHoursFromDailyStats(userID, now)
-	return stat, total, ok
+	totalText := "读取失败"
+	if totalOK {
+		totalText = fmt.Sprintf("%.2f 小时", cul.TotalAudioTime)
+	}
+	todayRaw, todayTotal := "待同步", "待同步"
+	detail := ""
+	notice := "\n📭 暂无今日每日统计缓存，请发送「刷新我的今日净修为」同步。"
+	if ok {
+		todayRaw = fmt.Sprintf("%.2f 小时", abs.PositiveListeningSeconds(stat.RawSeconds)/3600)
+		if DailyListeningCultivationSettled(stat) {
+			todayTotal = fmt.Sprintf("%.2f 小时", stat.AppliedTotalHours)
+			detail = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", stat.BaseCultivationHours, stat.SpiritFireHours) + SectOwnerDailyBonusLine(stat) + fmt.Sprintf("\n今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600) + dailyListeningValidationNotice(stat)
+			notice = fmt.Sprintf("\n🗄 使用上次成功统计（%s）；发送「刷新我的今日净修为」可同步最新听书数据。", stat.LastFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
+		} else {
+			todayTotal = "待结算"
+			notice = "\n⏳ 听书数据已同步，净修为待结算；累计修为为上次结算值。可发送「刷新我的今日净修为」重试。"
+		}
+	}
+	finished, listening := "待同步", "待同步"
+	if !snapshot.ProgressFetchedAt.IsZero() {
+		finished = strconv.Itoa(snapshot.FinishedBooks)
+		listening = strconv.Itoa(snapshot.ListeningBooks)
+	}
+	progressNotice := ""
+	if !snapshot.ProgressFetchedAt.IsZero() {
+		progressNotice = "\n📚 书籍进度更新时间：" + snapshot.ProgressFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05")
+		if !listeningTimestampFresh(snapshot.ProgressFetchedAt, now, ListeningMaxAge) {
+			progressNotice += "（已超过5分钟，更新失败，展示旧数据）"
+		}
+	}
+	return fmt.Sprintf("📊 你的专属听书战绩%s\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %s\n✨ 净修炼时长: %s\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本%s", notice, raw/3600, todayRaw, totalText, todayTotal, detail, finished, listening, progressNotice)
+}
+
+// Source rows can commit before cultivation settlement. Readers must not
+// present their previous (or uninitialized) component cache as the new amount.
+func DailyListeningCultivationSettled(stat model.DailyListeningStat) bool {
+	return stat.CultivationApplied && stat.AppliedEligible && !stat.DeletedAt.Valid &&
+		stat.AppliedEffectiveHours == stat.EffectiveHours && stat.AppliedCappedSeconds == stat.CappedSeconds &&
+		stat.AppliedBaseHours == stat.BaseCultivationHours &&
+		stat.AppliedTotalHours == stat.BaseCultivationHours+stat.SpiritFireHours+stat.SectOwnerBonusHours
+}
+
+func cachedCultivationTotal(userID int64) (float64, bool) {
+	var cul model.Cultivation
+	if storage.DB == nil || storage.DB.Where("user_id = ?", userID).First(&cul).Error != nil {
+		return 0, false
+	}
+	return cul.TotalAudioTime, true
 }

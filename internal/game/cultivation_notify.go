@@ -3,6 +3,10 @@ package game
 import (
 	"fmt"
 	"log"
+	"sync"
+	"time"
+
+	"gorm.io/gorm"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -15,84 +19,107 @@ import (
 	"ccoff-abs-bot/internal/textfmt"
 )
 
-// ==========================================
-// 📿 小阶段自动突破检测与双端通知引擎
-// ==========================================
-func FetchReportAndCheckUpgrade(bot *tgbotapi.BotAPI, userID int64, absUserID string) string {
+// Kept for existing callers; reading a report no longer drives synchronization
+// or rewards. The background dispatcher consumes durable settlement events.
+func FetchReportAndCheckUpgrade(_ *tgbotapi.BotAPI, _ int64, absUserID string) string {
 	if absUserID == "" {
 		return ""
 	}
+	return GetPersonalReport(abs.DefaultClient, absUserID)
+}
 
-	oldCul := GetOrCreateCultivation(userID)
-	oldRealm := GetRealmName(oldCul)
+var listeningUpgradeDeliveryMu sync.Mutex
 
-	reportStr := GetPersonalReport(abs.DefaultClient, absUserID)
-
-	newCul := GetOrCreateCultivation(userID)
-	if oldCul == nil || newCul == nil {
-		log.Printf("⚠️ 境界变化检查斗气档案读取失败: user=%d old_nil=%t new_nil=%t", userID, oldCul == nil, newCul == nil)
-		return reportStr
+func DeliverListeningUpgrades(bot *tgbotapi.BotAPI) {
+	if bot == nil || storage.DB == nil || config.AppConfig == nil || !listeningUpgradeDeliveryMu.TryLock() {
+		return
 	}
-	newRealm := GetRealmName(newCul)
-
-	if oldRealm != newRealm {
-		var u model.User
-		if err := storage.DB.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
-			log.Printf("⚠️ 境界变化公告读取本地档案失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
+	defer listeningUpgradeDeliveryMu.Unlock()
+	var events []model.CultivationUpgradeEvent
+	if err := storage.DB.Where("completed = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", false, time.Now()).Order("id").Limit(20).Find(&events).Error; err != nil {
+		log.Printf("读取听书升级通知失败: %s", textfmt.FormatPlainError(err))
+		return
+	}
+	for _, event := range events {
+		// Reserve a retry time before delivery; a crash leaves the event pending.
+		retryAt := time.Now().Add(time.Minute * time.Duration(min(360, 1<<min(event.Attempts, 9))))
+		if err := storage.DB.Model(&event).UpdateColumns(map[string]any{"next_attempt_at": retryAt, "attempts": gorm.Expr("attempts + 1")}).Error; err != nil {
+			continue
 		}
-
-		displayName := textfmt.EscapeMarkdown(u.Username)
-		if displayName == "" {
-			displayName = "神秘道友"
+		if err := settleListeningUpgradeReward(&event); err != nil {
+			log.Printf("听书升级奖池结算失败: event=%d err=%s", event.ID, textfmt.FormatPlainError(err))
+			continue
 		}
-
-		if chat, err := bot.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: userID}}); err == nil {
-			if chat.UserName != "" {
-				displayName = textfmt.TelegramUsernameMentionMarkdown(chat.UserName)
-			}
+		var user model.User
+		if err := storage.DB.Where("telegram_id = ?", event.UserID).First(&user).Error; err != nil {
+			continue
 		}
-
-		announce := fmt.Sprintf("🎉 **【斗气精进·修为突破】** 🎉\n\n恭喜道友 %s 闭关苦修，厚积薄发！\n\n✨ 成功从 **【%s】** 突破至全新的 **【%s】** 境界！\n\n*(大道漫漫，望道友继续潜心听书，早日登临绝顶！)*", displayName, oldRealm, newRealm)
-
-		if _, err := telegram.SendAutoDelete(bot, tgbotapi.NewMessage(userID, announce)); err != nil {
-			log.Printf("发送修为突破私聊通知失败: user=%d err=%s", userID, textfmt.FormatTelegramSendError(err))
+		name := textfmt.EscapeMarkdown(user.Username)
+		if name == "" {
+			name = "神秘道友"
 		}
-
-		if config.AppConfig.NoticeGroupID != 0 {
-			// 如果是大境界跨越，只发突破通报（奖池逻辑已在雷劫里处理）
-			if oldCul.MajorRealm != newCul.MajorRealm {
-				telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, announce)
+		oldRealm := GetRealmName(&model.Cultivation{MajorRealm: event.FromMajor, MinorRealm: event.FromMinor})
+		newRealm := GetRealmName(&model.Cultivation{MajorRealm: event.ToMajor, MinorRealm: event.ToMinor})
+		announce := fmt.Sprintf("🎉 **【斗气精进·修为突破】** 🎉\n\n恭喜道友 %s 闭关苦修，厚积薄发！\n\n✨ 成功从 **%s** 突破至全新的 **%s** 境界！", name, oldRealm, newRealm)
+		if !event.PrivateSent {
+			if _, err := telegram.SendAutoDelete(bot, tgbotapi.NewMessage(event.UserID, announce)); err != nil {
+				log.Printf("听书升级私聊通知失败: event=%d err=%s", event.ID, textfmt.FormatTelegramSendError(err))
 			} else {
-				// 小境界细分后降低单次注入量，使逐级晋升的总奖励接近原四阶段规则。
-				smallPts, err := security.RandomIntRange(2, 4)
-				if err != nil {
-					log.Printf("⚠️ 修为突破奖池随机奖励生成失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-					telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, announce)
-					return reportStr
+				if err := storage.DB.Model(&event).UpdateColumn("private_sent", true).Error; err != nil {
+					continue
 				}
-
-				currentPool, isBurst, err := storage.AddPointsToFusionPool(smallPts)
-				if err != nil {
-					log.Printf("⚠️ 修为突破奖池奖励写入失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-					telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, announce)
-					return reportStr
-				}
-
-				progressText := ""
-				if !isBurst {
-					progressText = fmt.Sprintf("\n\n*(💧 此番精进引动天地共鸣，为天道奖池注入了 `%d` 积分，当前进度 `%d/300`)*", smallPts, currentPool)
-					telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, announce+progressText)
-				} else {
-					progressText = fmt.Sprintf("\n\n*(💧 此番精进成为了压轴造化，为天道奖池注入了最后 `%d` 积分！)*", smallPts)
-					telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, announce+progressText)
-
-					telegram.NotifyFusionPoolBurst(bot, config.AppConfig.NoticeGroupID, "众道友接连突破引动天地异象")
-				}
+				event.PrivateSent = true
 			}
 		}
+		if !event.GroupSent {
+			groupID := config.AppConfig.NoticeGroupID
+			if groupID != 0 {
+				text := announce
+				if event.PoolPoints > 0 {
+					text += fmt.Sprintf("\n\n💧 为天道奖池注入 `%d` 积分，当前进度 `%d/300`。", event.PoolPoints, event.PoolCurrent)
+				}
+				if _, err := telegram.SendAutoDelete(bot, tgbotapi.NewMessage(groupID, text)); err != nil {
+					log.Printf("听书升级群通知失败: event=%d err=%s", event.ID, textfmt.FormatTelegramSendError(err))
+					continue
+				}
+				if event.PoolBurst {
+					telegram.NotifyFusionPoolBurst(bot, groupID, "众道友接连突破引动天地异象")
+				}
+			}
+			if err := storage.DB.Model(&event).UpdateColumn("group_sent", true).Error; err != nil {
+				continue
+			}
+			event.GroupSent = true
+		}
+		if event.PrivateSent && event.GroupSent {
+			storage.DB.Model(&event).UpdateColumn("completed", true)
+		}
 	}
+}
 
-	return reportStr
+// Payment and its idempotency flag share the pool's locked transaction. Retrying
+// Telegram delivery cannot pay again, even after process restart.
+func settleListeningUpgradeReward(event *model.CultivationUpgradeEvent) error {
+	return storage.RunFusionPoolLockedTransaction(func(tx *gorm.DB) error {
+		if err := tx.First(event, event.ID).Error; err != nil {
+			return err
+		}
+		if event.RewardSettled {
+			return nil
+		}
+		if config.AppConfig != nil && config.AppConfig.NoticeGroupID != 0 && event.FromMajor == event.ToMajor {
+			points, err := security.RandomIntRange(2, 4)
+			if err != nil {
+				return err
+			}
+			current, burst, err := storage.AddPointsToFusionPoolInTx(tx, points)
+			if err != nil {
+				return err
+			}
+			event.PoolPoints, event.PoolCurrent, event.PoolBurst = points, current, burst
+		}
+		return tx.Model(event).Updates(map[string]any{"reward_settled": true, "pool_points": event.PoolPoints, "pool_current": event.PoolCurrent, "pool_burst": event.PoolBurst}).Error
+	})
 }
 
 func HandleBreakthroughConfirmation(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *telegram.SessionState, text string) {
