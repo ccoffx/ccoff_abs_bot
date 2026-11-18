@@ -300,6 +300,13 @@ func userAlreadyGrabbedAllActiveRedPackets(userID int64, prefix string) (bool, e
 }
 
 func HandleGrabRedPacket(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	if msg == nil || msg.Chat == nil || msg.From == nil {
+		return
+	}
+	if !msg.Chat.IsGroup() && !msg.Chat.IsSuperGroup() {
+		telegram.ReplyText(bot, msg.Chat.ID, "请到群里发送「抢」或「沾仙气」领取红包。")
+		return
+	}
 	if config.AppConfig.NoticeGroupID != 0 && !telegram.IsMessageFromNoticeGroup(msg) && !telegram.IsUserInGroupFresh(bot, msg.From.ID, config.AppConfig.NoticeGroupID) {
 		if msg.Chat.IsPrivate() {
 			telegram.ReplyText(bot, msg.Chat.ID, "⚠️ **访问受限：您尚未加入官方群组！**\n👉 请先加群后再参与抢红包。")

@@ -7,18 +7,23 @@ import (
 )
 
 type RedPacket struct {
-	ID          string `gorm:"primaryKey"`
-	SenderID    int64  `gorm:"not null"`
-	SenderName  string
-	TotalPoints int  `gorm:"not null"`
-	Count       int  `gorm:"not null"`
-	LeftCount   int  `gorm:"not null"`
-	LeftPoints  int  `gorm:"not null"`
-	IsFinished  bool `gorm:"default:false;index"`
-	CreatedAt   time.Time
-	RefType     string `gorm:"index"`
-	RefID       string `gorm:"index"`
-	ClaimScope  string `gorm:"index"`
+	NoticeLegacyCleanupMaxID uint
+	NoticeRetryAt            *time.Time `gorm:"index"`
+	NoticeSendState          string     `gorm:"index"`
+	NoticeChatID             int64
+	NoticeMessageID          int
+	ID                       string `gorm:"primaryKey"`
+	SenderID                 int64  `gorm:"not null"`
+	SenderName               string
+	TotalPoints              int  `gorm:"not null"`
+	Count                    int  `gorm:"not null"`
+	LeftCount                int  `gorm:"not null"`
+	LeftPoints               int  `gorm:"not null"`
+	IsFinished               bool `gorm:"default:false;index"`
+	CreatedAt                time.Time
+	RefType                  string `gorm:"index"`
+	RefID                    string `gorm:"index"`
+	ClaimScope               string `gorm:"index"`
 }
 
 // 抢红包明细防刷记录。

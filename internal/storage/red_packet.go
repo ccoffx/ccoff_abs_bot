@@ -5,6 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/textfmt"
 )
@@ -14,6 +15,11 @@ func CreateRedPacketInTx(tx *gorm.DB, packet *model.RedPacket) error {
 		return fmt.Errorf("RED_PACKET_INVALID")
 	}
 	entry := *packet
+	// The destination is fixed when creating the packet, never by a later
+	// unrelated event that happens to trigger the announcement sweep.
+	if entry.NoticeChatID == 0 && config.AppConfig != nil {
+		entry.NoticeChatID = config.AppConfig.NoticeGroupID
+	}
 	entry.ID = textfmt.FormatPlainValue(entry.ID)
 	entry.SenderName = textfmt.FormatPlainValue(entry.SenderName)
 	entry.RefType = textfmt.FormatPlainValue(entry.RefType)

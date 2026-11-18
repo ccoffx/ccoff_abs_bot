@@ -43,8 +43,9 @@ func (SecurityAttemptLock) TableName() string {
 }
 
 type AutoDeleteMsg struct {
-	ID        uint  `gorm:"primaryKey"`
-	ChatID    int64 `gorm:"index"`
+	PacketID  string `gorm:"index"`
+	ID        uint   `gorm:"primaryKey"`
+	ChatID    int64  `gorm:"index"`
 	MessageID int
 	DeleteAt  time.Time `gorm:"index"`
 }

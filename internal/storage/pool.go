@@ -10,12 +10,13 @@ import (
 
 	"gorm.io/gorm"
 
+	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/textfmt"
 )
 
-func AddPointsToFusionPool(pointsToAdd int) (int, bool, error) {
+func AddPointsToFusionPool(pointsToAdd int, fallbackChatID ...int64) (int, bool, error) {
 	currentPool := 0
 	isBurst := false
 	err := RunFusionPoolLockedTransaction(func(tx *gorm.DB) error {
@@ -36,7 +37,7 @@ func AddPointsToFusionPool(pointsToAdd int) (int, bool, error) {
 		}
 
 		var err error
-		currentPool, isBurst, err = AddPointsToFusionPoolInTx(tx, pointsToAdd)
+		currentPool, isBurst, err = AddPointsToFusionPoolInTx(tx, pointsToAdd, fallbackChatID...)
 		return err
 	})
 	if err != nil {
@@ -73,7 +74,7 @@ func createFusionPoolConfigIfMissingInTx(tx *gorm.DB) error {
 }
 
 // addPointsToFusionPoolInTx assumes the caller already holds fusionPoolMutex.
-func AddPointsToFusionPoolInTx(tx *gorm.DB, pointsToAdd int) (int, bool, error) {
+func AddPointsToFusionPoolInTx(tx *gorm.DB, pointsToAdd int, fallbackChatID ...int64) (int, bool, error) {
 	if tx == nil {
 		return 0, false, fmt.Errorf("DB_TX_EMPTY")
 	}
@@ -107,16 +108,24 @@ func AddPointsToFusionPoolInTx(tx *gorm.DB, pointsToAdd int) (int, bool, error) 
 		currentPool -= 300
 		isBurst = true
 
+		targetChatID := int64(0)
+		if config.AppConfig != nil {
+			targetChatID = config.AppConfig.NoticeGroupID
+		}
+		if targetChatID == 0 && len(fallbackChatID) > 0 && fallbackChatID[0] < 0 {
+			targetChatID = fallbackChatID[0]
+		}
 		redID := "FS-" + security.GenerateRandomCode(6)
 		packet := model.RedPacket{
-			ID:          redID,
-			SenderID:    0,
-			SenderName:  "✨ 天道灵气",
-			TotalPoints: 300,
-			Count:       30,
-			LeftCount:   30,
-			LeftPoints:  300,
-			CreatedAt:   time.Now(),
+			NoticeChatID: targetChatID,
+			ID:           redID,
+			SenderID:     0,
+			SenderName:   "✨ 天道灵气",
+			TotalPoints:  300,
+			Count:        30,
+			LeftCount:    30,
+			LeftPoints:   300,
+			CreatedAt:    time.Now(),
 		}
 		if err := CreateRedPacketInTx(tx, &packet); err != nil {
 			return 0, false, err

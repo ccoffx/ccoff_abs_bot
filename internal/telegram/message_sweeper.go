@@ -1,13 +1,13 @@
 package telegram
 
 import (
-	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/textfmt"
@@ -20,25 +20,26 @@ func StartMessageSweeper(bot *tgbotapi.BotAPI) {
 		for {
 			time.Sleep(30 * time.Second)
 
+			defaultChatID := int64(0)
+			if config.AppConfig != nil {
+				defaultChatID = config.AppConfig.NoticeGroupID
+			}
+			SyncRedPacketNotices(bot, defaultChatID)
+
 			var msgs []model.AutoDeleteMsg
 			if err := storage.DB.Where("delete_at <= ?", time.Now()).Find(&msgs).Error; err != nil {
 				log.Printf("⚠️ 自动删消息队列读取失败: err=%s", textfmt.FormatPlainError(err))
 				continue
 			}
 			for _, m := range msgs {
-				_, err := bot.Request(tgbotapi.NewDeleteMessage(m.ChatID, m.MessageID))
-
-				// 仅在成功删除，或确认该消息已被提前手动删除/不可删除时，才清除数据库记录
-				if err == nil || isTerminalTelegramDeleteError(err) {
-					res := storage.DB.Delete(&m)
-					if deleteErr := res.Error; deleteErr != nil {
-						log.Printf("⚠️ 自动删消息记录清理失败: id=%d chat=%d message=%d err=%s", m.ID, m.ChatID, m.MessageID, textfmt.FormatPlainError(deleteErr))
-					} else if res.RowsAffected == 0 {
-						deleteErr := fmt.Errorf("AUTO_DELETE_MSG_DELETE_MISSED")
-						log.Printf("⚠️ 自动删消息记录清理未命中: id=%d chat=%d message=%d err=%s", m.ID, m.ChatID, m.MessageID, textfmt.FormatPlainError(deleteErr))
+				if m.PacketID != "" {
+					active, err := retainRedPacketNotice(m, time.Now())
+					if err != nil || active {
+						continue
 					}
-				} else {
-					log.Printf("⚠️ 自动删除 Telegram 消息失败: id=%d chat=%d message=%d err=%s", m.ID, m.ChatID, m.MessageID, textfmt.FormatTelegramSendError(err))
+				}
+				if err := deleteAutoDeleteMessage(bot, m); err != nil {
+					log.Printf("自动删除 Telegram 消息失败，保留发布凭据: id=%d err=%s", m.ID, textfmt.FormatTelegramSendError(err))
 				}
 
 				time.Sleep(50 * time.Millisecond)
@@ -69,6 +70,25 @@ func StartMessageSweeper(bot *tgbotapi.BotAPI) {
 			sweepIdleUserLocks(now)
 		}
 	}()
+}
+
+// Packet announcements may be replaced only after deletion is confirmed.
+// Permission errors and expired deletion windows do not prove disappearance.
+func deleteAutoDeleteMessage(bot *tgbotapi.BotAPI, record model.AutoDeleteMsg) error {
+	_, err := bot.Request(tgbotapi.NewDeleteMessage(record.ChatID, record.MessageID))
+	if err != nil && !isTelegramMessageAlreadyDeleted(err) {
+		if record.PacketID != "" || !isTerminalTelegramDeleteError(err) {
+			return err
+		}
+		var guarded int64
+		if queryErr := storage.DB.Model(&model.RedPacket{}).Where("notice_chat_id = ? AND notice_legacy_cleanup_max_id >= ? AND is_finished = ? AND left_count > 0 AND left_points > 0", record.ChatID, record.ID, false).Count(&guarded).Error; queryErr != nil {
+			return queryErr
+		}
+		if guarded > 0 {
+			return err
+		}
+	}
+	return completeRedPacketNoticeCleanup(record)
 }
 
 func SendGroupAutoDeleteMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {

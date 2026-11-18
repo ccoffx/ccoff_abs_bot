@@ -688,18 +688,23 @@ func worldBossParticipantRankLess(left model.WorldBossParticipant, right model.W
 }
 
 func newWorldBossRedPacket(packetID string, event model.WorldBossEvent, now time.Time) model.RedPacket {
+	targetChatID := event.ChatID
+	if targetChatID == 0 && config.AppConfig != nil {
+		targetChatID = config.AppConfig.NoticeGroupID
+	}
 	return model.RedPacket{
-		ID:          packetID,
-		SenderID:    0,
-		SenderName:  "世界Boss",
-		TotalPoints: worldBossRedPacketTotalPoints,
-		Count:       worldBossRedPacketCount,
-		LeftCount:   worldBossRedPacketCount,
-		LeftPoints:  worldBossRedPacketTotalPoints,
-		CreatedAt:   now,
-		RefType:     "world_boss",
-		RefID:       event.BossID,
-		ClaimScope:  storage.RedPacketClaimScopeWorldBossParticipant,
+		NoticeChatID: targetChatID,
+		ID:           packetID,
+		SenderID:     0,
+		SenderName:   "世界Boss",
+		TotalPoints:  worldBossRedPacketTotalPoints,
+		Count:        worldBossRedPacketCount,
+		LeftCount:    worldBossRedPacketCount,
+		LeftPoints:   worldBossRedPacketTotalPoints,
+		CreatedAt:    now,
+		RefType:      "world_boss",
+		RefID:        event.BossID,
+		ClaimScope:   storage.RedPacketClaimScopeWorldBossParticipant,
 	}
 }
 
@@ -881,7 +886,7 @@ func grantWorldBossRewards(event *model.WorldBossEvent, participants []model.Wor
 
 		// 击杀奖励：天道奖池 +10，与结算同事务提交，受状态闸门保护。
 		if killed {
-			if _, _, err := storage.AddPointsToFusionPoolInTx(tx, 10); err != nil {
+			if _, _, err := storage.AddPointsToFusionPoolInTx(tx, 10, event.ChatID); err != nil {
 				return err
 			}
 		}

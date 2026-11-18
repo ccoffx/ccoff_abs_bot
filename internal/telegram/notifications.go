@@ -17,36 +17,13 @@ import (
 )
 
 func NotifyFusionPoolBurst(bot *tgbotapi.BotAPI, fallbackChatID int64, reason string) {
-	if bot == nil {
+	if bot == nil || config.AppConfig == nil {
 		return
 	}
 
-	targetChatID := config.AppConfig.NoticeGroupID
-	if targetChatID == 0 {
-		targetChatID = fallbackChatID
-	}
-	if targetChatID == 0 {
-		return
-	}
-
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "众道友引动天地异象"
-	}
-
-	// 当前 reason 都是代码内固定文案；这里额外转义，防止未来误传用户输入导致 Markdown 格式注入。
-	reason = textfmt.EscapeMarkdown(reason)
-
-	announce := fmt.Sprintf(
-		"🌈 **【天降甘霖·仙气化雨】** 🌈\n"+
-			"%s，天道奖池已蓄满并自动爆开！\n\n"+
-			"💰 降下红包: `300` 积分\n"+
-			"📦 福泽份数: `30` 份\n\n"+
-			"👇 众修士快回复关键字 【`沾仙气`】 汲取天地造化！",
-		reason,
-	)
-
-	go SendGroupAutoDeleteMessage(bot, targetChatID, announce)
+	// Pool packets capture this event's destination in their creation transaction.
+	// Never bind other unaddressed packets to this event's fallback group.
+	SyncRedPacketNotices(bot, 0)
 }
 
 func SendEncryptedBackupToTelegram(bot *tgbotapi.BotAPI, source string) (int, error) {

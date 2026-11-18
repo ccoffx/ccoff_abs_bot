@@ -52,7 +52,7 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 						lastEdit = r.Form.Get("text")
 						mu.Unlock()
 					}
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "result": map[string]interface{}{"message_id": 123, "chat": map[string]interface{}{"id": -100, "type": "supergroup"}, "text": r.Form.Get("text")}})
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "result": map[string]interface{}{"message_id": 123, "chat": map[string]interface{}{"id": json.Number(r.Form.Get("chat_id")), "type": "supergroup"}, "text": r.Form.Get("text")}})
 				}
 			}))
 			t.Cleanup(server.Close)
@@ -74,6 +74,10 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 			}
 			if ritual.Status != BreakthroughRitualWaiting || ritual.ChatID != -100 || ritual.MessageID != 123 {
 				t.Fatalf("recruitment not activated: %+v", ritual)
+			}
+			var cleanupCount int64
+			if err := storage.DB.Model(&model.AutoDeleteMsg{}).Where("chat_id = ? AND message_id = ?", ritual.ChatID, ritual.MessageID).Count(&cleanupCount).Error; err != nil || cleanupCount != 1 {
+				t.Fatalf("recruitment panel missing automatic cleanup: count=%d err=%v", cleanupCount, err)
 			}
 			cb := &tgbotapi.CallbackQuery{ID: "guard", From: &tgbotapi.User{ID: 2, FirstName: "护道者"}, Message: &tgbotapi.Message{MessageID: 123, Chat: &tgbotapi.Chat{ID: -100, Type: "supergroup"}}, Data: fmt.Sprintf("btguard:%d:join", ritual.ID)}
 			if !HandleBreakthroughGuardCallback(bot, cb) || guardTestBalance(t, 2) != 95 {

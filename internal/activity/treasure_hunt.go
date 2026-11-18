@@ -226,7 +226,7 @@ func CloseTreasureRound(roundID uint, now time.Time) (bool, bool, error) {
 		pool := 0
 		if net > 0 {
 			var err error
-			pool, burst, err = storage.AddPointsToFusionPoolInTx(tx, net)
+			pool, burst, err = storage.AddPointsToFusionPoolInTx(tx, net, round.ChatID)
 			if err != nil {
 				return err
 			}

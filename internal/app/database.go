@@ -182,6 +182,9 @@ func InitDB() {
 	if err := storage.InitializeDatabaseIndexes(storage.DB); err != nil {
 		log.Fatalf("数据库索引初始化失败: %s", textfmt.FormatPlainError(err))
 	}
+	if err := storage.MigrateLegacyRedPacketNoticeTargets(storage.DB, config.AppConfig.NoticeGroupID); err != nil {
+		log.Fatalf("历史红包公告目标迁移失败: %s", textfmt.FormatPlainError(err))
+	}
 	if err := game.SeedDefaultCultivationConfigs(); err != nil {
 		log.Fatalf("斗气默认配置初始化失败: %s", textfmt.FormatPlainError(err))
 	}

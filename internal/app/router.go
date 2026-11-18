@@ -143,6 +143,9 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
+	if telegram.HandleRedPacketNoticeRecoveryCommand(bot, msg, text) {
+		return
+	}
 	if HandleChannelAnnouncementCommand(bot, msg, text) {
 		return
 	}
@@ -2384,18 +2387,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		telegram.ReplyText(bot, chatID, "🚀 **红包打包成功！**\n📢 机器人已在大群同步发放。")
 
-		if config.AppConfig.NoticeGroupID != 0 {
-			群信息 := fmt.Sprintf(
-				"🧧 **%s 发放了一个拼手气积分红包！**\n\n"+
-					"💰 红包总额: `%d` 积分\n"+
-					"📦 红包份数: `%d` 份\n\n"+
-					"👇 快在群内回复关键字 【`抢`】 拼手气吧！",
-				cleanSender,
-				pts,
-				count,
-			)
-			telegram.SendGroupAutoDeleteMessage(bot, config.AppConfig.NoticeGroupID, 群信息)
-		}
+		telegram.SyncRedPacketNotices(bot, config.AppConfig.NoticeGroupID)
 
 		telegram.ClearSession(userID)
 

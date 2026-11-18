@@ -956,7 +956,7 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 
 		if refundPoints > 0 {
 			var err error
-			currentPool, isBurst, err = storage.AddPointsToFusionPool(refundPoints)
+			currentPool, isBurst, err = storage.AddPointsToFusionPool(refundPoints, chatID)
 			if err != nil {
 				poolInjected = false
 				log.Printf("⚠️ 突破成功后天道奖池注入失败: user=%d attempt=%d points=%d err=%s", userID, attemptID, refundPoints, textfmt.FormatPlainError(err))
@@ -1018,21 +1018,11 @@ func executeBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 			}
 		}()
 
-		if isBurst && config.AppConfig.NoticeGroupID != 0 {
-			poolAnnounce := fmt.Sprintf(
-				"%s\n\n"+
-					"🌈 **【天降甘霖·仙气化雨】** 🌈\n"+
-					"因道友突破引动天地异象，天道奖池已蓄满并自动爆开！\n\n"+
-					"💰 降下红包: `300` 积分\n"+
-					"📦 福泽份数: `30` 份\n\n"+
-					"👇 众修士快回复关键字 【`沾仙气`】 汲取天地造化！",
-				announce,
-			)
-			telegram.SendGroupAutoDeleteMessageAsync(bot, config.AppConfig.NoticeGroupID, poolAnnounce, "cultivation_pool_burst_notice", fmt.Sprintf("cultivation_pool_burst:%d", attemptID))
-		} else {
-			if config.AppConfig.NoticeGroupID != 0 && chatID != config.AppConfig.NoticeGroupID {
-				telegram.SendGroupAutoDeleteMessageAsync(bot, config.AppConfig.NoticeGroupID, announce, "cultivation_breakthrough_notice", fmt.Sprintf("cultivation_notice:%d", attemptID))
-			}
+		if isBurst {
+			telegram.NotifyFusionPoolBurst(bot, chatID, "因道友突破引动天地异象")
+		}
+		if config.AppConfig.NoticeGroupID != 0 && chatID != config.AppConfig.NoticeGroupID {
+			telegram.SendGroupAutoDeleteMessageAsync(bot, config.AppConfig.NoticeGroupID, announce, "cultivation_breakthrough_notice", fmt.Sprintf("cultivation_notice:%d", attemptID))
 		}
 
 		return

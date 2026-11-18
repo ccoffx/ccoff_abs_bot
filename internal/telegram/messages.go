@@ -140,6 +140,19 @@ func IsDefiniteTelegramSendFailure(err error) bool {
 	return errors.As(err, &apiValue) && apiValue.Code >= 400 && apiValue.Code < 500
 }
 
+// Only a confirmed missing message proves that cleanup completed.
+func isTelegramMessageAlreadyDeleted(err error) bool {
+	var pointer *tgbotapi.Error
+	var value tgbotapi.Error
+	code := 0
+	if errors.As(err, &pointer) {
+		code = pointer.Code
+	} else if errors.As(err, &value) {
+		code = value.Code
+	}
+	return code == 400 && strings.Contains(strings.ToLower(err.Error()), "message to delete not found")
+}
+
 func isTerminalTelegramDeleteError(err error) bool {
 	if err == nil {
 		return false

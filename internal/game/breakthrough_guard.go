@@ -363,7 +363,7 @@ func BeginBreakthroughWithGuards(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mo
 	}
 	panel := tgbotapi.NewMessage(groupID, formatBreakthroughRitualPanel(*ritual, nil))
 	panel.ReplyMarkup = breakthroughRitualMarkup(ritual.ID)
-	sent, err := bot.Send(telegram.PrepareCopyable(panel))
+	sent, err := telegram.SendAutoDelete(bot, panel)
 	if err == nil {
 		err = ActivateBreakthroughRitual(ritual.ID, sent.MessageID, time.Now())
 	}
