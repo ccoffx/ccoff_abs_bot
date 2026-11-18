@@ -162,12 +162,12 @@ func TestSplitCorrectionAcrossPagesResumesWithoutChangingPriorCredit(t *testing.
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 12*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 12*3600 {
 		t.Fatalf("initial=%v %t", days, ok)
 	}
 	before := recoveryListeningDay(t, day)
 	corrected.Store(true)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("fixture expected pending history")
 	}
 	if err := storage.DB.Create(&model.User{TelegramID: 2, AbsUserID: "abs2", Username: "review_other", Role: "user", Status: "active"}).Error; err != nil {
@@ -217,7 +217,7 @@ func TestSplitCorrectionAcrossPagesResumesWithoutChangingPriorCredit(t *testing.
 	if got := recoveryListeningDay(t, day); !reflect.DeepEqual(before, got) {
 		t.Fatal("background scan rewrote daily cache")
 	}
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 43200 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 43200 {
 		t.Fatalf("completed correction did not refresh: %v %t", days, ok)
 	}
 	if otherRequests.Load() == 0 {
@@ -271,7 +271,7 @@ func TestBackfillMismatchBacksOffAndRescansEarlierPages(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial refresh failed")
 	}
 	before := recoveryListeningDay(t, day)
@@ -327,7 +327,7 @@ func TestBackfillMismatchBacksOffAndRescansEarlierPages(t *testing.T) {
 	if err := storage.DB.Where("abs_user_id = ?", "abs1").First(&cursor).Error; err != nil || !cursor.Completed || cursor.PendingObservationsJSON != "" {
 		t.Fatalf("fresh pass did not complete: %+v %v", cursor, err)
 	}
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 43200 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 43200 {
 		t.Fatalf("recovered=%v %t", days, ok)
 	}
 }

@@ -99,7 +99,7 @@ func TestLateCrossDayReportCorrectsBothDaysAndPreservesOnFailure(t *testing.T) {
 		}
 		return stat
 	}
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial snapshot failed")
 	}
 	if stat := readDay(yesterday); math.Abs(stat.EffectiveHours-2.962871388888889) > 1e-9 {
@@ -110,7 +110,7 @@ func TestLateCrossDayReportCorrectsBothDaysAndPreservesOnFailure(t *testing.T) {
 	}
 	phase.Store(1)
 	for i := 0; i < 2; i++ {
-		if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+		if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 			t.Fatal("late report failed")
 		}
 		previous, current := readDay(yesterday), readDay(today)
@@ -122,7 +122,7 @@ func TestLateCrossDayReportCorrectsBothDaysAndPreservesOnFailure(t *testing.T) {
 	before := readDay(yesterday)
 	for _, mode := range []int32{2, 3} {
 		phase.Store(mode)
-		if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+		if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 			t.Fatalf("incomplete snapshot %d accepted", mode)
 		}
 		after := readDay(yesterday)

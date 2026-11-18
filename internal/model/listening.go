@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"time"
 
 	"gorm.io/gorm"
@@ -101,6 +102,13 @@ type DailyListeningStat struct {
 	AbsUserID string `gorm:"index"`
 	DayKey    string `gorm:"index;not null"` // 北京时间日期 YYYY-MM-DD
 
+	// Official daily policy preserves legacy balances until an explicit repair.
+	OfficialBaselineKind            string  `gorm:"not null;default:''"` // legacy_migration / rebind / native / historical_excluded; empty is unknown.
+	OfficialPolicy                  bool    `gorm:"not null;default:false"`
+	OfficialBaselineSeconds         float64 `gorm:"not null;default:0"`
+	OfficialBaselineCreditedSeconds float64 `gorm:"not null;default:0"`
+	OfficialBaselineHours           float64 `gorm:"not null;default:0"`
+
 	RawSeconds           float64
 	OfficialRawSeconds   float64 // Unmodified listening-stats.days value for this date.
 	ValidationJSON       string  // Daily credit limits and diagnostics; never penalty evidence.
@@ -136,4 +144,13 @@ type ListeningReportSnapshot struct {
 	FinishedBooks     int
 	ListeningBooks    int
 	ProgressFetchedAt time.Time
+}
+
+// BonusListeningSeconds retains the pre-migration bonus basis. Adopting official
+// totals must not silently pay the legacy gap through fire or retreat bonuses.
+func (s DailyListeningStat) BonusListeningSeconds() float64 {
+	if !s.OfficialPolicy {
+		return s.CappedSeconds
+	}
+	return math.Max(0, s.OfficialBaselineCreditedSeconds+(s.CappedSeconds-s.OfficialBaselineSeconds))
 }

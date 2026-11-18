@@ -60,7 +60,7 @@ func nullListeningFixture(t *testing.T, emptyKind string, mismatch bool) string 
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{kept, extra}})
 	})
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial snapshot failed")
 	}
 	changed.Store(true)
@@ -72,7 +72,7 @@ func TestNullListeningSessionAllowsConfirmedDeletionAndMonitorCompletion(t *test
 		t.Run(kind, func(t *testing.T) {
 			day := nullListeningFixture(t, kind, false)
 			before := recoveryListeningDay(t, day)
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 				t.Fatal("explicit null session blocked confirmed removal")
 			}
 			after := recoveryListeningDay(t, day)
@@ -112,7 +112,7 @@ func TestNullListeningSessionDoesNotWeakenHistoryValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			day := nullListeningFixture(t, tc.kind, tc.mismatch)
 			before := recoveryListeningDay(t, day)
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 				t.Fatal("unverified deletion was accepted")
 			}
 			after := recoveryListeningDay(t, day)
@@ -143,7 +143,7 @@ func TestNullListeningSessionAllowsProgressiveHistoryRepair(t *testing.T) {
 			if err := storage.DB.Where("session_key = ?", "removed").First(&old).Error; err != nil || old.Status != crossDayAdjustmentStatusDeleted {
 				t.Fatalf("background repair did not retire old session: %+v err=%v", old, err)
 			}
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 				t.Fatal("refresh did not recover after background repair")
 			}
 		})
@@ -172,11 +172,11 @@ func TestNullListeningTimeDoesNotClearKnownPositiveSession(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{s}})
 	})
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial snapshot failed")
 	}
 	changed.Store(true)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("null treated as an explicit zero correction")
 	}
 	if stat := recoveryListeningDay(t, day); stat.RawSeconds != 60 {
@@ -240,7 +240,7 @@ func TestCrossDayUnknownListeningTimeDoesNotClearKnownPositiveSession(t *testing
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{s}})
 			})
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 				t.Fatal("initial cross-day snapshot failed")
 			}
 			before := recoveryListeningDay(t, day)
@@ -273,7 +273,7 @@ func TestCrossDayUnknownListeningTimeDoesNotClearKnownPositiveSession(t *testing
 					t.Fatal(err)
 				}
 			}
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 				t.Fatal("unknown cross-day duration treated as an explicit zero correction")
 			}
 			after := recoveryListeningDay(t, day)

@@ -66,12 +66,12 @@ func TestDeletedCrossDaySessionRecoversAndClearsOldAllocation(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 			})
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 				t.Fatal("initial refresh failed")
 			}
 			deleted.Store(true)
 			for i := 0; i < 3; i++ {
-				if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+				if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 					t.Fatal("verified deletion still blocks refresh")
 				}
 				if got := recoveryListeningDay(t, today).RawSeconds; got != 600 {
@@ -109,12 +109,12 @@ func TestMissingCrossDaySourceCannotOverwriteCorrectedToday(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{session}})
 			})
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 				t.Fatal("initial refresh failed")
 			}
 			before := recoveryListeningDay(t, today)
 			omitSource.Store(true)
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 				t.Fatal("missing source day accepted despite live session evidence")
 			}
 			after := recoveryListeningDay(t, today)
@@ -140,12 +140,12 @@ func TestMissingSourceAllowsAbuseEvidenceWithoutWritingDailyCache(t *testing.T) 
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{session}})
 	})
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial refresh failed")
 	}
 	before := recoveryListeningDay(t, today)
 	omitSource.Store(true)
-	proven, ok := refreshDailyListeningStatsFromABS(1, "abs1", true, today, source)
+	proven, ok := refreshSessionEvidenceForTest(1, "abs1", true, today, source)
 	if !ok || proven[today] != 3600 || proven[source] != 3600 {
 		t.Fatalf("missing source suppressed guaranteed session evidence: %v, %t", proven, ok)
 	}
@@ -192,12 +192,12 @@ func TestSameDayAbuseEvidenceWithMismatchedSourceStatistics(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 			})
-			if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 43200 {
+			if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 43200 {
 				t.Fatalf("initial daily credit=%v ok=%t", days, ok)
 			}
 			before := recoveryListeningDay(t, day)
 			mismatch.Store(true)
-			proven, ok := refreshDailyListeningStatsFromABS(1, "abs1", true, day)
+			proven, ok := refreshSessionEvidenceForTest(1, "abs1", true, day)
 			if tc.missingSource {
 				if !ok || proven[day] != 86400 {
 					t.Fatalf("missing source suppressed strict same-day evidence: %v ok=%t", proven, ok)
@@ -211,7 +211,7 @@ func TestSameDayAbuseEvidenceWithMismatchedSourceStatistics(t *testing.T) {
 					t.Fatalf("missing historical session was not scheduled for reconciliation: %+v err=%v", cursor, err)
 				}
 			}
-			if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+			if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 				t.Fatal("ordinary refresh accepted inconsistent source statistics")
 			}
 			if after := recoveryListeningDay(t, day); !reflect.DeepEqual(before, after) {
@@ -261,7 +261,7 @@ func TestPersonalReportUsesCorrectedCacheWhenRefreshFails(t *testing.T) {
 							fmt.Fprint(w, `{"mediaProgress":[]}`)
 						}
 					})
-					if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+					if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 						t.Fatal("initial refresh failed")
 					}
 					if _, ok := syncCultivationFromDailyListeningStats(1); !ok {
@@ -269,7 +269,7 @@ func TestPersonalReportUsesCorrectedCacheWhenRefreshFails(t *testing.T) {
 					}
 					before := recoveryListeningDay(t, today)
 					fail.Store(true)
-					if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+					if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 						t.Fatal("injected failure accepted")
 					}
 					report := GetPersonalReport(abs.DefaultClient, "abs1")
@@ -288,7 +288,7 @@ func TestPersonalReportUsesCorrectedCacheWhenRefreshFails(t *testing.T) {
 	}
 }
 
-func TestPersonalReportWithoutCacheDoesNotDisplayUncorrectedZero(t *testing.T) {
+func TestPersonalReportWithoutCacheUsesOfficialDaysDespiteSessionFailure(t *testing.T) {
 	setupRetreatBackfillDB(t)
 	_, source, _ := recoveryCrossDaySession()
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +302,7 @@ func TestPersonalReportWithoutCacheDoesNotDisplayUncorrectedZero(t *testing.T) {
 		}
 	})
 	report := GetPersonalReport(abs.DefaultClient, "abs1")
-	for _, want := range []string{"今日实际听书: 待同步", "今日净修为: 待同步", "净修炼时长: 读取失败", "暂无今日每日统计缓存"} {
+	for _, want := range []string{"今日实际听书: 0.00 小时", "净修炼时长:"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing %q: %s", want, report)
 		}
@@ -352,11 +352,11 @@ func TestHistoricalDeletionReconciliationResumesAndCommitsAtomically(t *testing.
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial refresh failed")
 	}
 	deleted.Store(true)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("truncated history was treated as proof of deletion")
 	}
 	if err := advanceABSCrossDaySessionBackfill(time.Now()); err != nil {
@@ -366,7 +366,7 @@ func TestHistoricalDeletionReconciliationResumesAndCommitsAtomically(t *testing.
 	if err := storage.DB.First(&cursor).Error; err != nil || cursor.NextPage != 5 || cursor.Completed || cursor.ReconcileStartedAt == nil {
 		t.Fatalf("repair did not pause after five pages: %+v, %v", cursor, err)
 	}
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("unverified deletion accepted")
 	}
 	var resumed model.ABSCrossDaySessionScanCursor
@@ -398,7 +398,7 @@ func TestHistoricalDeletionReconciliationResumesAndCommitsAtomically(t *testing.
 	if err := storage.DB.First(&resumed, cursor.ID).Error; err != nil || !resumed.Completed || resumed.ReconcileStartedAt != nil {
 		t.Fatalf("repair failed to finish: %+v, %v", resumed, err)
 	}
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("verified historical deletion still blocks refresh")
 	}
 	if got := recoveryListeningDay(t, today).RawSeconds; got != 500 {
@@ -508,11 +508,11 @@ func TestSessionCorrectedToSameDayClearsCrossDayAllocation(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{current}})
 	})
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial refresh failed")
 	}
 	corrected.Store(true)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("same-day correction was rejected")
 	}
 	if got := recoveryListeningDay(t, source).RawSeconds; got != 0 {

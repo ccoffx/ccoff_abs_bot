@@ -50,13 +50,13 @@ func TestDailyListeningClearWithOlderStatisticsCannotIncreaseCredit(t *testing.T
 				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 			})
 			want := float64(12+unseenHours) * 3600
-			if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != want {
+			if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != want {
 				t.Fatalf("initial=%v ok=%t want=%g", days, ok, want)
 			}
 			before := recoveryListeningDay(t, day)
 			cleared.Store(true)
 			for i := 0; i < 2; i++ {
-				if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+				if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 					t.Fatal("stale statistics accepted")
 				}
 				after := recoveryListeningDay(t, day)
@@ -72,13 +72,13 @@ func TestDailyListeningClearWithOlderStatisticsCannotIncreaseCredit(t *testing.T
 				}
 			}
 			rawHours.Store(12 + remainingHours + unseenHours)
-			if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != want {
+			if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != want {
 				t.Fatalf("consistent retry=%v ok=%t", days, ok)
 			}
 			before = recoveryListeningDay(t, day)
 			rawHours.Store(18 + unseenHours)
 			for i := 0; i < 2; i++ {
-				if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+				if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 					t.Fatal("stale total recreated cleared playback")
 				}
 				if after := recoveryListeningDay(t, day); !reflect.DeepEqual(before, after) {
@@ -87,7 +87,7 @@ func TestDailyListeningClearWithOlderStatisticsCannotIncreaseCredit(t *testing.T
 			}
 			newPlayback.Store(true)
 			rawHours.Store(14 + remainingHours + unseenHours)
-			if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != want+7200 {
+			if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != want+7200 {
 				t.Fatalf("new playback was blocked: %v %t", days, ok)
 			}
 		})
@@ -186,19 +186,19 @@ func TestDailyListeningMismatchedBudgetDoesNotSilentlyUndercountUnion(t *testing
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 8*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 8*3600 {
 		t.Fatalf("initial=%v %t", days, ok)
 	}
 	before := recoveryListeningDay(t, day)
 	stage.Store(1)
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatalf("inconsistent budget accepted with credit=%v", days)
 	}
 	if after := recoveryListeningDay(t, day); !reflect.DeepEqual(before, after) {
 		t.Fatal("mismatch replaced prior cache")
 	}
 	stage.Store(2)
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 12*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 12*3600 {
 		t.Fatalf("consistent union=%v %t", days, ok)
 	}
 	if stat := recoveryListeningDay(t, day); stat.OfficialRawSeconds != 16*3600 || stat.CappedSeconds != 12*3600 {
@@ -239,7 +239,7 @@ func TestDailyListeningBackfillCorrectionRequiresMatchingStatistics(t *testing.T
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{a, b, c}})
 	})
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok {
 		t.Fatal("initial refresh failed")
 	}
 	before := recoveryListeningDay(t, day)
@@ -278,7 +278,7 @@ func TestDailyListeningBackfillCorrectionRequiresMatchingStatistics(t *testing.T
 	if err := storage.DB.First(&cursor).Error; err != nil || cursor.NextPage != 1 || !cursor.Completed {
 		t.Fatalf("consistent retry did not commit: %+v err=%v", cursor, err)
 	}
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 12*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 12*3600 {
 		t.Fatalf("corrected history=%v ok=%t", days, ok)
 	}
 }
@@ -328,12 +328,12 @@ func TestDailyListeningSourceRepairFindsNewHistoryOutsideRecentPages(t *testing.
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 12*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 12*3600 {
 		t.Fatalf("initial=%v %t", days, ok)
 	}
 	before := recoveryListeningDay(t, day)
 	hidden.Store(true)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("unconfirmed source remainder accepted")
 	}
 	if after := recoveryListeningDay(t, day); !reflect.DeepEqual(before, after) {
@@ -348,7 +348,7 @@ func TestDailyListeningSourceRepairFindsNewHistoryOutsideRecentPages(t *testing.
 			t.Fatal(err)
 		}
 	}
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 14*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 14*3600 {
 		t.Fatalf("new historical playback not recovered: %v %t", days, ok)
 	}
 }
@@ -377,16 +377,16 @@ func TestDailyListeningDeletedCrossDaySessionRejectsLaterStaleTotal(t *testing.T
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[source] != 3600 || days[target] != 3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[source] != 3600 || days[target] != 3600 {
 		t.Fatalf("initial=%v %t", days, ok)
 	}
 	stage.Store(1)
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[source] != 0 || days[target] != 0 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[source] != 0 || days[target] != 0 {
 		t.Fatalf("confirmed deletion=%v %t", days, ok)
 	}
 	before := recoveryListeningDay(t, source)
 	stage.Store(2)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("stale total recreated deleted cross-day playback")
 	}
 	if after := recoveryListeningDay(t, source); !reflect.DeepEqual(before, after) {

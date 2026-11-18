@@ -275,7 +275,7 @@ func TestExpiredListeningQueryRefreshesOrLabelsOldData(t *testing.T) {
 					t.Fatalf("failed refresh changed data or hid its age: state=%+v stat=%+v cul=%+v", state, stat, cul)
 				}
 			} else {
-				if !state.Fresh || state.Notice != "" || cul.TotalAudioTime != 1 || !DailyListeningCultivationSettled(stat) || sessions.Load() != 1 {
+				if !state.Fresh || state.Notice != "" || cul.TotalAudioTime != 1 || !DailyListeningCultivationSettled(stat) || sessions.Load() != 0 {
 					t.Fatalf("refresh not settled: state=%+v stat=%+v cul=%+v", state, stat, cul)
 				}
 				EnsureListeningFresh(1)

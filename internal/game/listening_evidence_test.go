@@ -37,7 +37,7 @@ func TestListeningAbuseDoesNotPunishEstimatedMidnightPlayback(t *testing.T) {
 	}))
 	defer server.Close()
 	abs.DefaultClient = &abs.AbsClient{BaseURL: server.URL, Token: "test", HttpClient: server.Client()}
-	estimated, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+	estimated, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 	if !ok || math.Abs(estimated["2026-10-27"]-54300) > 1e-9 {
 		t.Fatalf("expected display estimate: %v %t", estimated, ok)
 	}

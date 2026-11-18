@@ -20,11 +20,6 @@ func settleListeningDaysInTx(tx *gorm.DB, cul *model.Cultivation, now time.Time)
 	if err := tx.Where("user_id = ? AND start_at <= ?", cul.UserID, now).Order("id").Find(&retreats).Error; err != nil {
 		return 0, 0, "", err
 	}
-	for _, r := range retreats {
-		if _, err := decodeSectRetreatEvidence(r); err != nil {
-			return 0, 0, "", err
-		}
-	}
 	encoded, err := json.Marshal(retreats)
 	if err != nil {
 		return 0, 0, "", err

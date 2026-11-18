@@ -10,12 +10,17 @@ import (
 // 📿 昔风听书斗气系统专属数据表
 // ==========================================
 type Cultivation struct {
-	ID                      uint    `gorm:"primaryKey"`
-	UserID                  int64   `gorm:"index"` // 绑定 TelegramID
-	ListeningInitialized    bool    `gorm:"not null;default:false"`
-	ListeningBaseHours      float64 `gorm:"not null;default:0"`
-	ListeningRetreatVersion string
-	ListeningRewardRealm    int `gorm:"not null;default:0"`
+	ID     uint  `gorm:"primaryKey"`
+	UserID int64 `gorm:"index"` // 绑定 TelegramID
+	// Dates before this Beijing day must baseline newly discovered legacy sources.
+	// Persist across refreshes; an empty boundary denotes a native official-policy account.
+	OfficialDailyBaselineBefore string
+	OfficialDailyAbsUserID      string
+	OfficialDailyInitialized    bool    `gorm:"not null;default:false"`
+	ListeningInitialized        bool    `gorm:"not null;default:false"`
+	ListeningBaseHours          float64 `gorm:"not null;default:0"`
+	ListeningRetreatVersion     string
+	ListeningRewardRealm        int `gorm:"not null;default:0"`
 	// Independent high-water mark for contribution-eligible hours (no spirit fire).
 	SectListeningSettledHours float64   `gorm:"not null;default:0"`
 	TotalAudioTime            float64   `gorm:"default:0"` // 🎧 累计听书修为（小时），包含闭关与异火，不含丹药

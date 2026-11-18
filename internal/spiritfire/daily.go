@@ -136,7 +136,7 @@ func RefreshDailyBatch(tx *gorm.DB, stats []model.DailyListeningStat, bases map[
 func refreshDailyWithPercent(tx *gorm.DB, stat *model.DailyListeningStat, base float64, percent int) error {
 	oldBase, oldBonus := stat.BaseCultivationHours, stat.SpiritFireHours
 	stat.BaseCultivationHours = base
-	stat.SpiritFireHours = Bonus(stat.CappedSeconds, stat.EffectiveHours, percent)
+	stat.SpiritFireHours = Bonus(stat.BonusListeningSeconds(), stat.EffectiveHours, percent)
 	if stat.ID == 0 || (oldBase == base && oldBonus == stat.SpiritFireHours) {
 		return nil
 	}

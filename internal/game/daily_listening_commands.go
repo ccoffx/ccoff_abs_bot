@@ -116,64 +116,10 @@ func syncCultivationFromDailyListeningStatsAt(userID int64, now time.Time) (floa
 	total := 0.0
 	var cul model.Cultivation
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
-		// Acquire a SQLite write lock before reading either the totals or the cursor.
-		// The cursor, contribution payment and profile update commit together.
-		if err := spiritfire.Lock(tx); err != nil {
-			return err
-		}
-		// Account cleanup/rebinding and profile initialization must serialize.
-		// A late queued refresh must not recreate a deleted account's profile.
-		if err := lockCultivationAccountInTx(tx, userID); err != nil {
-			return err
-		}
-		if _, err := createCultivationIfMissingInTx(tx, userID); err != nil {
-			return err
-		}
-		if err := lockCultivationListeningTx(tx, userID); err != nil {
-			return err
-		}
-		if err := tx.Where("user_id = ?", userID).First(&cul).Error; err != nil {
-			return err
-		}
-		// Adopt pill/manual changes before considering listening upgrades, within
-		// this same transaction rather than through a read-side realm write.
-		calculateCultivationRealm(&cul)
-		var base float64
 		var err error
-		var version string
-		total, base, version, err = settleListeningDaysInTx(tx, &cul, now)
-		if err != nil {
-			return err
-		}
-		settled := cul.SectListeningSettledHours
-		nextSettled := cultivationContributionHighWater(base)
-		if nextSettled > settled {
-			delta := int(math.Floor(nextSettled)) - int(math.Floor(settled))
-			if delta > 0 {
-				if err := AwardSectContributionInTx(tx, userID, delta, fmt.Sprintf("听书增长奖励 %d 贡献（不含异火修为）", delta), "listening_hours", SectDayKey(now)); err != nil {
-					return err
-				}
-			}
-			settled = nextSettled
-		}
-		cul.TotalAudioTime = total
-		if err := recordListeningUpgradeInTx(tx, &cul, now); err != nil {
-			return err
-		}
-		res := tx.Model(&model.Cultivation{}).Where("id = ?", cul.ID).Updates(map[string]interface{}{
-			"total_audio_time": total, "sect_listening_settled_hours": settled,
-			"listening_initialized": true, "listening_base_hours": base, "listening_retreat_version": version,
-			"major_realm": cul.MajorRealm, "minor_realm": cul.MinorRealm, "listening_reward_realm": cul.ListeningRewardRealm,
-		})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected != 1 {
-			return storage.ErrCultivationNotFound
-		}
-		cul.TotalAudioTime = total
-		cul.SectListeningSettledHours = settled
-		return nil
+		cul, err = settleCultivationListeningInTx(tx, userID, now)
+		total = cul.TotalAudioTime
+		return err
 	})
 	if err != nil {
 		log.Printf("修为与宗门听书贡献结算失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
@@ -271,11 +217,6 @@ func RefreshSpiritFireDailyStat(stat *model.DailyListeningStat, now time.Time) e
 		var retreats []model.SectCaveRetreat
 		if err := tx.Where("user_id = ? AND start_at <= ?", stat.UserID, now).Find(&retreats).Error; err != nil {
 			return err
-		}
-		for _, retreat := range retreats {
-			if _, err := decodeSectRetreatEvidence(retreat); err != nil {
-				return err
-			}
 		}
 		if err := spiritfire.RefreshDaily(tx, stat, stat.EffectiveHours+dailySectCaveRetreatBonusHours(*stat, retreats), now); err != nil {
 			return err
@@ -467,4 +408,71 @@ func formatDailyListeningStat(title string, stat model.DailyListeningStat, total
 		fetchStatus,
 		refreshReason,
 	)
+}
+
+func settleCultivationListeningInTx(tx *gorm.DB, userID int64, now time.Time) (model.Cultivation, error) {
+	var cul model.Cultivation
+	var total float64
+	// Acquire a SQLite write lock before reading either the totals or the cursor.
+	// The cursor, contribution payment and profile update commit together.
+	if err := spiritfire.Lock(tx); err != nil {
+		return cul, err
+	}
+	// Account cleanup/rebinding and profile initialization must serialize.
+	// A late queued refresh must not recreate a deleted account's profile.
+	if err := lockCultivationAccountInTx(tx, userID); err != nil {
+		return cul, err
+	}
+	if err := tx.Where("user_id = ?", userID).First(&cul).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		if _, err := createCultivationIfMissingInTx(tx, userID); err != nil {
+			return cul, err
+		}
+	} else if err != nil {
+		return cul, err
+	}
+	if err := lockCultivationListeningTx(tx, userID); err != nil {
+		return cul, err
+	}
+	if err := tx.Where("user_id = ?", userID).First(&cul).Error; err != nil {
+		return cul, err
+	}
+	// Adopt pill/manual changes before considering listening upgrades, within
+	// this same transaction rather than through a read-side realm write.
+	calculateCultivationRealm(&cul)
+	var base float64
+	var err error
+	var version string
+	total, base, version, err = settleListeningDaysInTx(tx, &cul, now)
+	if err != nil {
+		return cul, err
+	}
+	settled := cul.SectListeningSettledHours
+	nextSettled := cultivationContributionHighWater(base)
+	if nextSettled > settled {
+		delta := int(math.Floor(nextSettled)) - int(math.Floor(settled))
+		if delta > 0 {
+			if err := AwardSectContributionInTx(tx, userID, delta, fmt.Sprintf("听书增长奖励 %d 贡献（不含异火修为）", delta), "listening_hours", SectDayKey(now)); err != nil {
+				return cul, err
+			}
+		}
+		settled = nextSettled
+	}
+	cul.TotalAudioTime = total
+	if err := recordListeningUpgradeInTx(tx, &cul, now); err != nil {
+		return cul, err
+	}
+	res := tx.Model(&model.Cultivation{}).Where("id = ?", cul.ID).Updates(map[string]interface{}{
+		"total_audio_time": total, "sect_listening_settled_hours": settled,
+		"listening_initialized": true, "listening_base_hours": base, "listening_retreat_version": version,
+		"major_realm": cul.MajorRealm, "minor_realm": cul.MinorRealm, "listening_reward_realm": cul.ListeningRewardRealm,
+	})
+	if res.Error != nil {
+		return cul, res.Error
+	}
+	if res.RowsAffected != 1 {
+		return cul, storage.ErrCultivationNotFound
+	}
+	cul.TotalAudioTime = total
+	cul.SectListeningSettledHours = settled
+	return cul, nil
 }

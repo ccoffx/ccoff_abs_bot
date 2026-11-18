@@ -2593,16 +2593,16 @@ func handleUnlockSectCave(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, confirmed
 	telegram.ReplyText(bot, chatID, fmt.Sprintf("洞府解锁成功。\n消耗贡献：`%d`\n剩余贡献：`%d`", sectCaveUnlockContributionCost, contributionAfter))
 }
 
-func getUserTodayRawListeningSeconds(userID int64, absUserID string, now time.Time) float64 {
+func getUserTodayBonusListeningSeconds(userID int64, absUserID string, now time.Time) float64 {
 	if strings.TrimSpace(absUserID) != "" {
 		if _, ok := RefreshDailyListeningStatsFromABS(userID, absUserID); ok {
 			if stat, cacheOK := getTodayDailyListeningStat(userID, now); cacheOK {
-				return stat.CappedSeconds
+				return stat.BonusListeningSeconds()
 			}
 		}
 	}
 	if stat, ok := getTodayDailyListeningStat(userID, now); ok {
-		return stat.CappedSeconds
+		return stat.BonusListeningSeconds()
 	}
 	return 0
 }
@@ -2647,7 +2647,7 @@ func handleStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 		telegram.ReplyText(bot, chatID, "用户档案读取失败，请稍后再试。")
 		return
 	}
-	baseRawSeconds := getUserTodayRawListeningSeconds(userID, u.AbsUserID, now)
+	baseRawSeconds := getUserTodayBonusListeningSeconds(userID, u.AbsUserID, now)
 
 	var endAt time.Time
 	var personalPrestigeAfter int
@@ -2778,7 +2778,7 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 		targets = append(targets, retreatTarget{
 			Member: m,
 			User:   u,
-			Base:   getUserTodayRawListeningSeconds(m.UserID, u.AbsUserID, now),
+			Base:   getUserTodayBonusListeningSeconds(m.UserID, u.AbsUserID, now),
 		})
 	}
 	if len(targets) == 0 {
@@ -3179,9 +3179,14 @@ func dailySectCaveRetreatBonusHours(stat model.DailyListeningStat, retreats []mo
 		provenSeconds, err := provenSectRetreatSecondsForDay(retreat, day)
 		if err != nil {
 			log.Printf("闭关听书凭据读取失败: %s", textfmt.FormatPlainError(err))
-			continue
+			// Evidence cannot safely reconstruct any retreat component on this day.
+			// Freeze the whole component, avoiding double counting valid retreats.
+			if stat.CultivationApplied && stat.AppliedEligible {
+				return math.Max(0, stat.AppliedBaseHours-stat.AppliedEffectiveHours)
+			}
+			return 0
 		}
-		raw := math.Min(stat.CappedSeconds, base+provenSeconds)
+		raw := math.Min(stat.BonusListeningSeconds(), base+provenSeconds)
 		total += calculateSectRetreatBonusHoursForRecord(raw, base, end.Sub(start).Seconds())
 	}
 	return math.Min(total, math.Max(0, sectDailyCultivationHourCap-stat.EffectiveHours))
@@ -3225,11 +3230,8 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 // persistence. Do not acquire a second read lock: a queued batch writer would
 // block recursive RLock calls while waiting for the caller's first read lock.
 func recordDailyListeningStatsFromABSDaysUnlocked(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
-	adjusted, corrected, _, validation, err := prepareDailyListeningDaysChecked(userID, absUserID, days, fetchedAt)
-	if err != nil {
-		return err
-	}
-	return recordPreparedDailyListeningStats(userID, absUserID, adjusted, corrected, fetchedAt, validation)
+	_, err := recordOfficialDailyListeningStats(userID, absUserID, days, fetchedAt, nil)
+	return err
 }
 
 // Do not replace an already corrected day with source-day totals when session
@@ -3313,96 +3315,6 @@ func prepareDailyListeningDaysChecked(userID int64, absUserID string, days map[s
 	return adjusted, corrected, sessions, validation, nil
 }
 
-func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time, validations ...*dailyListeningValidation) error {
-	return recordPreparedDailyListeningStatsWithReport(userID, absUserID, days, correctedDays, fetchedAt, nil, validations...)
-}
-
-func recordPreparedDailyListeningStatsWithReport(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time, reportTotal *float64, validations ...*dailyListeningValidation) error {
-	if storage.DB == nil || userID == 0 {
-		return nil
-	}
-	if fetchedAt.IsZero() {
-		fetchedAt = time.Now()
-	}
-
-	records := buildOfficialDailyListeningRecords(userID, absUserID, days, fetchedAt, time.Now())
-	for index := range records {
-		if correctedDays[records[index].DayKey] {
-			records[index].Source = dailyListeningCrossDaySource
-			records[index].FetchStatus = dailyListeningCrossDayStatus
-			records[index].RefreshReason = "abs_cross_day_rebalance"
-		}
-		if len(validations) > 0 {
-			applyDailyListeningValidation(&records[index], validations[0])
-		}
-	}
-	if len(records) == 0 {
-		return nil
-	}
-
-	var previous []model.DailyListeningStat
-	var written []model.DailyListeningStat
-	stale := false
-	err := storage.DB.Transaction(func(tx *gorm.DB) error {
-		if err := lockCurrentListeningBindingInTx(tx, userID, absUserID); err != nil {
-			return err
-		}
-		dayKeys := make([]string, 0, len(records))
-		for _, record := range records {
-			dayKeys = append(dayKeys, record.DayKey)
-		}
-		if err := tx.Where("user_id = ? AND day_key IN ?", userID, dayKeys).Find(&previous).Error; err != nil {
-			return err
-		}
-		// Compare instants in Go: SQLite text timestamps may have different offsets.
-		for _, old := range previous {
-			if old.AbsUserID == strings.TrimSpace(absUserID) && old.LastFetchedAt.After(fetchedAt) && !old.LastFetchedAt.After(time.Now()) {
-				stale = true
-				return nil
-			}
-		}
-		oldByDay := make(map[string]model.DailyListeningStat, len(previous))
-		for _, old := range previous {
-			oldByDay[old.DayKey] = old
-		}
-		changed := make([]model.DailyListeningStat, 0, len(records))
-		today := SectDayKey(time.Now())
-		for _, record := range records {
-			old, exists := oldByDay[record.DayKey]
-			if exists && record.DayKey != today && sameDailyListeningInput(old, record) {
-				continue
-			}
-			changed = append(changed, record)
-		}
-		if len(changed) > 0 {
-			written = changed
-			res := tx.Clauses(dailyListeningStatOnConflict(time.Now())).Create(&changed)
-			if res.Error != nil {
-				return res.Error
-			}
-			if res.RowsAffected == 0 {
-				return fmt.Errorf("DAILY_LISTENING_STATS_UPSERT_MISSED")
-			}
-		}
-		if reportTotal != nil {
-			return saveListeningReportStatsInTx(tx, userID, strings.TrimSpace(absUserID), *reportTotal, fetchedAt)
-		}
-		return nil
-	})
-	if err != nil {
-		log.Printf("每日听书统计写入失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return err
-	}
-	if stale {
-		written = records
-	}
-	logDailyListeningWrite(userID, absUserID, previous, written, fetchedAt, stale)
-	if stale {
-		return fmt.Errorf("DAILY_LISTENING_STATS_STALE_SNAPSHOT")
-	}
-	return nil
-}
-
 func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map[string]float64, fetchedAt, recordedAt time.Time) []model.DailyListeningStat {
 	if userID == 0 {
 		return nil
@@ -3458,34 +3370,6 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 		})
 	}
 	return records
-}
-
-func dailyListeningStatOnConflict(now time.Time) clause.OnConflict {
-	// daily_listening_stats uses a SQLite partial unique index, so the upsert
-	// target must include the same deleted_at predicate.
-	return clause.OnConflict{
-		Columns: []clause.Column{
-			{Name: "user_id"},
-			{Name: "day_key"},
-		},
-		TargetWhere: clause.Where{Exprs: []clause.Expression{
-			clause.Eq{Column: clause.Column{Name: "deleted_at"}, Value: nil},
-		}},
-		DoUpdates: clause.Assignments(map[string]interface{}{
-			"official_raw_seconds": gorm.Expr("excluded.official_raw_seconds"),
-			"validation_json":      gorm.Expr("excluded.validation_json"),
-			"raw_seconds":          gorm.Expr("excluded.raw_seconds"),
-			"capped_seconds":       gorm.Expr("excluded.capped_seconds"),
-			"effective_hours":      gorm.Expr("excluded.effective_hours"),
-			"abs_user_id":          gorm.Expr("excluded.abs_user_id"),
-			"last_fetched_at":      gorm.Expr("excluded.last_fetched_at"),
-			"source":               gorm.Expr("excluded.source"),
-			"fetch_status":         gorm.Expr("excluded.fetch_status"),
-			"refresh_reason":       gorm.Expr("excluded.refresh_reason"),
-			"updated_at":           now,
-			"deleted_at":           nil,
-		}),
-	}
 }
 
 func getTodayDailyListeningStat(userID int64, now time.Time) (model.DailyListeningStat, bool) {
@@ -3670,12 +3554,36 @@ func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, for
 		log.Printf("每日听书 ABS 统计解析失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return nil, false
 	}
+	if !forAbuse {
+		var wire struct {
+			Days map[string]json.RawMessage `json:"days"`
+		}
+		if err := json.Unmarshal(body, &wire); err != nil {
+			return nil, false
+		}
+		for _, value := range wire.Days {
+			if strings.TrimSpace(string(value)) == "null" {
+				outcome, failure = "stats_parse_failed", "ABS_DAILY_NULL_VALUE"
+				return nil, false
+			}
+		}
+	}
 	if stats.Days == nil {
 		outcome = "stats_days_missing"
 		log.Printf("每日听书 ABS 统计缺少 days 明细: user=%d", userID)
 		return nil, false
 	}
 
+	if !forAbuse {
+		reportTotal := abs.AuthoritativeABSListeningTotalSeconds(stats.TotalTime, stats.Days)
+		days, err := recordOfficialDailyListeningStats(userID, absUserID, stats.Days, startedAt, &reportTotal)
+		if err != nil {
+			outcome, failure = "write_failed", textfmt.FormatPlainError(err)
+			return nil, false
+		}
+		outcome = "updated"
+		return days, true
+	}
 	// Order concurrent responses by request start, so an older request cannot
 	// overwrite a more recent snapshot just because its response arrived later.
 	fetchedAt := startedAt
@@ -3697,16 +3605,11 @@ func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, for
 		}
 		return nil, false
 	}
-	reportTotal := abs.AuthoritativeABSListeningTotalSeconds(stats.TotalTime, stats.Days)
-	if err := recordPreparedDailyListeningStatsWithReport(userID, absUserID, adjustedDays, correctedDays, fetchedAt, &reportTotal, validation); err != nil {
-		outcome, failure = "write_failed", textfmt.FormatPlainError(err)
-		return nil, false
-	}
-	outcome = "updated"
-	if forAbuse {
-		return listeningAbuseProvenDays(sessions, abuseDays), true
-	}
-	return validation.Seconds, true
+	_ = adjustedDays
+	_ = correctedDays
+	_ = validation
+	outcome = "evidence_only"
+	return listeningAbuseProvenDays(sessions, abuseDays), true
 }
 
 func refreshSectMembersDailyListeningStats(sectID int64, limit int) int {

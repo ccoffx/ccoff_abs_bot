@@ -30,6 +30,13 @@ func TestListeningRefreshRejectsBindingChangedDuringABSRequest(t *testing.T) {
 			var once sync.Once
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+					if !backfill {
+						once.Do(func() {
+							if err := storage.DB.Model(&model.User{}).Where("telegram_id = 1").Update("abs_user_id", "replacement").Error; err != nil {
+								t.Error(err)
+							}
+						})
+					}
 					fmt.Fprint(w, `{"days":{"2026-10-27":3600}}`)
 					return
 				}

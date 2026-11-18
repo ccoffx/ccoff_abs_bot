@@ -452,6 +452,9 @@ func dailyListeningValidationNotice(stat model.DailyListeningStat) string {
 		return ""
 	}
 	parts := []string{}
+	if detail.Anomalies["official_decrease_retained"] > 0 {
+		parts = append(parts, "ABS 时长减少，保留已认可时长，待管理员核查")
+	}
 	if detail.OverlapSeconds > 1e-6 {
 		parts = append(parts, fmt.Sprintf("已去除重叠听书 %.2f 小时", detail.OverlapSeconds/3600))
 	}

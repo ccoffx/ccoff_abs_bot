@@ -74,7 +74,7 @@ func setupListeningAbuseScheduleDB(t *testing.T) {
 		_ = conn.Close()
 	})
 	if err := db.AutoMigrate(&model.User{}, &model.AccountLifecycleClaim{}, &model.DailyListeningStat{}, &model.ListeningReportSnapshot{}, &model.SystemConfig{},
-		&model.ListeningAbuseRecord{}, &model.AuditLog{}, &model.ABSCrossDaySessionAdjustment{}, &model.SectCaveRetreat{}); err != nil {
+		&model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.ListeningAbuseRecord{}, &model.AuditLog{}, &model.ABSCrossDaySessionAdjustment{}, &model.SectCaveRetreat{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.InitializeAccountLifecycleGuards(db); err != nil {
@@ -262,9 +262,9 @@ func TestListeningAbuseRetriesCrossDayCorrectionFailures(t *testing.T) {
 			if day, err := storage.GetSystemConfigStringChecked(storage.ListeningAbuseLastScanDayKey); err != nil || day != "" {
 				t.Fatalf("failed correction completed scan: %q, %v", day, err)
 			}
-			// An uncorrected source-day total must not become a successful refresh.
-			if days, ok := RefreshDailyListeningStatsFromABS(1, "abs1"); ok {
-				t.Fatalf("failed correction accepted raw source-day totals: %v", days)
+			// Ordinary cultivation must remain independent of unavailable session evidence.
+			if days, ok := RefreshDailyListeningStatsFromABS(1, "abs1"); !ok || days["2026-10-27"] != 57600 {
+				t.Fatalf("ordinary refresh depends on session evidence: %v", days)
 			}
 			mu.Lock()
 			sessionsUnavailable = false

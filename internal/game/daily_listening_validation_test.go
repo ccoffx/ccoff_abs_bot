@@ -40,7 +40,7 @@ func TestDailyListeningCreditCollectsSessionDatesBeforeAllocating(t *testing.T) 
 	})
 	for attempt := 0; attempt < 3; attempt++ {
 		reverse.Store(attempt%2 == 1)
-		days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+		days, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 		if !ok || days[source] != 3600 || days[middle] != 86400 || days[last] != 3600 {
 			t.Fatalf("refresh %d changed calendar allocation: %v ok=%t", attempt, days, ok)
 		}
@@ -109,7 +109,7 @@ func TestDailyListeningValidationBoundedCrossDayRefresh(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{s}})
 	})
 	for i := 0; i < 2; i++ {
-		days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+		days, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 		if !ok || days[previous] != 0 || days[target] != 2*3600 {
 			t.Fatalf("bounded refresh %d: days=%v ok=%t", i, days, ok)
 		}
@@ -160,7 +160,7 @@ func TestDailyListeningValidationBackfillsSameDayOverlapAndResumes(t *testing.T)
 	if err := storage.DB.First(&cursor, cursor.ID).Error; err != nil || cursor.Completed || cursor.NextPage != 0 || cursor.DailyValidationVersion != dailyListeningValidationVersion {
 		t.Fatalf("old cursor not reset: %+v err=%v", cursor, err)
 	}
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 24*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 24*3600 {
 		t.Fatalf("unobserved history not preserved: %v %t", days, ok)
 	}
 	for batch := 0; batch < 2; batch++ {
@@ -175,7 +175,7 @@ func TestDailyListeningValidationBackfillsSameDayOverlapAndResumes(t *testing.T)
 		t.Fatalf("cursor failed to resume: %+v err=%v", cursor, err)
 	}
 	for i := 0; i < 2; i++ {
-		days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+		days, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 		if !ok || days[day] != 12*3600 {
 			t.Fatalf("persisted old overlap not deducted: days=%v ok=%t", days, ok)
 		}
@@ -219,7 +219,7 @@ func TestDailyListeningValidationReportAndAtomicFailure(t *testing.T) {
 	}
 	report := GetPersonalReport(abs.DefaultClient, "abs1")
 	stat := recoveryListeningDay(t, day)
-	for _, want := range []string{"今日实际听书: 24.00 小时", fmt.Sprintf("今日有效计入听书: %.2f 小时", span.Hours()), "已去除重叠听书"} {
+	for _, want := range []string{"今日实际听书: 24.00 小时", fmt.Sprintf("今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600), "超出实际时间范围的部分未计入"} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report missing %q: %s", want, report)
 		}
@@ -244,7 +244,7 @@ func TestDailyListeningValidationReportAndAtomicFailure(t *testing.T) {
 	}
 	fail.Store(true)
 	report = GetPersonalReport(abs.DefaultClient, "abs1")
-	if !strings.Contains(report, "使用上次成功统计") || !strings.Contains(report, fmt.Sprintf("今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600)) || !strings.Contains(report, "已去除重叠听书") {
+	if !strings.Contains(report, "使用上次成功统计") || !strings.Contains(report, fmt.Sprintf("今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600)) || !strings.Contains(report, "超出实际时间范围的部分未计入") {
 		t.Fatalf("cached report lost validated credit: %s", report)
 	}
 }
@@ -314,7 +314,7 @@ func TestDailyListeningValidationPersistsRawAndSurvivesRetry(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
 	for i := 0; i < 2; i++ {
-		eligible, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+		eligible, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 		if !ok || eligible[day] != 12*3600 {
 			t.Fatalf("repeat refresh=%v ok=%t", eligible, ok)
 		}
@@ -328,7 +328,7 @@ func TestDailyListeningValidationPersistsRawAndSurvivesRetry(t *testing.T) {
 		t.Fatalf("diagnostics not persisted: %+v err=%v", detail, err)
 	}
 	fail.Store(true)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("failed session request accepted")
 	}
 	after := recoveryListeningDay(t, day)

@@ -43,11 +43,11 @@ func TestDailyListeningZeroCorrectionPreservesValidBudget(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{a, b, c}})
 	})
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 12*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 12*3600 {
 		t.Fatalf("initial=%v ok=%t", days, ok)
 	}
 	zero.Store(true)
-	days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+	days, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 	if !ok || days[day] != 12*3600 {
 		t.Errorf("after ABS zeroed a: credited=%v ok=%t want12h", days, ok)
 	}
@@ -258,12 +258,12 @@ func TestDailyListeningOrdinaryDeletionBackfillResumes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); !ok || days[day] != 12*3600 {
+	if days, ok := refreshSessionEvidenceForTest(1, "abs1", true); !ok || days[day] != 12*3600 {
 		t.Fatalf("initial credited=%v ok=%t", days, ok)
 	}
 	before := recoveryListeningDay(t, day)
 	deleted.Store(true)
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("unconfirmed deletion spent a reduced budget on old sessions")
 	}
 	if err := advanceABSCrossDaySessionBackfill(time.Now()); err != nil {
@@ -274,7 +274,7 @@ func TestDailyListeningOrdinaryDeletionBackfillResumes(t *testing.T) {
 		t.Fatalf("reconciliation not scheduled: %+v err=%v", cursor, err)
 	}
 	// A refresh and a failed last page must not restart or finish the scan.
-	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+	if _, ok := refreshSessionEvidenceForTest(1, "abs1", true); ok {
 		t.Fatal("incomplete reconciliation accepted")
 	}
 	failLast.Store(true)
@@ -290,7 +290,7 @@ func TestDailyListeningOrdinaryDeletionBackfillResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+		days, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 		if !ok || days[day] != 12*3600 {
 			t.Fatalf("confirmed deletion did not preserve valid playback: %v %t", days, ok)
 		}

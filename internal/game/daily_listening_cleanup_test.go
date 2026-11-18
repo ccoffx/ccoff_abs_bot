@@ -57,7 +57,7 @@ func TestDailyListeningRecomputesDatesWithoutStoredAllocations(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 				})
 
-				days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
+				days, ok := refreshSessionEvidenceForTest(1, "abs1", true)
 				if !ok || days[target] != 3600 {
 					t.Fatalf("initial credit=%v ok=%t", days, ok)
 				}
@@ -78,7 +78,7 @@ func TestDailyListeningRecomputesDatesWithoutStoredAllocations(t *testing.T) {
 				}
 
 				for attempt := 0; attempt < 2; attempt++ {
-					days, ok = refreshDailyListeningStatsFromABS(1, "abs1", true)
+					days, ok = refreshSessionEvidenceForTest(1, "abs1", true)
 					if !ok {
 						t.Fatalf("refresh after correction failed: %v", days)
 					}
