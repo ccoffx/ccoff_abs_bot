@@ -222,7 +222,7 @@ const (
 	sectCreateCost               = 100
 	sectJoinCost                 = 10
 	sectRenameCost               = 50
-	sectInitialMaxUsers          = 15
+	sectInitialMaxUsers          = 24
 	sectMaxLevel                 = 10
 	sectMemberListPageSize       = 30
 	sectMemberPageCallbackPrefix = "sect_members_page:"
@@ -424,8 +424,9 @@ func getSectMaxMembers(level int) int {
 	if level <= 1 {
 		return sectInitialMaxUsers
 	}
-	// 每级增加一个基础名额，满级基础上限为 24；科技可继续增加名额。
-	return sectInitialMaxUsers + min(level-1, sectMaxLevel-1)
+	// 2 级容纳已有的 27 人宗门，此后每级增加一个名额，满级基础上限为 35。
+	// 科技仍按每级两个名额叠加，避免恢复到过大的宗门规模。
+	return sectInitialMaxUsers + 3 + min(level-2, sectMaxLevel-2)
 }
 
 func getSectUpgradeRequirement(level int) (fundsCost int, prestigeNeed int) {

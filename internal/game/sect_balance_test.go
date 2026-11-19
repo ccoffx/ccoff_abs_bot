@@ -15,8 +15,9 @@ func TestSectCapacityIncludesTechnology(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ level, tech, want int }{
-		{1, 0, 15}, {3, 0, 17}, {4, 0, 18}, {7, 0, 21}, {10, 0, 24},
-		{1, 5, 25}, {10, 2, 28}, {7, 5, 31}, {10, 5, 34}, {100, 5, 34},
+		{0, 0, 24}, {1, 0, 24}, {2, 0, 27}, {3, 0, 28}, {4, 0, 29},
+		{5, 0, 30}, {6, 0, 31}, {7, 0, 32}, {8, 0, 33}, {9, 0, 34}, {10, 0, 35},
+		{1, 5, 34}, {10, 2, 39}, {7, 5, 42}, {10, 5, 45}, {100, 5, 45},
 	} {
 		if err := storage.DB.Where("sect_id = ?", 1).Delete(&model.SectTechnology{}).Error; err != nil {
 			t.Fatal(err)
@@ -33,35 +34,59 @@ func TestSectCapacityIncludesTechnology(t *testing.T) {
 	}
 }
 
-func TestOverCapacitySectRejectsJoinWithoutChargingOrRemovingMembers(t *testing.T) {
-	bot := setupSectRegressionTest(t)
-	if err := storage.DB.AutoMigrate(&model.SectTechnology{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.DB.Model(&model.Sect{}).Where("id = 1").Update("member_count", 20).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.DB.Create(&model.User{TelegramID: 2, Points: 100}).Error; err != nil {
-		t.Fatal(err)
-	}
-	handleConfirmJoinSect(bot, &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: 2, Type: "private"}, From: &tgbotapi.User{ID: 2}}, "audit")
-	var user model.User
-	var sect model.Sect
-	if err := storage.DB.First(&user, "telegram_id = ?", 2).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.DB.First(&sect, 1).Error; err != nil {
-		t.Fatal(err)
-	}
-	var joins, members int64
-	if err := storage.DB.Model(&model.SectMember{}).Where("user_id = ?", 2).Count(&joins).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.DB.Model(&model.SectMember{}).Count(&members).Error; err != nil {
-		t.Fatal(err)
-	}
-	if user.Points != 100 || sect.MemberCount != 20 || joins != 0 || members != 1 {
-		t.Fatalf("rejected join mutated state: points=%d count=%d joins=%d members=%d", user.Points, sect.MemberCount, joins, members)
+func TestSectJoinCapacityBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		level, count int
+		join         bool
+	}{
+		{"level_one_full", 1, 24, false},
+		{"level_one_over_capacity", 1, 25, false},
+		{"level_two_last_slot", 2, 26, true},
+		{"level_two_full", 2, 27, false},
+		{"level_two_over_capacity", 2, 28, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bot := setupSectRegressionTest(t)
+			if err := storage.DB.AutoMigrate(&model.SectTechnology{}, &model.PointTransaction{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.Model(&model.Sect{}).Where("id = 1").Updates(map[string]any{"level": tc.level, "member_count": tc.count}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.Create(&model.User{TelegramID: 2, Points: 100}).Error; err != nil {
+				t.Fatal(err)
+			}
+			handleConfirmJoinSect(bot, &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: 2, Type: "private"}, From: &tgbotapi.User{ID: 2}}, "audit")
+			var user model.User
+			var sect model.Sect
+			if err := storage.DB.First(&user, "telegram_id = ?", 2).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.First(&sect, 1).Error; err != nil {
+				t.Fatal(err)
+			}
+			var joins, members, charges int64
+			if err := storage.DB.Model(&model.SectMember{}).Where("user_id = ?", 2).Count(&joins).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.Model(&model.SectMember{}).Count(&members).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.DB.Model(&model.PointTransaction{}).Where("user_id = ?", 2).Count(&charges).Error; err != nil {
+				t.Fatal(err)
+			}
+			wantPoints, wantCount := 100, tc.count
+			var wantJoins int64
+			if tc.join {
+				wantPoints -= sectJoinCost
+				wantCount++
+				wantJoins = 1
+			}
+			if user.Points != wantPoints || sect.MemberCount != wantCount || joins != wantJoins || members != 1+wantJoins || charges != wantJoins {
+				t.Fatalf("join boundary: points=%d count=%d joins=%d members=%d charges=%d", user.Points, sect.MemberCount, joins, members, charges)
+			}
+		})
 	}
 }
 
@@ -70,7 +95,7 @@ func TestSectMemberTechnologyUpgradeBeyondThirtyAllowsJoin(t *testing.T) {
 	if err := storage.DB.AutoMigrate(&model.SectTechnology{}, &model.SectTechnologyLog{}, &model.PointTransaction{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.DB.Model(&model.Sect{}).Where("id = 1").Updates(map[string]any{"level": 10, "funds": 10000, "prestige": 10000, "member_count": 30}).Error; err != nil {
+	if err := storage.DB.Model(&model.Sect{}).Where("id = 1").Updates(map[string]any{"level": 10, "funds": 10000, "prestige": 10000, "member_count": 41}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Model(&model.SectMember{}).Where("user_id = 1").Update("role", SectRoleOwner).Error; err != nil {
@@ -106,7 +131,7 @@ func TestSectMemberTechnologyUpgradeBeyondThirtyAllowsJoin(t *testing.T) {
 	if err := storage.DB.First(&member, "user_id = ?", 2).Error; err != nil {
 		t.Fatal(err)
 	}
-	if sect.MemberCount != 31 || user.Points != 90 || member.SectID != 1 {
+	if sect.MemberCount != 42 || user.Points != 90 || member.SectID != 1 {
 		t.Fatalf("join beyond thirty failed: count=%d points=%d member=%+v", sect.MemberCount, user.Points, member)
 	}
 }
