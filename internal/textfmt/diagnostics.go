@@ -217,6 +217,8 @@ func pointTransactionTypeText(txType string) string {
 		return "药园开垦"
 	case "garden_seed_buy":
 		return "购买种子"
+	case "garden_spirit_overflow":
+		return "药园灵气溢出"
 	case "garden_herb_sell":
 		return "药铺回收"
 	case "garden_recipe_unlock":

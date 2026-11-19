@@ -122,7 +122,7 @@ func TestRebindMigratesRelatedAssetsAndEncryptedReward(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range []any{&ghost, &winner, &plot, &model.Inventory{UserID: 101, ItemName: "item", Quantity: 9}, &model.Inventory{UserID: 202, ItemName: "item", Quantity: 3}, &model.SpiritFire{OwnerID: 101}, &model.Sect{OwnerID: 101}, &model.MarketplaceSecret{SellerID: 101, BuyerID: 303}, &model.RenewCode{CodeHash: "test", OwnerUserID: 101}, &model.ExchangeCodeReceipt{ID: "EXC-pending", UserID: 101, Kind: "invite", ReplyEncrypted: exchangeEncrypted}} {
+	for _, row := range []any{&ghost, &winner, &plot, &model.GardenProgress{UserID: 101, Experience: 7600}, &model.Inventory{UserID: 101, ItemName: "item", Quantity: 9}, &model.Inventory{UserID: 202, ItemName: "item", Quantity: 3}, &model.SpiritFire{OwnerID: 101}, &model.Sect{OwnerID: 101}, &model.MarketplaceSecret{SellerID: 101, BuyerID: 303}, &model.RenewCode{CodeHash: "test", OwnerUserID: 101}, &model.ExchangeCodeReceipt{ID: "EXC-pending", UserID: 101, Kind: "invite", ReplyEncrypted: exchangeEncrypted}} {
 		if err := storage.DB.Create(row).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -147,6 +147,10 @@ func TestRebindMigratesRelatedAssetsAndEncryptedReward(t *testing.T) {
 	if err := RebindLocalUserWithAudit(202, u.ID, u.AbsUserID); err != nil {
 		t.Fatal(err)
 	}
+	var progress model.GardenProgress
+	if err := storage.DB.Where("user_id = ?", 202).Take(&progress).Error; err != nil || progress.Experience != 7600 {
+		t.Fatalf("garden progress lost: %+v %v", progress, err)
+	}
 	var rebound model.User
 	if err := storage.DB.First(&rebound, u.ID).Error; err != nil || rebound.TelegramID != 202 || rebound.Points != 125 || rebound.AccountType != storage.AccountTypeTrial {
 		t.Fatalf("bad merged account: %+v %v", rebound, err)
@@ -158,7 +162,7 @@ func TestRebindMigratesRelatedAssetsAndEncryptedReward(t *testing.T) {
 	for _, check := range []struct {
 		value any
 		field string
-	}{{&model.SpiritFire{}, "owner_id"}, {&model.Sect{}, "owner_id"}, {&model.MarketplaceSecret{}, "seller_id"}, {&model.RenewCode{}, "owner_user_id"}, {&model.GardenPlot{}, "user_id"}, {&model.GardenPlanting{}, "user_id"}, {&model.GardenAlchemyRecord{}, "user_id"}, {&model.ExchangeCodeReceipt{}, "user_id"}} {
+	}{{&model.SpiritFire{}, "owner_id"}, {&model.Sect{}, "owner_id"}, {&model.MarketplaceSecret{}, "seller_id"}, {&model.RenewCode{}, "owner_user_id"}, {&model.GardenPlot{}, "user_id"}, {&model.GardenProgress{}, "user_id"}, {&model.GardenPlanting{}, "user_id"}, {&model.GardenAlchemyRecord{}, "user_id"}, {&model.ExchangeCodeReceipt{}, "user_id"}} {
 		var count int64
 		if err := storage.DB.Model(check.value).Where(check.field+" = ?", 202).Count(&count).Error; err != nil || count != 1 {
 			t.Fatalf("asset missing (%T): %d %v", check.value, count, err)

@@ -100,6 +100,7 @@ func InitDB() {
 		&model.WorldBossParticipant{},
 		&model.Inventory{},
 		&model.GardenPlot{},
+		&model.GardenProgress{},
 		&model.GardenPlanting{},
 		&model.GardenSeedPurchase{},
 		&model.GardenHerbMarketSale{},

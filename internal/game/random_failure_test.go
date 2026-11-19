@@ -86,7 +86,7 @@ func TestGardenEntropyFailureRollsBackHarvest(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			setupListeningAbuseScheduleDB(t)
-			if err := storage.DB.AutoMigrate(&model.GardenPlanting{}, &model.Inventory{}); err != nil {
+			if err := storage.DB.AutoMigrate(&model.GardenPlanting{}, &model.GardenProgress{}, &model.Inventory{}); err != nil {
 				t.Fatal(err)
 			}
 			if err := storage.DB.Exec("CREATE UNIQUE INDEX idx_test_inventory ON inventories(user_id, item_name) WHERE deleted_at IS NULL").Error; err != nil {
@@ -104,10 +104,10 @@ func TestGardenEntropyFailureRollsBackHarvest(t *testing.T) {
 				rand.Reader = &gameFailingEntropy{err: entropyErr}
 				defer func() { rand.Reader = previous }()
 				if all {
-					_, _, err := gardenHarvestAll(1)
+					_, err := gardenHarvestAll(1)
 					return err
 				}
-				_, _, err := gardenHarvestPlot(1, 2)
+				_, err := gardenHarvestPlot(1, 2)
 				return err
 			}()
 			if !errors.Is(err, entropyErr) {

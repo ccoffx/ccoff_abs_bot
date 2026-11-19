@@ -14,7 +14,6 @@ import (
 	"gorm.io/gorm/clause"
 
 	"ccoff-abs-bot/internal/model"
-	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/telegram"
 	"ccoff-abs-bot/internal/textfmt"
@@ -406,6 +405,10 @@ func HandleGardenCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		telegram.AnswerCallback(bot, cb.ID, "已返回药园")
 		text, markup := renderGardenHome(userID)
 		editGardenScreen(bot, chatID, messageID, text, markup)
+	case "level":
+		telegram.AnswerCallback(bot, cb.ID, "药园等级说明")
+		text, markup := renderGardenLevels(userID)
+		editGardenScreen(bot, chatID, messageID, text, markup)
 	case "fields":
 		telegram.AnswerCallback(bot, cb.ID, "灵田已刷新")
 		text, markup := renderGardenFields(userID)
@@ -458,22 +461,28 @@ func HandleGardenCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			telegram.AnswerCallback(bot, cb.ID, "灵田编号异常")
 			return true
 		}
-		qty, herb, err := gardenHarvestPlot(userID, plotNo)
+		result, err := gardenHarvestPlot(userID, plotNo)
 		if err != nil {
 			telegram.AnswerCallback(bot, cb.ID, GardenActionErrorText(err))
 		} else {
-			telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("收获 %s x%d", herb, qty))
+			telegram.AnswerCallback(bot, cb.ID, "收获成功")
 		}
 		text, markup := renderGardenFields(userID)
+		if err == nil {
+			text = result.text() + "\n\n" + text
+		}
 		editGardenScreen(bot, chatID, messageID, text, markup)
 	case "harvestall":
-		count, qty, err := gardenHarvestAll(userID)
+		result, err := gardenHarvestAll(userID)
 		if err != nil {
 			telegram.AnswerCallback(bot, cb.ID, GardenActionErrorText(err))
 		} else {
-			telegram.AnswerCallback(bot, cb.ID, fmt.Sprintf("收获 %d 块田，共 %d 株药草", count, qty))
+			telegram.AnswerCallback(bot, cb.ID, "收获成功")
 		}
 		text, markup := renderGardenFields(userID)
+		if err == nil {
+			text = result.text() + "\n\n" + text
+		}
 		editGardenScreen(bot, chatID, messageID, text, markup)
 	case "shop":
 		telegram.AnswerCallback(bot, cb.ID, "种子商店已刷新")
@@ -624,6 +633,7 @@ func renderGardenHome(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 		GardenCountText(int64(seedTotal), seedErr == nil),
 		GardenCountText(int64(herbTotal), herbErr == nil),
 		GardenCountText(recipeCount, recipeErr == nil))
+	text += "\n\n" + gardenProgressText(userID)
 	markup := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("灵田管理", "garden:fields"),
@@ -635,6 +645,7 @@ func renderGardenHome(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("丹方炼丹", "garden:recipes"),
+			tgbotapi.NewInlineKeyboardButtonData("等级说明", "garden:level"),
 		),
 	)
 	return text, markup
@@ -712,6 +723,7 @@ func renderGardenFields(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 }
 
 func renderGardenPlantList(userID int64, plotNo int) (string, tgbotapi.InlineKeyboardMarkup) {
+	experience, progressErr := gardenExperience(storage.DB, userID)
 	inv, invErr := gardenInventoryByNamesWithError(userID, gardenSeedItemNames())
 	if invErr != nil {
 		log.Printf("⚠️ 读取药园种子库存失败: user=%d err=%s", userID, textfmt.FormatPlainError(invErr))
@@ -728,7 +740,7 @@ func renderGardenPlantList(userID int64, plotNo int) (string, tgbotapi.InlineKey
 			if qty <= 0 {
 				continue
 			}
-			b.WriteString(fmt.Sprintf("%s：`%d` 枚，成熟 `%s`，产量 `%s`\n", textfmt.InventoryItemMarkdownName(cfg.SeedName), qty, gardenDurationText(cfg.GrowDuration), gardenYieldText(cfg)))
+			b.WriteString(fmt.Sprintf("%s：`%d` 枚，成熟 `%s`，产量 `%s`\n", textfmt.InventoryItemMarkdownName(cfg.SeedName), qty, gardenDurationPreview(cfg, experience, progressErr), gardenYieldText(cfg)))
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("种 %s", cfg.HerbName), fmt.Sprintf("garden:plant:%d:%s", plotNo, cfg.Key)),
 			))
@@ -745,6 +757,7 @@ func renderGardenPlantList(userID int64, plotNo int) (string, tgbotapi.InlineKey
 }
 
 func renderGardenSeedShop(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	experience, progressErr := gardenExperience(storage.DB, userID)
 	dayKey := storage.SignInDateKey(time.Now())
 	purchases, purchaseErr := gardenTodaySeedPurchasesWithError(userID, dayKey)
 	if purchaseErr != nil {
@@ -785,7 +798,7 @@ func renderGardenSeedShop(userID int64) (string, tgbotapi.InlineKeyboardMarkup) 
 		}
 		heldText := GardenCountText(int64(inv[cfg.SeedName]), invErr == nil)
 		b.WriteString(fmt.Sprintf("%s：`%d` 积分，产量 `%s`，成熟 `%s`，今日剩余 `%s`，持有 `%s`\n",
-			textfmt.InventoryItemMarkdownName(cfg.SeedName), cfg.Price, gardenYieldText(cfg), gardenDurationText(cfg.GrowDuration), leftText, heldText))
+			textfmt.InventoryItemMarkdownName(cfg.SeedName), cfg.Price, gardenYieldText(cfg), gardenDurationPreview(cfg, experience, progressErr), leftText, heldText))
 		label := fmt.Sprintf("买 %s（%d）", cfg.HerbName, cfg.Price)
 		if purchaseErr != nil {
 			label = fmt.Sprintf("%s 额度读取失败", cfg.HerbName)
@@ -1184,126 +1197,32 @@ func gardenPlantSeed(userID int64, plotNo int, seedKey string) error {
 		if res.RowsAffected == 0 {
 			return storage.ErrGardenSeedNotEnough
 		}
+		experience, err := gardenExperience(tx, userID)
+		if err != nil {
+			return err
+		}
+		level := gardenLevels[gardenLevel(experience)-1]
 		now := time.Now()
 		planting := model.GardenPlanting{
-			UserID:    userID,
-			PlotID:    plot.ID,
-			PlotNo:    plot.PlotNo,
-			SeedKey:   cfg.Key,
-			SeedName:  cfg.SeedName,
-			HerbName:  cfg.HerbName,
-			PlantedAt: now,
-			MaturesAt: now.Add(cfg.GrowDuration),
-			Status:    gardenStatusGrowing,
+			UserID:          userID,
+			PlotID:          plot.ID,
+			PlotNo:          plot.PlotNo,
+			SeedKey:         cfg.Key,
+			SeedName:        cfg.SeedName,
+			HerbName:        cfg.HerbName,
+			PlantedAt:       now,
+			MaturesAt:       now.Add(gardenGrowDuration(cfg.GrowDuration, level.GrowthReduction)),
+			Experience:      int(cfg.GrowDuration / time.Hour),
+			GrowthReduction: level.GrowthReduction,
+			OverflowChance:  level.OverflowChance,
+			OverflowReward:  gardenOverflowReward(cfg),
+			Status:          gardenStatusGrowing,
 		}
 		if err := createGardenPlantingInTx(tx, &planting); err != nil {
 			return err
 		}
 		return nil
 	})
-}
-
-func gardenHarvestPlot(userID int64, plotNo int) (int, string, error) {
-	var harvestedQty int
-	var herbName string
-	err := storage.DB.Transaction(func(tx *gorm.DB) error {
-		var planting model.GardenPlanting
-		if err := tx.Where("user_id = ? AND plot_no = ? AND status = ?", userID, plotNo, gardenStatusGrowing).First(&planting).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return storage.ErrGardenNoActivePlant
-			}
-			return err
-		}
-		if planting.MaturesAt.After(time.Now()) {
-			return storage.ErrGardenNotMature
-		}
-		cfg, ok := GardenSeedByKey(planting.SeedKey)
-		if !ok {
-			return storage.ErrGardenSeedUnknown
-		}
-		qty, err := security.RandomIntRange(cfg.YieldMin, cfg.YieldMax)
-		if err != nil {
-			return err
-		}
-		now := time.Now()
-		res := tx.Model(&model.GardenPlanting{}).
-			Where("id = ? AND status = ?", planting.ID, gardenStatusGrowing).
-			Updates(map[string]interface{}{
-				"status":       gardenStatusHarvest,
-				"harvested_at": now,
-				"quantity":     qty,
-			})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return storage.ErrGardenAlreadyHarvested
-		}
-		if err := GardenGrantInventoryInTx(tx, userID, cfg.HerbName, qty); err != nil {
-			return err
-		}
-		harvestedQty = qty
-		herbName = cfg.HerbName
-		return nil
-	})
-	return harvestedQty, herbName, err
-}
-
-func gardenHarvestAll(userID int64) (int, int, error) {
-	var harvestedPlots int
-	var harvestedQty int
-	err := storage.DB.Transaction(func(tx *gorm.DB) error {
-		txHarvestedPlots := 0
-		txHarvestedQty := 0
-		var plantings []model.GardenPlanting
-		if err := tx.Where("user_id = ? AND status = ? AND matures_at <= ?", userID, gardenStatusGrowing, time.Now()).
-			Order("plot_no asc").
-			Find(&plantings).Error; err != nil {
-			return err
-		}
-		if len(plantings) == 0 {
-			return storage.ErrGardenNoMaturePlant
-		}
-		for _, planting := range plantings {
-			cfg, ok := GardenSeedByKey(planting.SeedKey)
-			if !ok {
-				return storage.ErrGardenSeedUnknown
-			}
-			qty, err := security.RandomIntRange(cfg.YieldMin, cfg.YieldMax)
-			if err != nil {
-				return err
-			}
-			now := time.Now()
-			res := tx.Model(&model.GardenPlanting{}).
-				Where("id = ? AND status = ?", planting.ID, gardenStatusGrowing).
-				Updates(map[string]interface{}{
-					"status":       gardenStatusHarvest,
-					"harvested_at": now,
-					"quantity":     qty,
-				})
-			if res.Error != nil {
-				return res.Error
-			}
-			if res.RowsAffected == 0 {
-				continue
-			}
-			if err := GardenGrantInventoryInTx(tx, userID, cfg.HerbName, qty); err != nil {
-				return err
-			}
-			txHarvestedPlots++
-			txHarvestedQty += qty
-		}
-		if txHarvestedPlots == 0 {
-			return storage.ErrGardenNoMaturePlant
-		}
-		harvestedPlots = txHarvestedPlots
-		harvestedQty = txHarvestedQty
-		return nil
-	})
-	if err != nil {
-		return 0, 0, err
-	}
-	return harvestedPlots, harvestedQty, nil
 }
 
 func GardenSellHerbQuantity(userID int64, seedKey string, requestedQty int) (int, int, error) {

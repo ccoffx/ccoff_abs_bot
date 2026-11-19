@@ -26,6 +26,17 @@ func (GardenPlot) TableName() string {
 	return "garden_plots"
 }
 
+// GardenProgress 保存累计成功收获经验，等级由统一门槛表推导。
+type GardenProgress struct {
+	gorm.Model
+	UserID     int64 `gorm:"index;not null"`
+	Experience int64 `gorm:"not null;default:0"`
+}
+
+func (GardenProgress) TableName() string {
+	return "garden_progresses"
+}
+
 // 药园种植记录。
 // MVP 中成熟按 matures_at 即时计算，status=growing 表示未收获。
 type GardenPlanting struct {
@@ -41,6 +52,11 @@ type GardenPlanting struct {
 	HarvestedAt      *time.Time `gorm:"index"`
 	MatureNotifiedAt *time.Time `gorm:"index"`
 	Quantity         int        `gorm:"default:0"`
+	Experience       int        `gorm:"not null;default:0"`
+	GrowthReduction  int        `gorm:"not null;default:0"`
+	OverflowChance   int        `gorm:"not null;default:0"`
+	OverflowReward   int        `gorm:"not null;default:0"`
+	OverflowPoints   int        `gorm:"not null;default:0"`
 	Status           string     `gorm:"index;not null;default:'growing'"`
 }
 
