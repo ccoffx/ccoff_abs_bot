@@ -20,6 +20,9 @@ import (
 var tagSyncMutex sync.Mutex
 
 func SyncTags(bot *tgbotapi.BotAPI, now time.Time) {
+	if defaultGroupID() >= 0 {
+		return
+	}
 	started := time.Now()
 	// 网络同步串行，避免同一成员旧版本的请求覆盖新版本。
 	tagSyncMutex.Lock()
@@ -28,7 +31,7 @@ func SyncTags(bot *tgbotapi.BotAPI, now time.Time) {
 	var pending []model.TitleEquipment
 	current := now.Add(time.Since(started))
 	const dueCondition = "version > synced_version AND next_sync_at <= ? AND (rate_limit_until IS NULL OR rate_limit_until <= ?)"
-	if err := storage.DB.Select("chat_id", "user_id").Where(dueCondition, current, current).Order("next_sync_at, chat_id, user_id").Limit(10).Find(&pending).Error; err != nil {
+	if err := storage.DB.Select("chat_id", "user_id").Where("chat_id = ?", defaultGroupID()).Where(dueCondition, current, current).Order("next_sync_at, chat_id, user_id").Limit(10).Find(&pending).Error; err != nil {
 		log.Printf("⚠️ 读取称号同步任务失败: %s", textfmt.FormatPlainError(err))
 		return
 	}

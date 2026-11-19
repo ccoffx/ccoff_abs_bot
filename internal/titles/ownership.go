@@ -230,6 +230,9 @@ func EnsureMemberInTx(tx *gorm.DB, chatID, userID int64) error {
 }
 
 func TrackMember(chatID int64, name string, userID int64) error {
+	if chatID >= 0 || chatID != defaultGroupID() {
+		return nil
+	}
 	return Transaction(func(tx *gorm.DB) error {
 		if err := TrackGroupInTx(tx, chatID, name); err != nil {
 			return err
@@ -257,9 +260,9 @@ func RefreshDefaults() error {
 				}
 			}
 		}
-		// 先在其他群留下记录、后来才绑定账号的成员，也应自动获得默认称号。
+		// 当前官方群中先活动、后来才绑定账号的成员，也应自动获得默认称号。
 		var members []model.TitleMember
-		if err := tx.Where("NOT EXISTS (SELECT 1 FROM title_equipments e WHERE e.chat_id = title_members.chat_id AND e.user_id = title_members.user_id)").Find(&members).Error; err != nil {
+		if err := tx.Where("chat_id = ?", defaultGroupID()).Where("NOT EXISTS (SELECT 1 FROM title_equipments e WHERE e.chat_id = title_members.chat_id AND e.user_id = title_members.user_id)").Find(&members).Error; err != nil {
 			return err
 		}
 		for _, member := range members {
@@ -268,7 +271,7 @@ func RefreshDefaults() error {
 			}
 		}
 		var rows []model.TitleEquipment
-		if err := tx.Find(&rows).Error; err != nil {
+		if err := tx.Where("chat_id = ?", defaultGroupID()).Find(&rows).Error; err != nil {
 			return err
 		}
 		for _, e := range rows {

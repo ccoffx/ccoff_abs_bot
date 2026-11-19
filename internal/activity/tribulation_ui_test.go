@@ -476,7 +476,7 @@ func TestRealmTitleNativeTagLifecycleWithoutPlaying(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			setupTribulationTestDB(t)
 			previous := config.AppConfig
-			config.AppConfig = &config.Config{}
+			config.AppConfig = &config.Config{NoticeGroupID: -100}
 			t.Cleanup(func() { config.AppConfig = previous })
 			if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.CultivationRealmConfig{}, &model.CultivationMinorRealmConfig{}); err != nil {
 				t.Fatal(err)

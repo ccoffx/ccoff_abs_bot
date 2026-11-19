@@ -19,6 +19,7 @@ import (
 	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
 	"ccoff-abs-bot/internal/textfmt"
+	"ccoff-abs-bot/internal/titles"
 )
 
 func InitDB() {
@@ -187,6 +188,11 @@ func InitDB() {
 	}
 	if err := game.SeedDefaultCultivationConfigs(); err != nil {
 		log.Fatalf("斗气默认配置初始化失败: %s", textfmt.FormatPlainError(err))
+	}
+	if config.AppConfig.NoticeGroupID < 0 {
+		if err := titles.CleanupOtherGroups(); err != nil {
+			log.Fatalf("清理非官方群历史称号记录失败: %s", textfmt.FormatPlainError(err))
+		}
 	}
 	game.InitCultivationRuleCache()
 	if err := operations.StampCompatibility(sqlDB); err != nil {

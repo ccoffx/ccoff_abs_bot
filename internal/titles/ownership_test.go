@@ -161,7 +161,7 @@ func TestOtherTitleSelectionPreservedThenFallsBackToLatestRealm(t *testing.T) {
 
 func TestUnbindingRemovesRealmTagAndRebindingRestoresDefault(t *testing.T) {
 	setupTitleTestDB(t)
-	if err := TrackMember(-200, "另一个群", 1); err != nil {
+	if err := TrackMember(-100, "官方群", 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("status", "unbound").Error; err != nil {
@@ -170,7 +170,7 @@ func TestUnbindingRemovesRealmTagAndRebindingRestoresDefault(t *testing.T) {
 	if err := RefreshDefaults(); err != nil {
 		t.Fatal(err)
 	}
-	if e := titleTestEquipment(t, -200, 1); e.DesiredTag != "" {
+	if e := titleTestEquipment(t, -100, 1); e.DesiredTag != "" {
 		t.Fatal("unbound account kept realm tag", e)
 	}
 	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("status", "active").Error; err != nil {
@@ -179,7 +179,7 @@ func TestUnbindingRemovesRealmTagAndRebindingRestoresDefault(t *testing.T) {
 	if err := RefreshDefaults(); err != nil {
 		t.Fatal(err)
 	}
-	if e := titleTestEquipment(t, -200, 1); e.DesiredTag != "三星斗师" {
+	if e := titleTestEquipment(t, -100, 1); e.DesiredTag != "三星斗师" {
 		t.Fatal("rebinding did not restore realm", e)
 	}
 	// 数据库读取失败必须返回错误，不可按“没有账号”清空标签。
@@ -189,14 +189,14 @@ func TestUnbindingRemovesRealmTagAndRebindingRestoresDefault(t *testing.T) {
 	if err := RefreshDefaults(); err == nil {
 		t.Fatal("configuration read error treated as no title")
 	}
-	if e := titleTestEquipment(t, -200, 1); e.DesiredTag != "三星斗师" {
+	if e := titleTestEquipment(t, -100, 1); e.DesiredTag != "三星斗师" {
 		t.Fatal("failed refresh erased tag", e)
 	}
 }
 
 func TestBindingAfterGroupActivityAddsDefaultWithoutAnotherMessage(t *testing.T) {
 	setupTitleTestDB(t)
-	if err := TrackMember(-200, "另一个群", 3); err != nil {
+	if err := TrackMember(-100, "官方群", 3); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Model(&model.User{}).Where("telegram_id = ?", 3).Update("abs_user_id", "newly-bound").Error; err != nil {
@@ -205,7 +205,7 @@ func TestBindingAfterGroupActivityAddsDefaultWithoutAnotherMessage(t *testing.T)
 	if err := RefreshDefaults(); err != nil {
 		t.Fatal(err)
 	}
-	if e := titleTestEquipment(t, -200, 3); e.TitleKey != RealmKey || e.DesiredTag != "斗之气一段" {
+	if e := titleTestEquipment(t, -100, 3); e.TitleKey != RealmKey || e.DesiredTag != "斗之气一段" {
 		t.Fatal("binding after group activity did not queue default", e)
 	}
 }
