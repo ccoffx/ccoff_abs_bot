@@ -27,6 +27,12 @@ func auditAccountSetup(t *testing.T) model.User {
 			t.Fatal(err)
 		}
 	}
+	if err := storage.InitializeGardenProductionTotals(storage.DB); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.InitializeSectShopContributionTotals(storage.DB); err != nil {
+		t.Fatal(err)
+	}
 	expiry := time.Now().Add(72 * time.Hour)
 	u := model.User{TelegramID: 101, Username: "audit_trial", AbsUserID: "audit_abs", AccountType: storage.AccountTypeTrial, ExpireAt: &expiry, Points: 100}
 	if err := storage.DB.Create(&u).Error; err != nil {
@@ -47,6 +53,37 @@ func TestAuditRebindMustMigrateInventory(t *testing.T) {
 	storage.DB.Model(&model.Inventory{}).Where("user_id = ?", 202).Count(&count)
 	if count != 1 {
 		t.Fatalf("rebind reports success but new owner inventory rows=%d; original asset remains at Telegram ID 101", count)
+	}
+}
+
+func TestRebindMaintainsDerivedBusinessTotals(t *testing.T) {
+	u := auditAccountSetup(t)
+	now := time.Now()
+	for _, row := range []any{
+		&model.GardenPlanting{UserID: 101, Status: "harvested", HarvestedAt: &now, Quantity: 4},
+		&model.GardenAlchemyRecord{UserID: 101, Quantity: 3},
+		&model.SectShopPurchase{SectID: 5, UserID: 101, CostContribution: 25},
+	} {
+		if err := storage.DB.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RebindLocalUserWithAudit(202, u.ID, u.AbsUserID); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{101, 202} {
+		var garden model.GardenProductionTotal
+		var shop model.SectShopContributionTotal
+		if err := storage.DB.First(&garden, "user_id = ?", id).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.DB.First(&shop, "sect_id = 5 AND user_id = ?", id).Error; err != nil {
+			t.Fatal(err)
+		}
+		if id == 101 && (garden.HarvestCount != 0 || garden.AlchemyCount != 0 || shop.Spent != 0) ||
+			id == 202 && (garden.HarvestCount != 4 || garden.AlchemyCount != 3 || shop.Spent != 25) {
+			t.Fatalf("rebind lost or duplicated totals: garden=%+v shop=%+v", garden, shop)
+		}
 	}
 }
 

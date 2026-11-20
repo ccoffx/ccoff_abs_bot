@@ -137,10 +137,13 @@ func (DailyListeningStat) TableName() string {
 
 // ABS metadata is synchronized separately from report rendering.
 type ListeningReportSnapshot struct {
-	UserID            int64 `gorm:"primaryKey"`
-	AbsUserID         string
-	RawTotalSeconds   float64
-	StatsFetchedAt    time.Time
+	UserID          int64 `gorm:"primaryKey"`
+	AbsUserID       string
+	RawTotalSeconds float64
+	StatsFetchedAt  time.Time
+	// Last successful official inputs and credited amounts; source mutations
+	// invalidate this cache in the same transaction through database triggers.
+	OfficialInputJSON string `gorm:"not null;default:''"`
 	FinishedBooks     int
 	ListeningBooks    int
 	ProgressFetchedAt time.Time

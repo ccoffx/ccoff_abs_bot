@@ -184,6 +184,15 @@ func InitDB() {
 	if err := storage.InitializeDatabaseIndexes(storage.DB); err != nil {
 		log.Fatalf("数据库索引初始化失败: %s", textfmt.FormatPlainError(err))
 	}
+	if err := storage.InitializeGardenProductionTotals(storage.DB); err != nil {
+		log.Fatalf("药园累计产出初始化失败: %s", textfmt.FormatPlainError(err))
+	}
+	if err := storage.InitializeSectShopContributionTotals(storage.DB); err != nil {
+		log.Fatalf("宗门累计消费初始化失败: %s", textfmt.FormatPlainError(err))
+	}
+	if err := storage.InitializeListeningInputCache(storage.DB); err != nil {
+		log.Fatalf("听书同步快照保护初始化失败: %s", textfmt.FormatPlainError(err))
+	}
 	if err := storage.MigrateLegacyRedPacketNoticeTargets(storage.DB, config.AppConfig.NoticeGroupID); err != nil {
 		log.Fatalf("历史红包公告目标迁移失败: %s", textfmt.FormatPlainError(err))
 	}

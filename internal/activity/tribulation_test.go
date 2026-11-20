@@ -46,6 +46,9 @@ func setupTribulationTestDB(t *testing.T) string {
 	if err := storage.DB.AutoMigrate(&model.DailyListeningStat{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.InitializeGardenProductionTotals(storage.DB); err != nil {
+		t.Fatal(err)
+	}
 	if err := storage.DB.Exec(`CREATE UNIQUE INDEX idx_tribulation_active_chat ON tribulation_rounds(chat_id) WHERE status IN ('publishing','active','settling')`).Error; err != nil {
 		t.Fatal(err)
 	}

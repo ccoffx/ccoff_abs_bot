@@ -2298,9 +2298,10 @@ func freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID string) (sectSecr
 	if !fresh {
 		return sectSecretRealmListeningSnapshot{}, false
 	}
-	effectiveHours, okHours := totalCultivationEffectiveHoursFromDailyStats(u.TelegramID, now)
+	_, okHours := syncCultivationFromDailyListeningStatsAt(u.TelegramID, now)
+	effectiveHours, totalOK := secretRealmCultivationTotal(u.TelegramID)
 	rawSeconds, okRaw := sumDailyListeningRawSeconds(u.TelegramID)
-	if !okHours || !okRaw {
+	if !okHours || !totalOK || !okRaw {
 		return sectSecretRealmListeningSnapshot{}, false
 	}
 	return sectSecretRealmListeningSnapshot{
@@ -2333,7 +2334,7 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
 	}
 
-	effectiveHours := calculateEffectiveCultivationHoursFromABSDays(stats.Days)
+	effectiveHours := 0.0
 	rawSeconds := sumSectSecretRealmRawListeningSeconds(stats.Days)
 	if storage.DB != nil {
 		var u model.User
@@ -2341,7 +2342,8 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		if readErr == nil {
 			if err := recordDailyListeningStatsFromABSDaysUnlocked(u.TelegramID, absUserID, stats.Days, fetchedAt); err == nil {
 				// 秘境基线使用落库的累计净修为。
-				syncedEffectiveHours, ok := totalCultivationEffectiveHoursFromDailyStats(u.TelegramID, time.Now())
+				// The official source write already settled all changed days atomically.
+				syncedEffectiveHours, ok := secretRealmCultivationTotal(u.TelegramID)
 				if !ok {
 					return sectSecretRealmListeningSnapshot{}, storage.ErrDailyListeningStatsReadFailed
 				}
@@ -2357,8 +2359,34 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("read secret realm user: %w", readErr)
 	}
 
+	effectiveHours = calculateEffectiveCultivationHoursFromABSDays(stats.Days)
 	return sectSecretRealmListeningSnapshot{
 		EffectiveHours: effectiveHours,
 		RawSeconds:     rawSeconds,
 	}, nil
+}
+
+// Secret-realm snapshots must reject broken retreat evidence, even though ordinary
+// settlement deliberately freezes an affected component. Read the settled profile
+// and validate evidence in one snapshot without reconstructing historical days.
+func secretRealmCultivationTotal(userID int64) (float64, bool) {
+	var total float64
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		var profile model.Cultivation
+		if err := tx.Where("user_id = ?", userID).First(&profile).Error; err != nil {
+			return err
+		}
+		var retreats []model.SectCaveRetreat
+		if err := tx.Select("listening_evidence_json").Where("user_id = ? AND start_at <= ?", userID, time.Now()).Find(&retreats).Error; err != nil {
+			return err
+		}
+		for _, retreat := range retreats {
+			if _, err := decodeSectRetreatEvidence(retreat); err != nil {
+				return err
+			}
+		}
+		total = profile.TotalAudioTime
+		return nil
+	})
+	return total, err == nil
 }

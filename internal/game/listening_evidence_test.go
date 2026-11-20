@@ -192,9 +192,6 @@ func TestSecretRealmUsesHistoricalRetreatTotalAndFailsClosed(t *testing.T) {
 	if !ok || math.Abs(local.EffectiveHours-7.2) > 1e-9 {
 		t.Fatalf("local snapshot lost history: %+v %t", local, ok)
 	}
-	if err := storage.DB.Create(&model.Cultivation{UserID: 1, TotalAudioTime: 7.2}).Error; err != nil {
-		t.Fatal(err)
-	}
 	updateCultivationAudioHours(1, snapshot.EffectiveHours)
 	var cultivation model.Cultivation
 	if err := storage.DB.Where("user_id = ?", 1).First(&cultivation).Error; err != nil || math.Abs(cultivation.TotalAudioTime-7.2) > 1e-9 {

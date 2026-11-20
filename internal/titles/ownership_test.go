@@ -39,6 +39,9 @@ func setupTitleTestDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	majors, minors := realm.Defaults(), realm.DefaultMinors()
+	if err := storage.InitializeGardenProductionTotals(db); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Create(&majors).Error; err != nil {
 		t.Fatal(err)
 	}

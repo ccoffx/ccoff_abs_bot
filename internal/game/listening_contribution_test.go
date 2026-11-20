@@ -31,6 +31,7 @@ func setupListeningContributionTest(t *testing.T) (*gorm.DB, time.Time, model.Da
 	t.Cleanup(func() { storage.DB = old; pool.Close() })
 	models := append(append(spiritfire.Models(), &model.SectOwnerBonusRevision{}, &model.SectOwnerBonusState{}), &model.User{}, &model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.DailyListeningStat{}, &model.ListeningReportSnapshot{}, &model.SectCaveRetreat{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.AuditLog{})
 	contributionMust(t, db.AutoMigrate(models...))
+	contributionMust(t, storage.InitializeListeningInputCache(db))
 	contributionMust(t, db.Exec("CREATE UNIQUE INDEX ux_contribution_cultivation ON cultivations(user_id)").Error)
 	now := time.Now()
 	contributionMust(t, spiritfire.Initialize(db, now.AddDate(0, 0, -3)))

@@ -24,6 +24,28 @@ func createActivityTitleRows(t *testing.T, rows ...any) {
 	}
 }
 
+func TestGardenTitleRefreshDoesNotReadProductionHistory(t *testing.T) {
+	setupTitleTestDB(t)
+	now := time.Now()
+	createActivityTitleRows(t,
+		&model.GardenPlanting{UserID: 1, Status: "harvested", HarvestedAt: &now, Quantity: 9},
+		&model.GardenAlchemyRecord{UserID: 2, Quantity: 7})
+	// Once totals are committed, refreshing ranks has no dependency on either
+	// history table. Missing totals are still an error (covered separately).
+	for _, source := range []any{&model.GardenPlanting{}, &model.GardenAlchemyRecord{}} {
+		if err := storage.DB.Migrator().DropTable(source); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refreshRankTest(t)
+	if h := rankHolderTest(t, rankings.HarvestTitle, 1); h.Score != 9 {
+		t.Fatal(h)
+	}
+	if h := rankHolderTest(t, rankings.AlchemyTitle, 2); h.Score != 7 {
+		t.Fatal(h)
+	}
+}
+
 func TestMonthlyListeningTitleUsesValidatedCurrentBindingAndBeijingDates(t *testing.T) {
 	setupTitleTestDB(t)
 	// UTC 11 月 30 日下午已经是北京时间 12 月 1 日。
@@ -408,11 +430,11 @@ func TestLifetimeGardenTitlesUseProducedQuantitiesAndSurviveInventoryChanges(t *
 	rankHolderTest(t, rankings.HarvestTitle, 2)
 	rankHolderTest(t, rankings.AlchemyTitle, 2)
 	updateRankUserTest(t, 2, map[string]any{"points": 999})
-	if err := storage.DB.Migrator().DropTable(&model.GardenAlchemyRecord{}); err != nil {
+	if err := storage.DB.Migrator().DropTable(&model.GardenProductionTotal{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := RefreshRankTitlesAfterListeningBatch(now, now); err == nil {
-		t.Fatal("source failure treated as an empty leaderboard")
+		t.Fatal("aggregate failure treated as an empty leaderboard")
 	}
 	rankHolderTest(t, rankings.WealthTitle, 1)
 	rankHolderTest(t, rankings.AlchemyTitle, 2)

@@ -13,6 +13,16 @@ import (
 	"gorm.io/gorm"
 )
 
+type officialListeningInput struct {
+	Raw    float64 `json:"r"`
+	Credit float64 `json:"c"`
+}
+
+type officialListeningInputCache struct {
+	Version int                               `json:"v"`
+	Days    map[string]officialListeningInput `json:"days"`
+}
+
 // Ordinary cultivation deliberately trusts ABS calendar totals. Session evidence
 // remains independent, for abuse and retreat windows only.
 func recordOfficialDailyListeningStats(userID int64, absID string, days map[string]float64, fetchedAt time.Time, reportTotal *float64) (map[string]float64, error) {
@@ -32,7 +42,6 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 			return nil, fmt.Errorf("ABS_DAILY_INVALID_VALUE: %s", day)
 		}
 	}
-	records := buildOfficialDailyListeningRecords(userID, absID, days, fetchedAt, now)
 	credited := make(map[string]float64)
 	var previous, written []model.DailyListeningStat
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
@@ -65,8 +74,55 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 		if err == nil && snapshot.AbsUserID == absID && snapshot.StatsFetchedAt.After(fetchedAt) && !snapshot.StatsFetchedAt.After(now) {
 			return fmt.Errorf("DAILY_LISTENING_STATS_STALE_SNAPSHOT")
 		}
-		if err := tx.Where("user_id = ?", userID).Find(&previous).Error; err != nil {
-			return err
+		cache := officialListeningInputCache{}
+		cacheOK := profile.OfficialDailyInitialized && profile.OfficialDailyAbsUserID == absID &&
+			snapshot.AbsUserID == absID && !snapshot.StatsFetchedAt.IsZero() && !snapshot.StatsFetchedAt.After(now) &&
+			json.Unmarshal([]byte(snapshot.OfficialInputJSON), &cache) == nil && cache.Version == 1 && cache.Days != nil
+		if !cacheOK {
+			cache = officialListeningInputCache{Version: 1, Days: make(map[string]officialListeningInput)}
+			// A legacy/imported source can be newer than the report metadata. Check
+			// for it without loading every day's full record. Valid caches are already
+			// guarded by source-invalidation triggers and the report timestamp above.
+			var stale int
+			if err := tx.Model(&model.DailyListeningStat{}).Select("1").
+				Where("user_id = ? AND abs_user_id = ? AND julianday(last_fetched_at) > julianday(?) AND julianday(last_fetched_at) <= julianday(?)", userID, absID, fetchedAt, now).
+				Limit(1).Scan(&stale).Error; err != nil {
+				return err
+			}
+			if stale != 0 {
+				return fmt.Errorf("DAILY_LISTENING_STATS_STALE_SNAPSHOT")
+			}
+		}
+		for day, input := range cache.Days {
+			credited[day] = input.Credit
+		}
+		changed := make(map[string]float64)
+		today := SectDayKey(now)
+		lastDay := SectDayKey(snapshot.StatsFetchedAt)
+		for day, raw := range days {
+			if day > today {
+				continue
+			}
+			old, exists := cache.Days[day]
+			// Revisit the previous fetch date across midnight: its elapsed-time cap
+			// may have increased even if ABS reports the same raw amount.
+			if !cacheOK || !exists || old.Raw != raw || day >= lastDay {
+				changed[day] = raw
+			}
+		}
+		changed[today] = days[today]
+		records := buildOfficialDailyListeningRecords(userID, absID, changed, fetchedAt, now)
+		keys := make([]string, 0, len(records))
+		for _, record := range records {
+			keys = append(keys, record.DayKey)
+		}
+		// Bound SQL parameters during bootstrap and large historical corrections.
+		for start := 0; start < len(keys); start += 400 {
+			var batch []model.DailyListeningStat
+			if err := tx.Where("user_id = ? AND day_key IN ?", userID, keys[start:min(start+400, len(keys))]).Find(&batch).Error; err != nil {
+				return err
+			}
+			previous = append(previous, batch...)
 		}
 		oldByDay := make(map[string]model.DailyListeningStat, len(previous))
 		for _, old := range previous {
@@ -88,6 +144,7 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 				record.OfficialBaselineHours, record.EffectiveHours = 0, 0
 			}
 			credited[record.DayKey] = record.CappedSeconds
+			cache.Days[record.DayKey] = officialListeningInput{Raw: record.OfficialRawSeconds, Credit: record.CappedSeconds}
 			if exists && record.DayKey != SectDayKey(now) && sameDailyListeningInput(old, record) && old.OfficialPolicy {
 				continue
 			}
@@ -117,7 +174,11 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 				total += seconds
 			}
 		}
-		return saveListeningReportStatsInTx(tx, userID, absID, total, fetchedAt)
+		inputJSON, err := json.Marshal(cache)
+		if err != nil {
+			return err
+		}
+		return saveListeningReportStatsInTx(tx, userID, absID, total, fetchedAt, string(inputJSON))
 	})
 	if err != nil {
 		return nil, err

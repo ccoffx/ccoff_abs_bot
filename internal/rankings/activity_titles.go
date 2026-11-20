@@ -51,14 +51,14 @@ func ActivityTitleCandidates(db *gorm.DB, now time.Time) ([]model.RankTitleHolde
 	}{
 		{ListeningTitle, TitlePeriodKey(ListeningTitle, now), "SUM(daily_listening_stats.capped_seconds) / 3600.0",
 			ListeningTitleRecords(db, now)},
-		{HarvestTitle, "", "SUM(garden_plantings.quantity)",
-			db.Model(&model.GardenPlanting{}).
-				Joins("JOIN users ON users.telegram_id = garden_plantings.user_id").
-				Where("garden_plantings.status = ? AND garden_plantings.harvested_at IS NOT NULL AND garden_plantings.quantity > 0", "harvested")},
-		{AlchemyTitle, "", "SUM(garden_alchemy_records.quantity)",
-			db.Model(&model.GardenAlchemyRecord{}).
-				Joins("JOIN users ON users.telegram_id = garden_alchemy_records.user_id").
-				Where("garden_alchemy_records.quantity > 0")},
+		{HarvestTitle, "", "MAX(garden_production_totals.harvest_count)",
+			db.Model(&model.GardenProductionTotal{}).
+				Joins("JOIN users ON users.telegram_id = garden_production_totals.user_id").
+				Where("garden_production_totals.harvest_count > 0")},
+		{AlchemyTitle, "", "MAX(garden_production_totals.alchemy_count)",
+			db.Model(&model.GardenProductionTotal{}).
+				Joins("JOIN users ON users.telegram_id = garden_production_totals.user_id").
+				Where("garden_production_totals.alchemy_count > 0")},
 	}
 	candidates := make([]model.RankTitleHolder, 0, len(queries))
 	for _, q := range queries {

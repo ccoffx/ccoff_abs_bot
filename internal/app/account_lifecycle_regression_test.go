@@ -33,6 +33,12 @@ func lifecycleFixture(t *testing.T, expireAt time.Time, suspended bool, handler 
 	if err := storage.InitializeAccountLifecycleGuards(storage.DB); err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.InitializeGardenProductionTotals(storage.DB); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.InitializeListeningInputCache(storage.DB); err != nil {
+		t.Fatal(err)
+	}
 	if err := storage.DB.AutoMigrate(&model.Sect{}, &model.SectMember{}, &model.SectCaveRetreat{}, &model.GardenPlot{}, &model.GardenRecipeUnlock{}, &model.Inventory{}, &model.GardenSeedPurchase{}, &model.GardenHerbMarketSale{}); err != nil {
 		t.Fatal(err)
 	}

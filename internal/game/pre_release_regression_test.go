@@ -28,6 +28,9 @@ func setupSectRegressionTest(t *testing.T) *tgbotapi.BotAPI {
 	if err := storage.DB.AutoMigrate(&model.Sect{}, &model.SectMember{}, &model.SectShopPurchase{}, &model.SectContributionLog{}, &model.SectShopRenewClaim{}, &model.AutoDeleteMsg{}, &model.SectLottery{}, &model.SectLotteryEntry{}, &model.SectLotteryPrize{}, &model.SectLotteryWinner{}, &model.SectLotteryReminder{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.InitializeSectShopContributionTotals(storage.DB); err != nil {
+		t.Fatal(err)
+	}
 	end := time.Now().Add(time.Hour)
 	for _, row := range []any{
 		&model.User{TelegramID: 1, Username: "user1", AbsUserID: "abs1", ExpireAt: &end},

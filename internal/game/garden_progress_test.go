@@ -42,6 +42,7 @@ func setupGardenProgressDB(t *testing.T) *gorm.DB {
 			}
 		}
 	}
+	contributionMust(t, storage.InitializeGardenProductionTotals(db))
 	if err := db.Create(&model.User{TelegramID: 1, Points: 100}).Error; err != nil {
 		t.Fatal(err)
 	}

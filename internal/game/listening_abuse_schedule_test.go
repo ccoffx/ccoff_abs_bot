@@ -77,6 +77,9 @@ func setupListeningAbuseScheduleDB(t *testing.T) {
 		&model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.ListeningAbuseRecord{}, &model.AuditLog{}, &model.ABSCrossDaySessionAdjustment{}, &model.SectCaveRetreat{}); err != nil {
 		t.Fatal(err)
 	}
+	contributionMust(t, db.AutoMigrate(&model.GardenPlanting{}, &model.GardenAlchemyRecord{}))
+	contributionMust(t, storage.InitializeGardenProductionTotals(db))
+	contributionMust(t, storage.InitializeListeningInputCache(db))
 	if err := storage.InitializeAccountLifecycleGuards(db); err != nil {
 		t.Fatal(err)
 	}

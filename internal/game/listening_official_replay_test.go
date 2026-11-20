@@ -42,7 +42,8 @@ func TestOfficialDailySnapshotReplay(t *testing.T) {
 	prior := storage.DB
 	storage.DB = db
 	defer func() { storage.DB = prior }()
-	contributionMust(t, db.AutoMigrate(&model.Cultivation{}, &model.DailyListeningStat{}))
+	contributionMust(t, db.AutoMigrate(&model.Cultivation{}, &model.DailyListeningStat{}, &model.ListeningReportSnapshot{}))
+	contributionMust(t, storage.InitializeListeningInputCache(db))
 	var profile model.Cultivation
 	contributionMust(t, db.Where("user_id = ?", user).First(&profile).Error)
 	before := profile.TotalAudioTime

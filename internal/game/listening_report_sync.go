@@ -26,7 +26,7 @@ func saveListeningReportStats(userID int64, absID string, total float64, fetched
 
 // The caller holds the current-binding write guard. Sharing its transaction
 // with daily rows prevents a failed metadata write leaving a partial snapshot.
-func saveListeningReportStatsInTx(tx *gorm.DB, userID int64, absID string, total float64, fetchedAt time.Time) error {
+func saveListeningReportStatsInTx(tx *gorm.DB, userID int64, absID string, total float64, fetchedAt time.Time, officialInput ...string) error {
 	var previous model.ListeningReportSnapshot
 	err := tx.First(&previous, "user_id = ?", userID).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -40,6 +40,13 @@ func saveListeningReportStatsInTx(tx *gorm.DB, userID int64, absID string, total
 		previous = model.ListeningReportSnapshot{UserID: userID}
 	}
 	previous.AbsUserID, previous.RawTotalSeconds, previous.StatsFetchedAt = absID, total, fetchedAt
+	if len(officialInput) > 0 {
+		previous.OfficialInputJSON = officialInput[0]
+	} else {
+		// Metadata written without daily inputs cannot advance the cache's date
+		// boundary (especially across midnight). Rebuild it on the next sync.
+		previous.OfficialInputJSON = ""
+	}
 	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "user_id"}}, UpdateAll: true}).Create(&previous).Error
 }
 

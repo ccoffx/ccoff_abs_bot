@@ -1722,14 +1722,8 @@ func querySectContributionRankRows(db *gorm.DB, sectID int64, weekly bool, limit
 			sm.weekly_contribution,
 			`+sectTotalContributionSelectExpr()+` AS total_contribution
 		`).
-		Joins(`
-			LEFT JOIN (
-				SELECT sect_id, user_id, COALESCE(SUM(cost_contribution), 0) AS spent_contribution
-				FROM sect_shop_purchases
-				WHERE deleted_at IS NULL
-				GROUP BY sect_id, user_id
-			) AS ssp ON ssp.sect_id = sm.sect_id AND ssp.user_id = sm.user_id
-		`).
+		Joins(`LEFT JOIN sect_shop_contribution_totals AS ssp
+			ON ssp.sect_id = sm.sect_id AND ssp.user_id = sm.user_id`).
 		Where("sm.sect_id = ? AND sm.deleted_at IS NULL", sectID).
 		Order("total_contribution DESC, sm.joined_at ASC").
 		Limit(limit).
@@ -1738,7 +1732,7 @@ func querySectContributionRankRows(db *gorm.DB, sectID int64, weekly bool, limit
 }
 
 func sectTotalContributionSelectExpr() string {
-	return "sm.contribution + COALESCE(ssp.spent_contribution, 0)"
+	return "sm.contribution + COALESCE(ssp.spent, 0)"
 }
 
 func HandleDonateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawAmount string) {
@@ -2007,14 +2001,13 @@ func reserveSectShopRenewClaimTx(tx *gorm.DB, sectID int64, userID int64, monthK
 }
 
 func sectShopMemberTotalContributionTx(tx *gorm.DB, member model.SectMember) (int, error) {
-	var spent int64
-	if err := tx.Model(&model.SectShopPurchase{}).
+	var total model.SectShopContributionTotal
+	if err := tx.Model(&model.SectShopContributionTotal{}).
 		Where("sect_id = ? AND user_id = ?", member.SectID, member.UserID).
-		Select("COALESCE(SUM(cost_contribution), 0)").
-		Scan(&spent).Error; err != nil {
+		Take(&total).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, err
 	}
-	return member.Contribution + int(spent), nil
+	return member.Contribution + int(total.Spent), nil
 }
 
 // exchangeSectContributionForPrestige 贡献→声望兑换核心事务：
