@@ -159,6 +159,13 @@ type SectCaveRetreat struct {
 	// Durable session observations used to prove playback inside the retreat.
 	// Late playback outside StartAt/EndAt never contributes to the bonus.
 	ListeningEvidenceJSON string
+	// Independent, resumable evidence collection; completed history backfills
+	// must not prevent later retreats from observing new playback.
+	ListeningScanAbsUserID   string
+	ListeningScanPage        int
+	ListeningScanStartedAt   *time.Time
+	ListeningScanAttemptAt   *time.Time `gorm:"index"`
+	ListeningScanCompletedAt *time.Time
 
 	PersonalPrestigeCost int `gorm:"default:0"`
 	SectPrestigeCost     int `gorm:"default:0"`

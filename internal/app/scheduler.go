@@ -52,6 +52,23 @@ func startBackgroundJobs(bot *tgbotapi.BotAPI) {
 // Listening must not wait for backups, account lifecycle scans or abuse scans.
 func startListeningBackgroundJobs(bot *tgbotapi.BotAPI) {
 	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("闭关听书凭据调度异常: %v", r)
+					}
+				}()
+				if err := game.RunSectRetreatListeningSyncIfNeeded(time.Now()); err != nil {
+					log.Printf("闭关听书凭据同步失败: %s", textfmt.FormatPlainError(err))
+				}
+			}()
+			<-ticker.C
+		}
+	}()
+	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for {

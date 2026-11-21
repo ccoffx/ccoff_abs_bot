@@ -1,7 +1,6 @@
 package game
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -2324,14 +2323,9 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("ABS_STATUS_%d", code)
 	}
 
-	var stats struct {
-		Days map[string]float64 `json:"days"`
-	}
-	if err := json.Unmarshal(body, &stats); err != nil {
+	stats, err := parseOfficialListeningStats(body)
+	if err != nil {
 		return sectSecretRealmListeningSnapshot{}, err
-	}
-	if stats.Days == nil {
-		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
 	}
 
 	effectiveHours := 0.0

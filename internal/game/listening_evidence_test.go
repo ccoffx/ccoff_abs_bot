@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,43 +14,6 @@ import (
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
 )
-
-func TestListeningAbuseDoesNotPunishEstimatedMidnightPlayback(t *testing.T) {
-	setupListeningAbuseScheduleDB(t)
-	if err := storage.DB.Create(&model.User{TelegramID: 1, AbsUserID: "abs1", Role: "user", Status: "active"}).Error; err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/listening-stats"):
-			fmt.Fprint(w, `{"days":{"2026-10-26":58200,"2026-10-27":54000}}`)
-		case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
-			fmt.Fprint(w, `{"sessions":[
-    {"id":"previous","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T00:00:00+08:00","updatedAt":"2026-10-26T16:00:00+08:00","timeListening":57600},
-    {"id":"cross","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T23:50:00+08:00","updatedAt":"2026-10-27T00:10:00+08:00","timeListening":600},
-    {"id":"target","userId":"abs1","date":"2026-10-27","startedAt":"2026-10-27T08:00:00+08:00","updatedAt":"2026-10-27T23:00:00+08:00","timeListening":54000}]}`)
-		default:
-			t.Errorf("unexpected request (possible freeze): %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-	abs.DefaultClient = &abs.AbsClient{BaseURL: server.URL, Token: "test", HttpClient: server.Client()}
-	estimated, ok := refreshSessionEvidenceForTest(1, "abs1", true)
-	if !ok || math.Abs(estimated["2026-10-27"]-54300) > 1e-9 {
-		t.Fatalf("expected display estimate: %v %t", estimated, ok)
-	}
-	now, _ := time.Parse(time.RFC3339, "2026-10-28T00:10:00+08:00")
-	RunListeningAbuseMonitorIfNeeded(nil, now)
-	var penalties int64
-	if err := storage.DB.Model(&model.ListeningAbuseRecord{}).Count(&penalties).Error; err != nil || penalties != 0 {
-		t.Fatalf("estimated playback was punished: %d %v", penalties, err)
-	}
-	day, err := storage.GetSystemConfigStringChecked(storage.ListeningAbuseLastScanDayKey)
-	if err != nil || day != "2026-10-27" {
-		t.Fatalf("scan did not complete: %q %v", day, err)
-	}
-}
 
 func TestGuaranteedPlaybackWindowBounds(t *testing.T) {
 	start, _ := time.Parse(time.RFC3339, "2026-10-28T10:00:00+08:00")
@@ -205,83 +167,5 @@ func TestSecretRealmUsesHistoricalRetreatTotalAndFailsClosed(t *testing.T) {
 	}
 	if _, ok := freshSectSecretRealmSnapshotFromLocalDailyStats("abs1"); ok {
 		t.Fatal("local fallback discarded broken historical evidence")
-	}
-}
-
-func TestListeningAbuseProvesMissingOfficialDates(t *testing.T) {
-	for _, tc := range []struct {
-		name, stats, sessions string
-		wantAction            string
-		wantPatches           int
-	}{
-		{
-			name:       "yesterday_missing",
-			stats:      `{"days":{"2026-10-26":61200}}`,
-			sessions:   `[{"id":"cross","userId":"abs1","date":"2026-10-26","startedAt":"2026-10-26T23:00:00+08:00","updatedAt":"2026-10-27T16:00:00+08:00","timeListening":61200}]`,
-			wantAction: storage.ListeningAbuseActionWarning,
-		},
-		{
-			name:  "previous_day_missing",
-			stats: `{"days":{"2026-10-27":57600}}`,
-			sessions: `[
-    {"id":"cross","userId":"abs1","date":"2026-10-25","startedAt":"2026-10-25T23:00:00+08:00","updatedAt":"2026-10-26T16:00:00+08:00","timeListening":61200},
-    {"id":"target","userId":"abs1","date":"2026-10-27","startedAt":"2026-10-27T00:00:00+08:00","updatedAt":"2026-10-27T16:00:00+08:00","timeListening":57600}]`,
-			wantAction:  storage.ListeningAbuseActionFreeze,
-			wantPatches: 1,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			setupListeningAbuseScheduleDB(t)
-			if err := storage.DB.Create(&model.User{TelegramID: 1, AbsUserID: "abs1", Role: "user", Status: "active"}).Error; err != nil {
-				t.Fatal(err)
-			}
-			var patches atomic.Int64
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case strings.HasSuffix(r.URL.Path, "/listening-stats"):
-					fmt.Fprint(w, tc.stats)
-				case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
-					fmt.Fprint(w, `{"sessions":`+tc.sessions+`}`)
-				case r.URL.Path == "/api/users/abs1" && r.Method == http.MethodGet:
-					fmt.Fprint(w, `{"id":"abs1","username":"user1","type":"user","permissions":{},"librariesAccessible":[]}`)
-				case r.URL.Path == "/api/users/abs1" && r.Method == http.MethodPatch:
-					patches.Add(1)
-					fmt.Fprint(w, `{}`)
-				default:
-					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-					w.WriteHeader(http.StatusNotFound)
-				}
-			}))
-			defer server.Close()
-			abs.DefaultClient = &abs.AbsClient{BaseURL: server.URL, Token: "test", HttpClient: server.Client()}
-			now, _ := time.Parse(time.RFC3339, "2026-10-28T00:10:00+08:00")
-			RunListeningAbuseMonitorIfNeeded(nil, now)
-			var records []model.ListeningAbuseRecord
-			if err := storage.DB.Find(&records).Error; err != nil {
-				t.Fatal(err)
-			}
-			if len(records) != 1 {
-				t.Fatalf("records=%v; want one %s", records, tc.wantAction)
-			}
-			record := records[0]
-			if record.Action != tc.wantAction || math.Abs(record.RawHours-16) > 1e-9 {
-				t.Fatalf("incorrect action or target hours: %+v", record)
-			}
-			if tc.wantPatches > 0 && math.Abs(record.PreviousRawHours-16) > 1e-9 {
-				t.Fatalf("missing previous-day evidence: %+v", record)
-			}
-			if int(patches.Load()) != tc.wantPatches {
-				t.Fatalf("freeze requests=%d want %d", patches.Load(), tc.wantPatches)
-			}
-			day, err := storage.GetSystemConfigStringChecked(storage.ListeningAbuseLastScanDayKey)
-			if err != nil || day != "2026-10-27" {
-				t.Fatalf("scan not completed after processing evidence: %q %v", day, err)
-			}
-			RunListeningAbuseMonitorIfNeeded(nil, now.Add(10*time.Minute))
-			var count int64
-			if err := storage.DB.Model(&model.ListeningAbuseRecord{}).Count(&count).Error; err != nil || count != 1 {
-				t.Fatalf("completed scan repeated: %d %v", count, err)
-			}
-		})
 	}
 }

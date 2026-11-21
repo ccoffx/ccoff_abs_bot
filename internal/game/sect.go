@@ -1,7 +1,6 @@
 package game
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -3539,32 +3538,10 @@ func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, for
 		return nil, false
 	}
 
-	var stats struct {
-		TotalTime float64            `json:"totalTime"`
-		Days      map[string]float64 `json:"days"`
-	}
-	if err := json.Unmarshal(body, &stats); err != nil {
+	stats, err := parseOfficialListeningStats(body)
+	if err != nil {
 		outcome, failure = "stats_parse_failed", textfmt.FormatPlainError(err)
 		log.Printf("每日听书 ABS 统计解析失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return nil, false
-	}
-	if !forAbuse {
-		var wire struct {
-			Days map[string]json.RawMessage `json:"days"`
-		}
-		if err := json.Unmarshal(body, &wire); err != nil {
-			return nil, false
-		}
-		for _, value := range wire.Days {
-			if strings.TrimSpace(string(value)) == "null" {
-				outcome, failure = "stats_parse_failed", "ABS_DAILY_NULL_VALUE"
-				return nil, false
-			}
-		}
-	}
-	if stats.Days == nil {
-		outcome = "stats_days_missing"
-		log.Printf("每日听书 ABS 统计缺少 days 明细: user=%d", userID)
 		return nil, false
 	}
 
@@ -3657,48 +3634,13 @@ func getTodaySectListeningHoursFromABS(userID int64, now time.Time) (float64, bo
 		return 0, false
 	}
 
-	statsDays, ok := RefreshDailyListeningStatsFromABS(userID, u.AbsUserID)
-	if !ok {
+	if _, ok := RefreshDailyListeningStatsFromABS(userID, u.AbsUserID); !ok {
 		return 0, false
 	}
-
-	loc := time.FixedZone("CST", 8*3600)
-	localNow := now.In(loc)
-	localDayKey := localNow.Format("2006-01-02")
-	todaySeconds, todayPresent := statsDays[localDayKey]
-	matchedKey := ""
-	if todaySeconds > 0 {
-		matchedKey = localDayKey
-	}
-
-	if !todayPresent || todaySeconds <= 0 {
-		if cachedHours, cacheOK := freshTodaySectListeningHoursFromCache(userID, now); cacheOK && cachedHours > 0 {
-			log.Printf(
-				"宗门今日净修为 ABS 当日数据缺失，使用本地缓存: user=%d local_day=%s today_present=%t available_days=%d cached_hours=%.3f",
-				userID,
-				localDayKey,
-				todayPresent,
-				len(statsDays),
-				cachedHours,
-			)
-			return cachedHours, true
-		}
-	}
-
-	effectiveHours := calculateSectEffectiveHoursFromSeconds(todaySeconds)
-
-	log.Printf(
-		"宗门今日净修为 ABS 当日数据命中: user=%d local_day=%s matched_day=%s today_present=%t available_days=%d seconds=%.0f effective_hours=%.3f",
-		userID,
-		localNow.Format("2006-01-02"),
-		matchedKey,
-		todayPresent,
-		len(statsDays),
-		todaySeconds,
-		effectiveHours,
-	)
-
-	return effectiveHours, true
+	// Tasks and cached reads share the saved cultivation basis, including
+	// migration/rebind baselines and retreat bonuses. Refolding credited seconds
+	// here would pay excluded account history as new task progress.
+	return GetTodaySectListeningHoursFromCache(userID, now)
 }
 
 func sectStartOfDay(t time.Time) time.Time {

@@ -13,6 +13,41 @@ import (
 	"gorm.io/gorm"
 )
 
+type officialListeningStats struct {
+	TotalTime float64
+	Days      map[string]float64
+}
+
+// Decode all ordinary daily inputs consistently before any caller can write
+// them. JSON null is unknown data, not a numeric correction to zero.
+func parseOfficialListeningStats(body []byte) (officialListeningStats, error) {
+	var wire struct {
+		TotalTime float64                    `json:"totalTime"`
+		Days      map[string]json.RawMessage `json:"days"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return officialListeningStats{}, err
+	}
+	if wire.Days == nil {
+		return officialListeningStats{}, fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
+	}
+	stats := officialListeningStats{TotalTime: wire.TotalTime, Days: make(map[string]float64, len(wire.Days))}
+	for day, value := range wire.Days {
+		if strings.TrimSpace(string(value)) == "null" {
+			return officialListeningStats{}, fmt.Errorf("ABS_DAILY_NULL_VALUE: %s", day)
+		}
+		var seconds float64
+		if err := json.Unmarshal(value, &seconds); err != nil {
+			return officialListeningStats{}, fmt.Errorf("ABS_DAILY_INVALID_VALUE: %s: %w", day, err)
+		}
+		if !validDailyListeningDayKey(day) || seconds < 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+			return officialListeningStats{}, fmt.Errorf("ABS_DAILY_INVALID_VALUE: %s", day)
+		}
+		stats.Days[day] = seconds
+	}
+	return stats, nil
+}
+
 type officialListeningInput struct {
 	Raw    float64 `json:"r"`
 	Credit float64 `json:"c"`

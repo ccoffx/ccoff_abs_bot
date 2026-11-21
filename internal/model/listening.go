@@ -81,7 +81,7 @@ type ListeningAbuseRecord struct {
 	PreviousRawHours float64
 
 	Action string `gorm:"index;not null"` // warning / freeze
-	Status string `gorm:"index;not null"` // warning_sent / active / released / release_blocked
+	Status string `gorm:"index;not null"` // warning_sent / revoked / active / released / release_blocked
 
 	FreezeStartAt *time.Time `gorm:"index"`
 	FreezeEndAt   *time.Time `gorm:"index"`

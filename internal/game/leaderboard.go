@@ -21,17 +21,6 @@ import (
 	"ccoff-abs-bot/internal/textfmt"
 )
 
-// 解析统计接口的专用结构体
-type AbsStatsData struct {
-	RecentSessions []struct {
-		Date          string  `json:"date"`
-		TimeListening float64 `json:"timeListening"`
-		MediaMetadata struct {
-			Title string `json:"title"`
-		} `json:"mediaMetadata"`
-	} `json:"recentSessions"`
-}
-
 // 排序用的键值对结构
 type kv struct {
 	Key   string
@@ -131,8 +120,7 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 	// 🚨 升级1：将单一的时长 Map 升级为多维度的结构体 Map
 	bookStatsMap := make(map[string]*BookStat)
 	statsSuccess := 0
-	statsRequestFailures := 0
-	statsParseFailures := 0
+	bookStatsFailures := 0
 	cultivationReadFailures := 0
 
 	var wg sync.WaitGroup
@@ -164,37 +152,13 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 				dataMu.Unlock()
 			}
 
-			body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(user.AbsUserID), nil)
-			if err != nil || code != 200 {
+			localBookMap, err := fetchLeaderboardBookStats(user.AbsUserID, timeframe, validDates, monthPrefix)
+			if err != nil {
 				dataMu.Lock()
-				statsRequestFailures++
+				bookStatsFailures++
 				dataMu.Unlock()
+				log.Printf("榜单书籍会话读取失败: user=%d timeframe=%s err=%s", user.TelegramID, textfmt.FormatPlainValue(timeframe), textfmt.FormatPlainError(err))
 				return
-			}
-
-			var stats AbsStatsData
-			if err := json.Unmarshal(body, &stats); err != nil {
-				dataMu.Lock()
-				statsParseFailures++
-				dataMu.Unlock()
-				return
-			}
-
-			// 局部字典也同步升级
-			localBookMap := make(map[string]*BookStat)
-
-			// 🚨 升级2：统计热门书籍（同时记录次数和时长）
-			for _, session := range stats.RecentSessions {
-				isValid := isLeaderboardDateValid(session.Date, timeframe, validDates, monthPrefix)
-				bookName := session.MediaMetadata.Title
-				if isValid && session.TimeListening > 0 && bookName != "" {
-					if _, exists := localBookMap[bookName]; !exists {
-						localBookMap[bookName] = &BookStat{}
-					}
-					// 每次有效会话记为 1 次收听
-					localBookMap[bookName].ListenCount++
-					localBookMap[bookName].TotalTime += session.TimeListening
-				}
 			}
 
 			dataMu.Lock()
@@ -217,10 +181,11 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 		log.Printf("⚠️ 榜单净修为读取失败，跳过本期发送: timeframe=%s failed=%d", textfmt.FormatPlainValue(timeframe), cultivationReadFailures)
 		return
 	}
-	if statsRequestFailures > 0 || statsParseFailures > 0 {
-		log.Printf("⚠️ 榜单部分用户统计读取失败: timeframe=%s total=%d success=%d request_failed=%d parse_failed=%d",
-			textfmt.FormatPlainValue(timeframe), len(users), statsSuccess, statsRequestFailures, statsParseFailures)
+	if bookStatsFailures > 0 {
+		log.Printf("⚠️ 榜单书籍统计不完整，本期不展示书单: timeframe=%s total=%d success=%d failed=%d",
+			textfmt.FormatPlainValue(timeframe), len(users), statsSuccess, bookStatsFailures)
 	}
+
 	if statsSuccess == 0 && len(userTimeMap) == 0 {
 		log.Printf("⚠️ 榜单统计全部失败，跳过本期发送: timeframe=%s total=%d", textfmt.FormatPlainValue(timeframe), len(users))
 		return
@@ -263,7 +228,9 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 	}
 
 	// 🚨 升级5：渲染格式调整，展示双维度
-	if len(bookTop) > 0 {
+	if bookStatsFailures > 0 {
+		finalMsg += "📚 **万界风云书单**\n⏳ 书籍统计同步未完成，本期暂不展示。\n"
+	} else if len(bookTop) > 0 {
 		finalMsg += "📚 **万界风云书单 (热门追更)**\n"
 		bookMedals := []string{"🔥", "🌟", "✨", "📖", "📖"}
 		for i, kv := range bookTop {
@@ -275,6 +242,71 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 
 	if config.AppConfig.NoticeGroupID != 0 {
 		sendAndManageLeaderboardPin(bot, config.AppConfig.NoticeGroupID, finalMsg, timeframe)
+	}
+}
+
+// Book popularity needs complete session history: listening-stats.recentSessions
+// contains only ten entries. Aggregate each page locally, deduplicating IDs;
+// return nothing on failure so a partial history cannot become a full ranking.
+func fetchLeaderboardBookStats(absUserID, timeframe string, validDates map[string]bool, monthPrefix string) (map[string]*BookStat, error) {
+	books := make(map[string]*BookStat)
+	seen := make(map[string]bool)
+	for page := 0; ; page++ {
+		body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningSessionsPath(absUserID, page, dailyListeningSessionPageSize), nil)
+		if err != nil {
+			return nil, err
+		}
+		if code != 200 {
+			return nil, fmt.Errorf("ABS_BOOK_SESSIONS_STATUS_%d", code)
+		}
+		var payload struct {
+			Sessions []struct {
+				ID            string   `json:"id"`
+				Date          string   `json:"date"`
+				TimeListening *float64 `json:"timeListening"`
+				MediaMetadata struct {
+					Title string `json:"title"`
+				} `json:"mediaMetadata"`
+			} `json:"sessions"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, err
+		}
+		if payload.Sessions == nil {
+			return nil, fmt.Errorf("ABS_SESSIONS_FIELD_MISSING")
+		}
+		added := 0
+		for _, session := range payload.Sessions {
+			if strings.TrimSpace(session.ID) == "" {
+				return nil, fmt.Errorf("ABS_BOOK_SESSION_ID_MISSING")
+			}
+			if seen[session.ID] {
+				continue
+			}
+			seen[session.ID] = true
+			added++
+			if session.TimeListening == nil || *session.TimeListening == 0 {
+				continue
+			}
+			if !finitePositiveListeningSeconds(*session.TimeListening) {
+				return nil, fmt.Errorf("ABS_BOOK_SESSION_INVALID_SECONDS")
+			}
+			if !isLeaderboardDateValid(session.Date, timeframe, validDates, monthPrefix) || session.MediaMetadata.Title == "" {
+				continue
+			}
+			title := session.MediaMetadata.Title
+			if books[title] == nil {
+				books[title] = &BookStat{}
+			}
+			books[title].ListenCount++
+			books[title].TotalTime += *session.TimeListening
+		}
+		if len(payload.Sessions) < dailyListeningSessionPageSize {
+			return books, nil
+		}
+		if added == 0 {
+			return nil, fmt.Errorf("ABS_BOOK_SESSIONS_PAGINATION_STALLED")
+		}
 	}
 }
 

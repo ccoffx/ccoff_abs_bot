@@ -92,6 +92,7 @@ const (
 	ListeningAbuseActionFreeze  = "freeze"
 
 	ListeningAbuseStatusWarningSent    = "warning_sent"
+	ListeningAbuseStatusRevoked        = "revoked"
 	ListeningAbuseStatusActive         = "active"
 	ListeningAbuseStatusReleased       = "released"
 	ListeningAbuseStatusReleaseBlocked = "release_blocked"

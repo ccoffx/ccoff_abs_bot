@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -246,6 +247,29 @@ func listeningAbuseShouldFreeze(rawHours float64, previousRawHours float64) bool
 	return rawHours > storage.ListeningAbuseDailyRawHoursThreshold && previousRawHours > storage.ListeningAbuseDailyRawHoursThreshold
 }
 
+// Use exactly the saved raw seconds displayed by the listening report. Closed
+// days must not be reinterpreted through session timestamps during a scan.
+func savedListeningAbuseDays(userID int64, absUserID string, dayKey, previousKey string) (map[string]float64, error) {
+	var stats []model.DailyListeningStat
+	if err := storage.DB.Select("day_key", "raw_seconds", "last_fetched_at").
+		Where("user_id = ? AND abs_user_id = ? AND day_key IN ?", userID, absUserID, []string{dayKey, previousKey}).
+		Where("EXISTS (SELECT 1 FROM users WHERE users.telegram_id = ? AND users.abs_user_id = ? AND users.deleted_at IS NULL)", userID, absUserID).
+		Find(&stats).Error; err != nil {
+		return nil, err
+	}
+	days := make(map[string]float64, len(stats))
+	for _, stat := range stats {
+		if stat.LastFetchedAt.IsZero() {
+			continue
+		}
+		if stat.RawSeconds < 0 || math.IsNaN(stat.RawSeconds) || math.IsInf(stat.RawSeconds, 0) {
+			return nil, fmt.Errorf("LISTENING_ABUSE_INVALID_SAVED_REPORT: %s", stat.DayKey)
+		}
+		days[stat.DayKey] = stat.RawSeconds
+	}
+	return days, nil
+}
+
 func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, now time.Time) (int, int, int, error) {
 	previousKey, ok := previousDayKey(dayKey)
 	if !ok {
@@ -286,12 +310,16 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, now time.Time
 			continue
 		}
 
-		// The normal five-minute cache contains only today's value. A scan
-		// needs fresh complete days for yesterday and the day before.
-		days, refreshed := refreshDailyListeningStatsFromABS(u.TelegramID, u.AbsUserID, true, dayKey, previousKey)
-		time.Sleep(storage.DailyListeningRefreshRequestDelay)
-		if !refreshed {
+		days, err := savedListeningAbuseDays(u.TelegramID, u.AbsUserID, dayKey, previousKey)
+		if err != nil {
+			log.Printf("listening abuse saved report read failed: user=%d day=%s err=%s", u.TelegramID, textfmt.FormatPlainValue(dayKey), textfmt.FormatPlainError(err))
 			pending++
+			skipped++
+			continue
+		}
+		// No saved report means no basis for a penalty. A missing previous
+		// day can never establish two consecutive over-limit reports.
+		if _, exists := days[dayKey]; !exists {
 			skipped++
 			continue
 		}
@@ -369,7 +397,7 @@ func createListeningAbuseWarning(bot *tgbotapi.BotAPI, u model.User, dayKey stri
 		if err := tx.First(&current, "telegram_id = ?", u.TelegramID).Error; err != nil {
 			return err
 		}
-		if current.IsWhitelist || storage.IsSuperAdminUser(current) {
+		if current.AbsUserID != u.AbsUserID || current.Status != "active" || current.IsSuspended || current.AdminSuspended || current.IsWhitelist || storage.IsSuperAdminUser(current) || storage.IsUserExpiredAt(current, now) {
 			return nil
 		}
 		created, err := createListeningAbuseRecordInTx(tx, &record)
@@ -380,7 +408,7 @@ func createListeningAbuseWarning(bot *tgbotapi.BotAPI, u model.User, dayKey stri
 			return nil
 		}
 		return storage.WriteAuditLogInTx(tx, 0, "LISTENING_ABUSE_WARNING", strconv.FormatInt(u.TelegramID, 10), 0,
-			fmt.Sprintf("abnormal listening warning; record_id=%d day=%s raw_hours=%.2f threshold=%.2f",
+			fmt.Sprintf("abnormal listening warning; basis=saved_report_raw_seconds record_id=%d day=%s raw_hours=%.2f threshold=%.2f",
 				record.ID, dayKey, rawHours, storage.ListeningAbuseDailyRawHoursThreshold))
 	}); err != nil {
 		return false, err
@@ -389,7 +417,7 @@ func createListeningAbuseWarning(bot *tgbotapi.BotAPI, u model.User, dayKey stri
 		return false, nil
 	}
 
-	text := fmt.Sprintf("⚠️ **播放时长异常提醒**\n\n系统检测到您在北京时间 `%s` 的 可证明的 ABS 播放时长至少为 `%.2f` 小时，已超过 `%g` 小时。\n\n若连续两个自然日超过该阈值，系统将自动暂停听书账号 `24` 小时。请确认播放器、自动播放或多设备播放状态是否正常。",
+	text := fmt.Sprintf("⚠️ **播放时长异常提醒**\n\n系统保存的 `%s` 听书报告中，听书时长为 `%.2f` 小时，已超过 `%g` 小时。\n\n若连续两日的听书报告时长均超过该阈值，系统将自动暂停听书账号 `24` 小时。请确认播放器、自动播放或多设备播放状态是否正常。",
 		dayKey, rawHours, storage.ListeningAbuseDailyRawHoursThreshold)
 	noticeErr := sendListeningAbusePrivateNotice(bot, u.TelegramID, text)
 	if noticeErr != nil {
@@ -451,7 +479,7 @@ func startListeningAbuseFreeze(bot *tgbotapi.BotAPI, u model.User, dayKey string
 			return nil
 		}
 		if err := storage.WriteAuditLogInTx(tx, 0, "LISTENING_ABUSE_FREEZE", strconv.FormatInt(u.TelegramID, 10), 0,
-			fmt.Sprintf("auto freeze abnormal listening user; day=%s raw_hours=%.2f previous_day=%s previous_raw_hours=%.2f freeze_until=%s",
+			fmt.Sprintf("auto freeze abnormal listening user; basis=saved_report_raw_seconds day=%s raw_hours=%.2f previous_day=%s previous_raw_hours=%.2f freeze_until=%s",
 				dayKey, rawHours, previousDayKey, previousRawHours, freezeEnd.Format(time.RFC3339))); err != nil {
 			return err
 		}
@@ -467,7 +495,7 @@ func startListeningAbuseFreeze(bot *tgbotapi.BotAPI, u model.User, dayKey string
 		return false, nil
 	}
 
-	privateText := fmt.Sprintf("⛔ **账号已临时暂停**\n\n系统检测到您连续两个北京时间自然日可证明的播放时长均超过 `%g` 小时：\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n\n您的听书账号已暂停 `24` 小时，预计恢复时间：`%s`。\n\n本次仅暂停收听权限，不扣除积分、贡献或修为。请检查播放器自动播放、多设备播放或未关闭播放的问题。",
+	privateText := fmt.Sprintf("⛔ **账号已临时暂停**\n\n系统保存的连续两日听书报告时长均超过 `%g` 小时：\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n\n您的听书账号已暂停 `24` 小时，预计恢复时间：`%s`。\n\n本次仅暂停收听权限，不扣除积分、贡献或修为。请检查播放器自动播放、多设备播放或未关闭播放的问题。",
 		storage.ListeningAbuseDailyRawHoursThreshold, previousDayKey, previousRawHours, dayKey, rawHours, storage.DailyOperationsLocalTime(freezeEnd).Format("2006-01-02 15:04"))
 	noticeErr := sendListeningAbusePrivateNotice(bot, u.TelegramID, privateText)
 	groupErr := sendListeningAbuseGroupFreezeNotice(bot, u, dayKey, rawHours, previousDayKey, previousRawHours, freezeEnd)
@@ -568,7 +596,7 @@ func sendListeningAbuseGroupFreezeNotice(bot *tgbotapi.BotAPI, u model.User, day
 	if name == "" {
 		name = strconv.FormatInt(u.TelegramID, 10)
 	}
-	text := fmt.Sprintf("⚠️ **播放异常风控**\n\n道友 `%s` 因连续两天可证明的播放时长超限，听书账号已临时暂停 `24` 小时。\n\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n预计恢复：`%s`",
+	text := fmt.Sprintf("⚠️ **播放异常风控**\n\n道友 `%s` 因系统保存的连续两日听书报告时长超限，听书账号已临时暂停 `24` 小时。\n\n`%s`：`%.2f` 小时\n`%s`：`%.2f` 小时\n预计恢复：`%s`",
 		name, previousDayKey, previousRawHours, dayKey, rawHours, storage.DailyOperationsLocalTime(freezeEnd).Format("2006-01-02 15:04"))
 	msg := tgbotapi.NewMessage(config.AppConfig.NoticeGroupID, text)
 	msg.ParseMode = "Markdown"
