@@ -279,11 +279,16 @@ func createSectContributionLogInTx(tx *gorm.DB, logEntry *model.SectContribution
 }
 
 func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) bool {
-	if msg == nil || msg.From == nil {
+	if msg == nil || msg.From == nil || msg.Chat == nil {
 		return false
 	}
 
 	text = strings.TrimSpace(text)
+	if usage := sectCommandUsage(text); usage != "" {
+		telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable(usage))
+		return true
+	}
 	var run func()
 
 	switch {
@@ -339,11 +344,11 @@ func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string)
 	case strings.HasPrefix(text, "升级科技 "):
 		key := strings.TrimSpace(strings.TrimPrefix(text, "升级科技 "))
 		run = func() { handleUpgradeSectTechnology(bot, msg, key, false) }
-	case strings.HasPrefix(text, "宗门喇叭 "):
-		content := strings.TrimSpace(strings.TrimPrefix(text, "宗门喇叭 "))
+	case text == "宗门喇叭" || strings.HasPrefix(text, "宗门喇叭 "):
+		content := strings.TrimSpace(strings.TrimPrefix(text, "宗门喇叭"))
 		run = func() { handleSectHornStart(bot, msg, sectHornScopeSect, content) }
-	case strings.HasPrefix(text, "世界喇叭 "):
-		content := strings.TrimSpace(strings.TrimPrefix(text, "世界喇叭 "))
+	case text == "世界喇叭" || strings.HasPrefix(text, "世界喇叭 "):
+		content := strings.TrimSpace(strings.TrimPrefix(text, "世界喇叭"))
 		run = func() { handleSectHornStart(bot, msg, sectHornScopeWorld, content) }
 	// 注意：「确认宗门喇叭 / 确认世界喇叭」不在此路由，
 	// 必须落到 state_machine 的 WAITING_CONFIRM_SECT_HORN 会话分支，
@@ -398,6 +403,23 @@ func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string)
 	telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
 	run()
 	return true
+}
+
+func sectCommandUsage(text string) string {
+	switch text {
+	case "创建宗门", "确认创建宗门", "加入宗门", "确认加入宗门":
+		return text + " 名称"
+	case "宗门改名", "确认宗门改名", "修改宗门名称", "确认修改宗门名称":
+		return text + " 新名称"
+	case "捐献宗门", "贡献换声望":
+		return text + " 数量"
+	case "任命长老", "任命成员", "踢出宗门", "转让宗主":
+		return text + " Telegram用户ID"
+	case "升级科技", "确认升级科技":
+		return text + " 科技名称或编号"
+	default:
+		return ""
+	}
 }
 
 func validateSectName(name string) (string, bool) {

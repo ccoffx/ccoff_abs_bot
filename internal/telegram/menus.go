@@ -8,6 +8,14 @@ import (
 	"ccoff-abs-bot/internal/textfmt"
 )
 
+// NewInlineKeyboardMarkup preserves an empty array when there are no rows.
+// Telegram rejects inline_keyboard:null, including when clearing old buttons.
+func NewInlineKeyboardMarkup(rows ...[]tgbotapi.InlineKeyboardButton) tgbotapi.InlineKeyboardMarkup {
+	keyboard := make([][]tgbotapi.InlineKeyboardButton, len(rows))
+	copy(keyboard, rows)
+	return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: keyboard}
+}
+
 func TreasureShopBackMarkup() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(

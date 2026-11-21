@@ -399,7 +399,7 @@ func refreshBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *Break
 		return
 	}
 	text := formatBreakthroughRitualPanel(ritual, guards)
-	markup := tgbotapi.NewInlineKeyboardMarkup()
+	markup := telegram.NewInlineKeyboardMarkup()
 	if ritual.Status == BreakthroughRitualWaiting {
 		markup = breakthroughRitualMarkup(id)
 	} else if ritual.Status == BreakthroughRitualCancelled {
@@ -413,7 +413,7 @@ func refreshBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *Break
 	}
 	edit := tgbotapi.NewEditMessageText(ritual.ChatID, ritual.MessageID, text)
 	edit.ReplyMarkup = &markup
-	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil {
+	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
 		log.Printf("护道面板刷新失败: ritual=%d err=%s", id, textfmt.FormatTelegramSendError(err))
 	}
 }

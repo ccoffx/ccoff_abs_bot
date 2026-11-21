@@ -62,7 +62,7 @@ func EditBookRequestAdminMessage(bot *tgbotapi.BotAPI, chatID int64, messageID i
 	edit := tgbotapi.NewEditMessageText(chatID, messageID, formatBookRequestAdminText(req))
 	edit.DisableWebPagePreview = true
 	if removeButtons {
-		emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
+		emptyMarkup := telegram.NewInlineKeyboardMarkup()
 		edit.ReplyMarkup = &emptyMarkup
 	} else {
 		var keyboard tgbotapi.InlineKeyboardMarkup
@@ -286,7 +286,12 @@ func ShowMyBookRequests(bot *tgbotapi.BotAPI, chatID int64, userID int64) {
 	msg := tgbotapi.NewMessage(chatID, b.String())
 
 	// 待接单的工单提供取消入口（二次点击确认，确认后退还创建时扣除的积分）。
-	if cancelRows := buildBookRequestUserCancelRows(userID); len(cancelRows) > 0 {
+	cancelRows, err := buildBookRequestUserCancelRows(userID)
+	if err != nil {
+		telegram.SendPlainText(bot, chatID, "❌ 查询求书取消入口失败，请稍后再试。")
+		return
+	}
+	if len(cancelRows) > 0 {
 		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(cancelRows...)
 	}
 

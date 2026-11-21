@@ -382,7 +382,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if text == "📚 待处理求书" {
+		if text == "📚 待处理求书" || text == "待处理求书" {
 			if !books.IsBookRequestAdmin(userID) {
 				telegram.SendPlainText(bot, chatID, "❌ 权限不足。")
 				return
@@ -402,12 +402,12 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if text == "📋 我的求书" {
+		if text == "📋 我的求书" || text == "我的求书" {
 			books.ShowMyBookRequests(bot, chatID, userID)
 			return
 		}
 
-		if text == "📚 求书" {
+		if text == "📚 求书" || text == "求书" {
 			books.HandleBookRequestStart(bot, msg, session)
 			return
 		}
@@ -933,7 +933,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			}
 		}
 
-		if text == "📚 待处理求书" {
+		if text == "📚 待处理求书" || text == "待处理求书" {
 
 			if !books.IsBookRequestAdmin(userID) {
 				telegram.SendPlainText(bot, chatID, "❌ 权限不足。")

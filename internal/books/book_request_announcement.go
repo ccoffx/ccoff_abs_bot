@@ -1143,7 +1143,7 @@ func removeBookAnnouncementPreviewButtons(bot *tgbotapi.BotAPI, cb *tgbotapi.Cal
 	if bot == nil || cb == nil || cb.Message == nil {
 		return
 	}
-	emptyMarkup := tgbotapi.NewInlineKeyboardMarkup()
+	emptyMarkup := telegram.NewInlineKeyboardMarkup()
 	edit := tgbotapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID, emptyMarkup)
 	if _, err := bot.Request(edit); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
 		log.Printf("⚠️ 移除求书公告预览按钮失败: chat=%d msg=%d err=%s", cb.Message.Chat.ID, cb.Message.MessageID, textfmt.FormatTelegramSendError(err))

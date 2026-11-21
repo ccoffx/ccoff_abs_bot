@@ -230,6 +230,7 @@ func deliver(bot *tgbotapi.BotAPI, d *model.AnnouncementDelivery) {
 			return
 		}
 	}
+	markup = telegram.NewInlineKeyboardMarkup(markup.InlineKeyboard...)
 	var msg tgbotapi.Message
 	var err error
 	if d.ParentKey != "" {

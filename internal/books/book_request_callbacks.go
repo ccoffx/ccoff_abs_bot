@@ -79,15 +79,15 @@ func StartDelayedCallbackAck(bot *tgbotapi.BotAPI, callbackID string) {
 	}()
 }
 
-// buildBookRequestUserCancelRows 查询用户当前待接单工单，生成取消按钮行（无则返回 nil）。
-func buildBookRequestUserCancelRows(userID int64) [][]tgbotapi.InlineKeyboardButton {
+// buildBookRequestUserCancelRows distinguishes an empty list from a failed read.
+func buildBookRequestUserCancelRows(userID int64) ([][]tgbotapi.InlineKeyboardButton, error) {
 	var reqs []model.BookRequest
 	if err := storage.DB.Where("user_id = ? AND status = ?", userID, bookRequestStatusPending).
 		Order("created_at DESC").
 		Limit(5).
 		Find(&reqs).Error; err != nil {
 		log.Printf("⚠️ 求书取消按钮列表读取失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return nil
+		return nil, err
 	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
@@ -99,7 +99,7 @@ func buildBookRequestUserCancelRows(userID int64) [][]tgbotapi.InlineKeyboardBut
 			),
 		))
 	}
-	return rows
+	return rows, nil
 }
 
 // handleBookRequestUserCancel 用户取消自己的待接单工单（confirmed=false 时先做二次点击确认）。
@@ -203,12 +203,18 @@ func handleBookRequestUserCancel(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuer
 	RefreshStoredBookRequestAdminMessage(bot, updatedReq, true, 0, 0)
 
 	// 用户列表消息：取消完成后重建剩余待接单工单的取消按钮（无则清空），避免误触已取消工单。
+	buttonsRefreshFailed := false
 	if cb.Message != nil {
-		remainingRows := buildBookRequestUserCancelRows(cb.From.ID)
-		markup := tgbotapi.NewInlineKeyboardMarkup(remainingRows...)
-		edit := tgbotapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID, markup)
-		if _, err := bot.Request(edit); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
-			log.Printf("⚠️ 求书用户取消后按钮刷新失败: req=%d chat=%d msg=%d err=%s", reqID, cb.Message.Chat.ID, cb.Message.MessageID, textfmt.FormatTelegramSendError(err))
+		remainingRows, err := buildBookRequestUserCancelRows(cb.From.ID)
+		if err != nil {
+			buttonsRefreshFailed = true
+		} else {
+			markup := telegram.NewInlineKeyboardMarkup(remainingRows...)
+			edit := tgbotapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID, markup)
+			if _, err := bot.Request(edit); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
+				log.Printf("⚠️ 求书用户取消后按钮刷新失败: req=%d chat=%d msg=%d err=%s", reqID, cb.Message.Chat.ID, cb.Message.MessageID, textfmt.FormatTelegramSendError(err))
+				buttonsRefreshFailed = true
+			}
 		}
 	}
 
@@ -223,6 +229,9 @@ func handleBookRequestUserCancel(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuer
 		msgText += fmt.Sprintf("\n已退还 %d 积分。", refunded)
 	}
 	msgText += "\n如仍需要该书，可重新提交求书工单。"
+	if buttonsRefreshFailed {
+		msgText += "\n列表按钮暂未刷新，请发送“" + textfmt.Copyable("我的求书") + "”重新查看。"
+	}
 	telegram.SendPlainText(bot, cb.From.ID, msgText)
 }
 

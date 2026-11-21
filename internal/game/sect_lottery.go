@@ -171,6 +171,16 @@ func HandleSectLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text 
 		handleSectLotteryCreateStep(bot, msg, text, session)
 		return true
 	}
+	switch text {
+	case "参加宗门抽奖", "查看宗门抽奖", "重发宗门抽奖", "提醒宗门抽奖", "补发宗门抽奖提醒", "取消宗门抽奖":
+		telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
+		if !msg.Chat.IsPrivate() {
+			telegram.SendPlainText(bot, msg.Chat.ID, "宗门抽奖操作请私聊 Bot 执行。")
+		} else {
+			telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable(text+" 活动ID"))
+		}
+		return true
+	}
 
 	switch {
 	case text == "创建宗门抽奖":

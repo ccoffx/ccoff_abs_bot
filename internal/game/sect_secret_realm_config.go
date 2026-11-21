@@ -408,6 +408,11 @@ func HandleSectSecretRealmAdminCommand(bot *tgbotapi.BotAPI, message *tgbotapi.M
 		telegram.SendPlainText(bot, message.Chat.ID, "秘境配置指令格式错误。")
 		return true
 	}
+	parts := strings.Fields(normalizedText)
+	if usage := sectSecretRealmAdminWriteUsage(parts[0]); len(parts) != len(strings.Fields(usage)) {
+		telegram.SendPlainText(bot, message.Chat.ID, "用法："+textfmt.Copyable(usage))
+		return true
+	}
 
 	session.SetTemp("sect_realm_config_command", normalizedText)
 	session.SetStep("WAITING_SECT_REALM_CONFIG_REASON")
@@ -470,10 +475,21 @@ func isSectSecretRealmAdminCommand(text string) bool {
 }
 
 func isSectSecretRealmAdminWriteCommand(text string) bool {
-	text = normalizeSectSecretRealmAdminWriteCommand(text)
-	return strings.HasPrefix(text, "设置秘境档位 ") ||
-		strings.HasPrefix(text, "设置秘境倍率 ") ||
-		strings.HasPrefix(text, "设置秘境掉落 ")
+	parts := strings.Fields(normalizeSectSecretRealmAdminWriteCommand(text))
+	return len(parts) > 0 && sectSecretRealmAdminWriteUsage(parts[0]) != ""
+}
+
+func sectSecretRealmAdminWriteUsage(command string) string {
+	switch command {
+	case "设置秘境档位":
+		return "设置秘境档位 档位 字段 值"
+	case "设置秘境倍率":
+		return "设置秘境倍率 档位 大境界 贡献百分比 声望百分比"
+	case "设置秘境掉落":
+		return "设置秘境掉落 档位 大境界 物品名 数量 概率百分比"
+	default:
+		return ""
+	}
 }
 
 func normalizeSectSecretRealmAdminWriteCommand(text string) string {

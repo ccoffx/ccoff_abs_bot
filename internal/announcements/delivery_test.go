@@ -88,6 +88,14 @@ func announcementFixture(t *testing.T) (*tgbotapi.BotAPI, *apiCapture) {
 			chatID, _ := strconv.ParseInt(id, 10, 64)
 			result = map[string]any{"message_id": cap.sends[id], "chat": map[string]any{"id": chatID, "type": "channel"}}
 		case "editMessageText":
+			var markup struct {
+				InlineKeyboard [][]tgbotapi.InlineKeyboardButton `json:"inline_keyboard"`
+			}
+			if err := json.Unmarshal([]byte(r.Form.Get("reply_markup")), &markup); err != nil || markup.InlineKeyboard == nil {
+				t.Errorf("Telegram rejects a null keyboard: %s", r.Form.Get("reply_markup"))
+				fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"field inline_keyboard must be of type Array"}`)
+				return
+			}
 			cap.edits++
 			result = map[string]any{"message_id": 1, "chat": map[string]any{"id": -100200, "type": "channel"}}
 		case "pinChatMessage":

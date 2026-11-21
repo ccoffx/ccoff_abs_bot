@@ -30,7 +30,7 @@ func HandleBookAnnouncementRecoveryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.M
 	session := telegram.GetSession(msg.From.ID)
 	step := session.GetStep()
 	isRecoveryStep := step == bookAnnouncementRecoveryConfirmSentStep || step == bookAnnouncementRecoveryConfirmAbsentStep
-	isRecoveryCommand := text == "公告异常" || text == "查公告异常" || strings.HasPrefix(text, "公告异常已发 ") || strings.HasPrefix(text, "公告异常未发 ")
+	isRecoveryCommand := text == "公告异常" || text == "查公告异常" || text == "公告异常已发" || text == "公告异常未发" || strings.HasPrefix(text, "公告异常已发 ") || strings.HasPrefix(text, "公告异常未发 ")
 	if !isRecoveryStep && !isRecoveryCommand {
 		return false
 	}
@@ -55,7 +55,11 @@ func HandleBookAnnouncementRecoveryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.M
 
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 格式错误。请发送“"+textfmt.Copyable("公告异常")+"”查看处置说明。")
+		usage := text + " 工单ID"
+		if text == "公告异常已发" {
+			usage += " Telegram消息ID"
+		}
+		telegram.SendPlainText(bot, msg.Chat.ID, "用法："+textfmt.Copyable(usage))
 		return true
 	}
 	reqID64, err := strconv.ParseUint(fields[1], 10, 64)

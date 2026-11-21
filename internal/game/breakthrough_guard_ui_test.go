@@ -48,6 +48,14 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 						return
 					}
 					if strings.HasSuffix(r.URL.Path, "/editMessageText") {
+						var markup struct {
+							InlineKeyboard [][]tgbotapi.InlineKeyboardButton `json:"inline_keyboard"`
+						}
+						if err := json.Unmarshal([]byte(r.Form.Get("reply_markup")), &markup); err != nil || markup.InlineKeyboard == nil {
+							t.Errorf("Telegram rejects a null keyboard: %s", r.Form.Get("reply_markup"))
+							fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"field inline_keyboard must be of type Array"}`)
+							return
+						}
 						mu.Lock()
 						lastEdit = r.Form.Get("text")
 						mu.Unlock()
@@ -87,6 +95,13 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 			if guardTestBalance(t, 2) != 95 {
 				t.Fatal("duplicate callback charged twice")
 			}
+			for id := int64(3); id <= 6; id++ {
+				cb.From = &tgbotapi.User{ID: id, FirstName: fmt.Sprintf("护道者%d", id)}
+				HandleBreakthroughGuardCallback(bot, cb)
+				if guardTestBalance(t, id) != 95 {
+					t.Fatalf("guard %d was not charged exactly once", id)
+				}
+			}
 			cb.From = source.From
 			cb.Data = fmt.Sprintf("btguard:%d:start", ritual.ID)
 			HandleBreakthroughGuardCallback(bot, cb)
@@ -103,8 +118,13 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 			if attempt.Result == "success" {
 				want = 105
 			}
-			if guardTestBalance(t, 2) != want || guardTestBalance(t, 3) != 100 {
-				t.Fatal("incorrect volunteer payment or bystander charge")
+			for id := int64(2); id <= 6; id++ {
+				if guardTestBalance(t, id) != want {
+					t.Fatalf("incorrect payout for guard %d", id)
+				}
+			}
+			if guardTestBalance(t, 7) != 100 || attempt.GuardCount != 5 {
+				t.Fatal("bystander charged or fifth guard missing from settlement")
 			}
 			ProcessDueBreakthroughRituals(bot, time.Now())
 			if guardTestBalance(t, 2) != want {
@@ -113,7 +133,7 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 			mu.Lock()
 			text := lastEdit
 			mu.Unlock()
-			if !strings.Contains(text, "已结算") {
+			if !strings.Contains(text, "已结算") || !strings.Contains(text, "护道人数：5") {
 				t.Fatalf("final group panel not updated: %s", text)
 			}
 		})

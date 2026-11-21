@@ -114,9 +114,23 @@ func reconcileChannelAnnouncements(bot *tgbotapi.BotAPI) {
 	}
 }
 func HandleChannelAnnouncementCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) bool {
+	if msg == nil || msg.Chat == nil || msg.From == nil {
+		return false
+	}
+	text = strings.TrimSpace(text)
 	session := telegram.GetSession(msg.From.ID)
 	step := session.GetStep()
-	command := text == "发布服务公告" || text == "频道公告异常" || strings.HasPrefix(text, "频道公告重试 ") || strings.HasPrefix(text, "频道公告已发 ") || strings.HasPrefix(text, "频道公告未发 ") || strings.HasPrefix(text, "频道提醒重试 ") || strings.HasPrefix(text, "频道提醒已发 ")
+	fields := strings.Fields(text)
+	recoveryUsage := ""
+	if len(fields) > 0 {
+		switch fields[0] {
+		case "频道公告重试", "频道公告未发", "频道提醒重试", "频道提醒已发":
+			recoveryUsage = fields[0] + " ID"
+		case "频道公告已发":
+			recoveryUsage = "频道公告已发 ID 消息ID"
+		}
+	}
+	command := text == "发布服务公告" || text == "频道公告异常" || recoveryUsage != ""
 	if !command && !strings.HasPrefix(step, "CHANNEL_ANN_") {
 		return false
 	}
@@ -140,9 +154,8 @@ func HandleChannelAnnouncementCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Messag
 		return true
 	}
 	if command && text != "发布服务公告" {
-		fields := strings.Fields(text)
 		if len(fields) < 2 || len(fields) > 3 {
-			reply("格式错误，请查看频道公告异常。")
+			reply("用法：" + textfmt.Copyable(recoveryUsage))
 			return true
 		}
 		id, err := strconv.ParseUint(fields[1], 10, 32)

@@ -186,7 +186,7 @@ func formatWealthLeaderboardPage(users []model.User, totalUsers int, page int) s
 
 func wealthLeaderboardPageMarkup(page int, totalPages int) tgbotapi.InlineKeyboardMarkup {
 	if totalPages <= 1 {
-		return tgbotapi.InlineKeyboardMarkup{}
+		return telegram.NewInlineKeyboardMarkup()
 	}
 	row := make([]tgbotapi.InlineKeyboardButton, 0, 2)
 	if page > 1 {

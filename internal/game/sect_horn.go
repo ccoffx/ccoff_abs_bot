@@ -141,6 +141,11 @@ func handleSectHornStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, scope stri
 		return
 	}
 
+	if strings.TrimSpace(rawContent) == "" {
+		telegram.SendPlainText(bot, msg.Chat.ID, sectHornUsageText(scope))
+		return
+	}
+
 	content, err := validateSectHornContent(rawContent)
 	if err != nil {
 		telegram.SendPlainText(bot, msg.Chat.ID, sectHornUsageText(scope)+"\n\n"+sectHornValidationMessage(err))

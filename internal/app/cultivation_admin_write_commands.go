@@ -58,6 +58,11 @@ func HandleCultivationAdminWriteCommand(bot *tgbotapi.BotAPI, message *tgbotapi.
 		telegram.SendPlainText(bot, message.Chat.ID, "指令格式错误。")
 		return true
 	}
+	parts := strings.Fields(normalizedText)
+	if usage := cultivationAdminWriteUsage(parts[0]); usage != "" && len(parts) != len(strings.Fields(usage)) {
+		telegram.SendPlainText(bot, message.Chat.ID, "用法："+textfmt.Copyable(usage))
+		return true
+	}
 
 	session.SetTemp("cultivation_admin_write_command", normalizedText)
 	session.SetStep("WAITING_CULTIVATION_ADMIN_WRITE_REASON")
@@ -141,13 +146,27 @@ func normalizeCultivationAdminWriteCommand(text string) string {
 
 func isCultivationAdminWriteCommand(text string) bool {
 	text = normalizeCultivationAdminWriteCommand(text)
-	return text == "重载斗气配置" ||
-		strings.HasPrefix(text, "设置突破成功率 ") ||
-		strings.HasPrefix(text, "设置突破消耗 ") ||
-		strings.HasPrefix(text, "设置突破冷却 ") ||
-		strings.HasPrefix(text, "设置突破最低修为 ") ||
-		strings.HasPrefix(text, "设置境界门槛 ") ||
-		strings.HasPrefix(text, "设置小境界门槛 ")
+	parts := strings.Fields(text)
+	return text == "重载斗气配置" || len(parts) > 0 && cultivationAdminWriteUsage(parts[0]) != ""
+}
+
+func cultivationAdminWriteUsage(command string) string {
+	switch command {
+	case "设置突破成功率":
+		return "设置突破成功率 大境界 成功率百分比"
+	case "设置突破消耗":
+		return "设置突破消耗 大境界 积分"
+	case "设置突破冷却":
+		return "设置突破冷却 大境界 小时"
+	case "设置突破最低修为":
+		return "设置突破最低修为 大境界 小时"
+	case "设置境界门槛":
+		return "设置境界门槛 大境界 最低小时 最高小时"
+	case "设置小境界门槛":
+		return "设置小境界门槛 大境界 小境界 所需小时"
+	default:
+		return ""
+	}
 }
 
 func executeCultivationAdminWriteCommand(actorID int64, text string, reason string) (string, error) {
