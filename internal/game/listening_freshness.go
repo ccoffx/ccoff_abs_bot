@@ -20,9 +20,6 @@ const (
 	listeningQueryWait    = 20 * time.Second
 )
 
-// Bound remote synchronization across foreground, scheduled and full-batch work.
-var listeningSyncSlots = make(chan struct{}, listeningSyncWorkers)
-
 var ErrListeningNotFresh = errors.New("听书修为尚未成功同步")
 
 func requireFreshListening(userID int64) error {
@@ -68,17 +65,6 @@ func coalesceListeningFetch(key string, work func() listeningFetchResult) listen
 	}()
 	call.result = work()
 	return call.result
-}
-
-func acquireListeningSyncSlot() bool {
-	timer := time.NewTimer(listeningQueryWait)
-	defer timer.Stop()
-	select {
-	case listeningSyncSlots <- struct{}{}:
-		return true
-	case <-timer.C:
-		return false
-	}
 }
 
 func listeningTimestampFresh(at, now time.Time, maxAge time.Duration) bool {
@@ -130,9 +116,8 @@ func staleListeningNotice(at time.Time) string {
 	return fmt.Sprintf("⚠️ 听书同步未完成，展示旧数据；最近成功获取：%s（北京时间）。", at.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
 }
 
-// EnsureListeningFresh keeps the common path local. Network requests happen
-// only for missing, expired or unapplied data; failures never claim freshness.
-func EnsureListeningFresh(userID int64) ListeningFreshness {
+// CachedListeningFreshness never contacts ABS or waits for a full batch.
+func CachedListeningFreshness(userID int64) ListeningFreshness {
 	if storage.DB == nil {
 		return ListeningFreshness{Notice: "⚠️ 听书数据暂时读取失败。"}
 	}
@@ -141,39 +126,69 @@ func EnsureListeningFresh(userID int64) ListeningFreshness {
 		return ListeningFreshness{Notice: "⚠️ 听书账号暂时读取失败。"}
 	}
 	if strings.TrimSpace(user.AbsUserID) == "" {
-		return ListeningFreshness{Fresh: true} // A local wallet has no ABS source.
+		return ListeningFreshness{Fresh: true}
 	}
 	state := listeningFreshness(userID, user.AbsUserID, time.Now())
+	if !state.Fresh {
+		state.Notice = staleListeningNotice(state.UpdatedAt) + " 后台会自动更新。"
+	}
+	return state
+}
+
+// Strict asset operations may refresh one account only when the batch barrier,
+// account flight and ABS capacity are immediately available. Busy work is never
+// awaited while holding a user's command turn.
+func EnsureListeningFresh(userID int64) ListeningFreshness {
+	state := CachedListeningFreshness(userID)
+	if state.Fresh || storage.DB == nil {
+		return state
+	}
+	if !listeningRefreshMu.TryRLock() {
+		return state
+	}
+	defer listeningRefreshMu.RUnlock()
+	var user model.User
+	if err := storage.DB.Select("telegram_id", "abs_user_id").Where("telegram_id = ?", userID).First(&user).Error; err != nil {
+		return state
+	}
+	if strings.TrimSpace(user.AbsUserID) == "" {
+		return CachedListeningFreshness(userID)
+	}
+	state = listeningFreshness(userID, user.AbsUserID, time.Now())
 	if state.Fresh {
 		return state
 	}
-	// Bound the foreground wait behind a full ranking batch.
-	deadline := time.Now().Add(listeningQueryWait)
-	for !listeningRefreshMu.TryRLock() {
-		if time.Now().After(deadline) {
-			state = listeningFreshness(userID, user.AbsUserID, time.Now())
-			if !state.Fresh {
-				state.Notice = staleListeningNotice(state.UpdatedAt)
-			}
-			return state
+	coalesceListeningFetchIfIdle(fmt.Sprintf("stats:%d:%q:%q", userID, user.AbsUserID, []string(nil)), func() listeningFetchResult {
+		if !listeningSyncSlots.acquire(listeningRequestNormal, "", 0) {
+			return listeningFetchResult{}
 		}
-		time.Sleep(10 * time.Millisecond)
+		defer releaseListeningSyncSlot()
+		days, ok := fetchDailyListeningStatsFromABSUnlocked(userID, user.AbsUserID, false)
+		if ok {
+			_, ok = syncCultivationFromDailyListeningStats(userID)
+		}
+		return listeningFetchResult{days: days, ok: ok}
+	})
+	return CachedListeningFreshness(userID)
+}
+
+func coalesceListeningFetchIfIdle(key string, work func() listeningFetchResult) listeningFetchResult {
+	listeningFetches.Lock()
+	if listeningFetches.calls[key] != nil {
+		listeningFetches.Unlock()
+		return listeningFetchResult{}
 	}
-	func() {
-		defer listeningRefreshMu.RUnlock()
-		state = listeningFreshness(userID, user.AbsUserID, time.Now())
-		if state.Fresh {
-			return
-		}
-		if _, ok := refreshDailyListeningStatsFromABSUnlocked(userID, user.AbsUserID, false); ok {
-			syncCultivationFromDailyListeningStats(userID)
-		}
+	call := &listeningFetchCall{done: make(chan struct{})}
+	listeningFetches.calls[key] = call
+	listeningFetches.Unlock()
+	defer func() {
+		listeningFetches.Lock()
+		delete(listeningFetches.calls, key)
+		close(call.done)
+		listeningFetches.Unlock()
 	}()
-	state = listeningFreshness(userID, user.AbsUserID, time.Now())
-	if !state.Fresh {
-		state.Notice = staleListeningNotice(state.UpdatedAt)
-	}
-	return state
+	call.result = work()
+	return call.result
 }
 
 type listeningSyncUser struct {
@@ -271,31 +286,5 @@ func RefreshDueListeningUsers(now time.Time) error {
 // Every bound account can change the top ten. Checking only the displayed
 // rows (or just the caller) would miss a stale user who should enter the board.
 func ensureListeningRankFresh() string {
-	users, err := listeningSyncUsers(time.Now())
-	if err != nil {
-		return "⚠️ 榜单新鲜度检查失败，以下为已保存数据。"
-	}
-	stale := false
-	for _, user := range users {
-		if !user.Settled || !listeningDailyTimestampFresh(user.LastFetchedAt, time.Now(), ListeningMaxAge) {
-			stale = true
-			break
-		}
-	}
-	if !stale {
-		return ""
-	}
-	_, _, _, batchErr := refreshAllDailyListeningStatsBatch()
-	users, err = listeningSyncUsers(time.Now())
-	if err == nil {
-		for _, user := range users {
-			if !user.Settled || !listeningDailyTimestampFresh(user.LastFetchedAt, time.Now(), ListeningMaxAge) {
-				return "⚠️ 榜单未能全部更新，排名可能滞后。\n" + staleListeningNotice(user.LastFetchedAt)
-			}
-		}
-	}
-	if err != nil || batchErr != nil {
-		return "⚠️ 全服批次未全部完成，榜单使用已保存数据，称号未重新发布。"
-	}
-	return ""
+	return "ℹ️ 按已保存修为排序，数据由后台更新，排名可能滞后；称号以完整批次结算为准。"
 }

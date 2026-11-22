@@ -28,28 +28,18 @@ const (
 
 var absCrossDayBackfillMu sync.Mutex
 
+// Only explicitly requested historical repairs are processed. Ordinary
+// registration and periodic reports never enroll a full-account history scan.
 func StartABSCrossDaySessionBackfill() {
 	go func() {
-		if err := seedABSCrossDaySessionScanCursors(); err != nil {
-			log.Printf("ABS cross-day history cursor seed failed: %s", textfmt.FormatPlainError(err))
-		}
 		runABSCrossDaySessionBackfillBatchSafely()
-		batchTicker := time.NewTicker(absCrossDayBackfillTickInterval)
-		seedTicker := time.NewTicker(absCrossDayBackfillSeedInterval)
-		defer batchTicker.Stop()
-		defer seedTicker.Stop()
-		for {
-			select {
-			case <-batchTicker.C:
-				runABSCrossDaySessionBackfillBatchSafely()
-			case <-seedTicker.C:
-				if err := seedABSCrossDaySessionScanCursors(); err != nil {
-					log.Printf("ABS cross-day history periodic cursor seed failed: %s", textfmt.FormatPlainError(err))
-				}
-			}
+		ticker := time.NewTicker(absCrossDayBackfillTickInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			runABSCrossDaySessionBackfillBatchSafely()
 		}
 	}()
-	log.Println("✅ ABS 跨日会话历史渐进扫描器已启动：每批最多 5 页，持久化游标续扫至历史末尾。")
+	log.Println("✅ ABS 历史修复队列已启动：仅处理已提交的异常修复，不自动扫描全员历史。")
 }
 
 func runABSCrossDaySessionBackfillBatchSafely() {
@@ -62,7 +52,7 @@ func runABSCrossDaySessionBackfillBatchSafely() {
 		return
 	}
 	defer absCrossDayBackfillMu.Unlock()
-	if err := advanceABSCrossDaySessionBackfill(time.Now()); err != nil {
+	if err := advanceABSCrossDaySessionBackfill(time.Now(), true); err != nil {
 		log.Printf("ABS cross-day history backfill batch failed: %s", textfmt.FormatPlainError(err))
 	}
 }
@@ -131,7 +121,7 @@ func absCrossDaySessionCursorOnConflict(now time.Time) clause.OnConflict {
 	}
 }
 
-func advanceABSCrossDaySessionBackfill(now time.Time) error {
+func advanceABSCrossDaySessionBackfill(now time.Time, repairsOnly ...bool) error {
 	if storage.DB == nil || abs.DefaultClient == nil {
 		return fmt.Errorf("ABS_CROSS_DAY_BACKFILL_NOT_READY")
 	}
@@ -139,7 +129,11 @@ func advanceABSCrossDaySessionBackfill(now time.Time) error {
 		now = time.Now()
 	}
 	var cursor model.ABSCrossDaySessionScanCursor
-	err := storage.DB.Where("completed = ? AND (next_retry_at IS NULL OR next_retry_at <= ?)", false, now).
+	query := storage.DB.Where("completed = ? AND (next_retry_at IS NULL OR next_retry_at <= ?)", false, now)
+	if len(repairsOnly) > 0 && repairsOnly[0] {
+		query = query.Where("reconcile_started_at IS NOT NULL")
+	}
+	err := query.
 		Order("COALESCE(last_scanned_at, created_at) ASC, id ASC").First(&cursor).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -304,19 +298,26 @@ func advanceABSCrossDaySessionBackfill(now time.Time) error {
 }
 
 func fetchABSCrossDayListeningSessionPage(absUserID string, page int) ([]absListeningSession, int, error) {
+	sessions, count, _, err := fetchListeningSessionWindowPage(absUserID, page, time.Time{})
+	return sessions, count, err
+}
+
+// A zero lower bound keeps the explicit historical repair scanner unchanged.
+// Activity refreshes and payouts instead stop at their participation boundary.
+func fetchListeningSessionWindowPage(absUserID string, page int, before time.Time) ([]absListeningSession, int, bool, error) {
 	if abs.DefaultClient == nil || strings.TrimSpace(absUserID) == "" || page < 0 {
-		return nil, 0, fmt.Errorf("ABS_CROSS_DAY_PAGE_ARGUMENT_INVALID")
+		return nil, 0, false, fmt.Errorf("ABS_CROSS_DAY_PAGE_ARGUMENT_INVALID")
 	}
 	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningSessionsPath(absUserID, page, dailyListeningSessionPageSize), nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	if code != 200 {
-		return nil, 0, &abs.AbsAPIError{Operation: "读取 ABS 用户历史会话失败", StatusCode: code, Message: "响应: " + abs.AbsResponseSnippet(body)}
+		return nil, 0, false, &abs.AbsAPIError{Operation: "读取 ABS 用户历史会话失败", StatusCode: code, Message: "响应: " + abs.AbsResponseSnippet(body)}
 	}
 	rawSessions, err := parseABSSessionsPayload(body)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	sessions := make([]absListeningSession, 0, len(rawSessions))
 	seen := make(map[string]struct{}, len(rawSessions))
@@ -338,5 +339,5 @@ func fetchABSCrossDayListeningSessionPage(absUserID string, page int) ([]absList
 		seen[key] = struct{}{}
 		sessions = append(sessions, session)
 	}
-	return sessions, len(rawSessions), nil
+	return sessions, len(rawSessions), listeningSessionPageReachesBefore(rawSessions, before), nil
 }

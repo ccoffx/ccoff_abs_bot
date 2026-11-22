@@ -17,6 +17,7 @@ import (
 
 	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/announcements"
+	"ccoff-abs-bot/internal/background"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
@@ -441,14 +442,14 @@ func maybePromptBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, adminID int64
 		return "已处理"
 	}
 
-	if err := sendBookAnnouncementCandidatePrompt(bot, adminID, req.ID); err != nil {
+	if err := queueBookAnnouncementCandidatePrompt(bot, adminID, req.ID); err != nil {
 		log.Printf("⚠️ 求书已上传后生成入库公告候选失败: req=%d admin=%d err=%s", req.ID, adminID, textfmt.FormatPlainError(err))
 		if retryErr := sendBookAnnouncementRetryPrompt(bot, adminID, req.ID); retryErr != nil {
 			log.Printf("⚠️ 求书公告重试提示发送失败: req=%d admin=%d err=%s", req.ID, adminID, textfmt.FormatTelegramSendError(retryErr))
 		}
 		return "已处理，公告候选生成失败"
 	}
-	return "已处理，请选择并确认新书公告"
+	return "已处理，公告候选正在后台准备"
 }
 
 func sendBookAnnouncementRetryPrompt(bot *tgbotapi.BotAPI, adminID int64, reqID uint) error {
@@ -461,6 +462,22 @@ func sendBookAnnouncementRetryPrompt(bot *tgbotapi.BotAPI, adminID int64, reqID 
 	)
 	_, err := telegram.SendNoAutoDelete(bot, msg)
 	return err
+}
+
+func queueBookAnnouncementCandidatePrompt(bot *tgbotapi.BotAPI, adminID int64, reqID uint) error {
+	result := background.Submit(fmt.Sprintf("book_candidates:%d:%d", adminID, reqID), func() {
+		if !IsBookRequestAdmin(adminID) {
+			return
+		}
+		if err := sendBookAnnouncementCandidatePrompt(bot, adminID, reqID); err != nil {
+			log.Printf("求书公告候选后台读取失败: req=%d err=%s", reqID, textfmt.FormatPlainError(err))
+			sendBookAnnouncementRetryPrompt(bot, adminID, reqID)
+		}
+	})
+	if result == background.Full {
+		return fmt.Errorf("后台任务较多，请稍后重试")
+	}
+	return nil
 }
 
 func sendBookAnnouncementCandidatePrompt(bot *tgbotapi.BotAPI, adminID int64, reqID uint) error {
@@ -830,13 +847,13 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		if !allowed {
 			return true
 		}
-		if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+		if err := queueBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
 			log.Printf("⚠️ 求书公告候选重新读取失败: req=%d admin=%d err=%s", reqID, cb.From.ID, textfmt.FormatPlainError(err))
 			telegram.AnswerCallback(bot, cb.ID, "候选读取失败，请稍后重试")
 			return true
 		}
 		removeBookAnnouncementPreviewButtons(bot, cb)
-		telegram.AnswerCallback(bot, cb.ID, "已重新读取公告候选")
+		telegram.AnswerCallback(bot, cb.ID, "已提交候选读取，准备完成后会私聊通知")
 		return true
 	}
 
@@ -847,7 +864,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		}
 		candidates, resolved := resolveBookAnnouncementCandidateSnapshot(req.ID, snapshotToken, time.Now())
 		if !resolved {
-			if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+			if err := queueBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
 				telegram.AnswerCallback(bot, cb.ID, "\u5019\u9009\u5df2\u5931\u6548\u4e14\u91cd\u65b0\u8bfb\u53d6\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5")
 				return true
 			}
@@ -882,12 +899,12 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		}
 		candidate, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
 		if !resolved {
-			if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+			if err := queueBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
 				telegram.AnswerCallback(bot, cb.ID, "候选已失效且重新读取失败，请稍后重试")
 				return true
 			}
 			removeBookAnnouncementPreviewButtons(bot, cb)
-			telegram.AnswerCallback(bot, cb.ID, "候选已失效，已重新读取")
+			telegram.AnswerCallback(bot, cb.ID, "候选已失效，已提交后台读取")
 			return true
 		}
 		if err := sendBookAnnouncementPreview(bot, cb.From.ID, req.ID, candidate); err != nil {
@@ -920,12 +937,12 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 	}
 	candidate, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
 	if !resolved {
-		if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
+		if err := queueBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
 			telegram.AnswerCallback(bot, cb.ID, "公告预览已失效，重新读取候选失败，请稍后重试")
 			return true
 		}
 		removeBookAnnouncementPreviewButtons(bot, cb)
-		telegram.AnswerCallback(bot, cb.ID, "公告预览已失效，已重新读取候选")
+		telegram.AnswerCallback(bot, cb.ID, "公告预览已失效，已提交后台读取候选")
 		return true
 	}
 

@@ -288,7 +288,7 @@ func TestPersonalReportUsesCorrectedCacheWhenRefreshFails(t *testing.T) {
 	}
 }
 
-func TestPersonalReportWithoutCacheUsesOfficialDaysDespiteSessionFailure(t *testing.T) {
+func TestPersonalReportWithoutCacheWaitsForBackgroundSynchronization(t *testing.T) {
 	setupRetreatBackfillDB(t)
 	_, source, _ := recoveryCrossDaySession()
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +302,7 @@ func TestPersonalReportWithoutCacheUsesOfficialDaysDespiteSessionFailure(t *test
 		}
 	})
 	report := GetPersonalReport(abs.DefaultClient, "abs1")
-	for _, want := range []string{"今日实际听书: 0.00 小时", "净修炼时长:"} {
+	for _, want := range []string{"今日实际听书: 待同步", "今日净修为: 待同步"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing %q: %s", want, report)
 		}

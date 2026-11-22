@@ -14,16 +14,14 @@ import (
 )
 
 type officialListeningStats struct {
-	TotalTime float64
-	Days      map[string]float64
+	Days map[string]float64
 }
 
 // Decode all ordinary daily inputs consistently before any caller can write
 // them. JSON null is unknown data, not a numeric correction to zero.
 func parseOfficialListeningStats(body []byte) (officialListeningStats, error) {
 	var wire struct {
-		TotalTime float64                    `json:"totalTime"`
-		Days      map[string]json.RawMessage `json:"days"`
+		Days map[string]json.RawMessage `json:"days"`
 	}
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return officialListeningStats{}, err
@@ -31,7 +29,7 @@ func parseOfficialListeningStats(body []byte) (officialListeningStats, error) {
 	if wire.Days == nil {
 		return officialListeningStats{}, fmt.Errorf("ABS_LISTENING_DAYS_MISSING")
 	}
-	stats := officialListeningStats{TotalTime: wire.TotalTime, Days: make(map[string]float64, len(wire.Days))}
+	stats := officialListeningStats{Days: make(map[string]float64, len(wire.Days))}
 	for day, value := range wire.Days {
 		if strings.TrimSpace(string(value)) == "null" {
 			return officialListeningStats{}, fmt.Errorf("ABS_DAILY_NULL_VALUE: %s", day)
@@ -60,7 +58,11 @@ type officialListeningInputCache struct {
 
 // Ordinary cultivation deliberately trusts ABS calendar totals. Session evidence
 // remains independent, for abuse and retreat windows only.
-func recordOfficialDailyListeningStats(userID int64, absID string, days map[string]float64, fetchedAt time.Time, reportTotal *float64) (map[string]float64, error) {
+func recordOfficialDailyListeningStats(userID int64, absID string, days map[string]float64, fetchedAt time.Time) (map[string]float64, error) {
+	return recordOfficialDailyListeningStatsAt(userID, absID, days, fetchedAt, time.Now())
+}
+
+func recordOfficialDailyListeningStatsAt(userID int64, absID string, days map[string]float64, fetchedAt time.Time, now time.Time) (map[string]float64, error) {
 	if storage.DB == nil || days == nil || userID == 0 || strings.TrimSpace(absID) == "" {
 		return nil, fmt.Errorf("ABS_DAILY_NOT_READY")
 	}
@@ -68,7 +70,6 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 	if fetchedAt.IsZero() {
 		fetchedAt = time.Now()
 	}
-	now := time.Now()
 	if fetchedAt.After(now) {
 		return nil, fmt.Errorf("ABS_DAILY_FUTURE_SNAPSHOT")
 	}
@@ -127,6 +128,14 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 			if stale != 0 {
 				return fmt.Errorf("DAILY_LISTENING_STATS_STALE_SNAPSHOT")
 			}
+			// Cache invalidation or restart must not reopen archived history.
+			var saved []model.DailyListeningStat
+			if err := tx.Where("user_id = ?", userID).Find(&saved).Error; err != nil {
+				return err
+			}
+			for _, stat := range saved {
+				cache.Days[stat.DayKey] = officialListeningInput{Raw: stat.OfficialRawSeconds, Credit: stat.CappedSeconds}
+			}
 		}
 		for day, input := range cache.Days {
 			credited[day] = input.Credit
@@ -134,14 +143,41 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 		changed := make(map[string]float64)
 		today := SectDayKey(now)
 		lastDay := SectDayKey(snapshot.StatsFetchedAt)
+		var openDays []model.DailyListeningStat
+		if err := tx.Where("user_id = ? AND abs_user_id = ? AND day_key < ? AND archived = ?", userID, absID, today, false).Find(&openDays).Error; err != nil {
+			return err
+		}
+		open := make(map[string]bool, len(openDays))
+		var archiveIDs []uint
+		for _, stat := range openDays {
+			// The row itself retains the pending close across missing date keys,
+			// later report snapshots and cache rebuilds. Do not advance its sample
+			// time or archive it until ABS actually returns that date.
+			if !stat.LastFetchedAt.IsZero() && SectDayKey(stat.LastFetchedAt) <= stat.DayKey {
+				open[stat.DayKey] = true
+				continue
+			}
+			// On upgrade, preserve and freeze history already sampled after its day.
+			archiveIDs = append(archiveIDs, stat.ID)
+			if !stat.OfficialPolicy {
+				changed[stat.DayKey] = stat.OfficialRawSeconds
+			}
+		}
 		for day, raw := range days {
 			if day > today {
 				continue
 			}
 			old, exists := cache.Days[day]
+			if day < today {
+				// Existing history is immutable after its first closing snapshot.
+				// Unobserved offline/bootstrap days can be imported once.
+				if exists && !open[day] {
+					continue
+				}
+			}
 			// Revisit the previous fetch date across midnight: its elapsed-time cap
 			// may have increased even if ABS reports the same raw amount.
-			if !cacheOK || !exists || old.Raw != raw || day >= lastDay {
+			if !cacheOK || !exists || old.Raw != raw || day >= lastDay || open[day] {
 				changed[day] = raw
 			}
 		}
@@ -169,7 +205,13 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 		}
 		for _, record := range records {
 			old, exists := oldByDay[record.DayKey]
+			if exists && old.Archived {
+				continue
+			}
 			mergeOfficialDailyRecord(&record, old, exists, now)
+			// A request started before midnight may finish after it. Such a sample
+			// still needs a request begun after the date ended before it can close.
+			record.Archived = record.DayKey < SectDayKey(fetchedAt)
 			if !exists && baselineBefore != "" && record.DayKey < baselineBefore {
 				// A previously unseen historical source day can overlap a legacy
 				// physically allocated day, even if omitted from the first snapshot.
@@ -180,14 +222,14 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 			}
 			credited[record.DayKey] = record.CappedSeconds
 			cache.Days[record.DayKey] = officialListeningInput{Raw: record.OfficialRawSeconds, Credit: record.CappedSeconds}
-			if exists && record.DayKey != SectDayKey(now) && sameDailyListeningInput(old, record) && old.OfficialPolicy {
+			if exists && record.DayKey != today && sameDailyListeningInput(old, record) && old.OfficialPolicy && old.Archived == record.Archived {
 				continue
 			}
 			if exists {
 				// Explicit column selection includes zeros, while retaining settlement and
 				// historical bonus columns until the shared settlement below updates them.
 				record.ID = old.ID
-				if err := tx.Model(&old).Select("RawSeconds", "OfficialRawSeconds", "CappedSeconds", "EffectiveHours", "ValidationJSON", "AbsUserID", "LastFetchedAt", "Source", "FetchStatus", "RefreshReason", "OfficialPolicy", "OfficialBaselineKind", "OfficialBaselineSeconds", "OfficialBaselineHours", "OfficialBaselineCreditedSeconds").Updates(&record).Error; err != nil {
+				if err := tx.Model(&old).Select("Archived", "RawSeconds", "OfficialRawSeconds", "CappedSeconds", "EffectiveHours", "ValidationJSON", "AbsUserID", "LastFetchedAt", "Source", "FetchStatus", "RefreshReason", "OfficialPolicy", "OfficialBaselineKind", "OfficialBaselineSeconds", "OfficialBaselineHours", "OfficialBaselineCreditedSeconds").Updates(&record).Error; err != nil {
 					return err
 				}
 			} else if err := tx.Create(&record).Error; err != nil {
@@ -195,25 +237,22 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 			}
 			written = append(written, record)
 		}
+		for start := 0; start < len(archiveIDs); start += 400 {
+			if err := tx.Model(&model.DailyListeningStat{}).Where("id IN ?", archiveIDs[start:min(start+400, len(archiveIDs))]).UpdateColumn("archived", true).Error; err != nil {
+				return err
+			}
+		}
 		if _, err := settleCultivationListeningInTx(tx, userID, now); err != nil {
 			return err
 		}
 		if err := tx.Model(&model.Cultivation{}).Where("user_id = ?", userID).Updates(map[string]any{"official_daily_initialized": true, "official_daily_abs_user_id": absID, "official_daily_baseline_before": baselineBefore}).Error; err != nil {
 			return err
 		}
-		total := 0.0
-		if reportTotal != nil {
-			total = *reportTotal
-		} else {
-			for _, seconds := range days {
-				total += seconds
-			}
-		}
 		inputJSON, err := json.Marshal(cache)
 		if err != nil {
 			return err
 		}
-		return saveListeningReportStatsInTx(tx, userID, absID, total, fetchedAt, string(inputJSON))
+		return saveListeningReportStatsInTx(tx, userID, absID, fetchedAt, string(inputJSON))
 	})
 	if err != nil {
 		return nil, err
@@ -249,7 +288,7 @@ func mergeOfficialDailyRecord(record *model.DailyListeningStat, old model.DailyL
 			if old.ValidationJSON == "" {
 				baseline = math.Max(baseline, old.RawSeconds)
 			}
-			record.OfficialBaselineSeconds = math.Min(baseline, dailyListeningElapsedLimit(record.DayKey, now))
+			record.OfficialBaselineSeconds = baseline
 			record.OfficialBaselineHours = old.EffectiveHours
 			record.OfficialBaselineCreditedSeconds = old.CappedSeconds
 		}
@@ -257,6 +296,9 @@ func mergeOfficialDailyRecord(record *model.DailyListeningStat, old model.DailyL
 			record.CappedSeconds = math.Max(record.CappedSeconds, math.Max(old.CappedSeconds, record.OfficialBaselineSeconds))
 		}
 	}
+	// A retained high-water mark or legacy balance cannot bypass today's clock
+	// limit (for example a bad pre-upgrade snapshot shortly after midnight).
+	record.CappedSeconds = math.Min(record.CappedSeconds, dailyListeningElapsedLimit(record.DayKey, now))
 	// The carried balance and new account growth share the Telegram user's
 	// daily allowance, including across repeated account changes.
 	record.EffectiveHours = math.Min(sectDailyCultivationHourCap, math.Max(0, record.OfficialBaselineHours+(calculateSectEffectiveHoursFromSeconds(record.CappedSeconds)-calculateSectEffectiveHoursFromSeconds(record.OfficialBaselineSeconds))))

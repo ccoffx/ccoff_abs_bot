@@ -7,12 +7,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 
+	"ccoff-abs-bot/internal/background"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/spiritfire"
 	"ccoff-abs-bot/internal/storage"
@@ -21,7 +21,6 @@ import (
 )
 
 // 面板更新串行读取最新快照，避免并发开箱的旧画面覆盖新画面；不持有资产锁发网络请求。
-var treasurePanelMutex sync.Mutex
 
 func treasureHuntErrorText(err error) string {
 	for _, expected := range []error{ErrTreasureBusy, ErrTreasureExpired, ErrTreasurePicked, ErrTreasureBoxTaken, ErrTreasurePanel} {
@@ -135,14 +134,43 @@ func loadTreasurePanel(roundID uint) (model.TreasureRound, []model.TreasurePick,
 }
 
 func refreshTreasurePanel(bot *tgbotapi.BotAPI, roundID uint) {
-	treasurePanelMutex.Lock()
-	defer treasurePanelMutex.Unlock()
+	res := storage.DB.Model(&model.TreasureRound{}).Where("id = ?", roundID).Updates(map[string]interface{}{"panel_dirty": true, "panel_version": gorm.Expr("panel_version + 1"), "panel_next_retry_at": nil})
+	if res.Error != nil {
+		log.Printf("寻宝面板更新标记失败: round=%d err=%s", roundID, textfmt.FormatPlainError(res.Error))
+		return
+	}
+	enqueueTreasurePanel(bot, roundID)
+}
+func enqueueTreasurePanel(bot *tgbotapi.BotAPI, roundID uint) {
+	background.Panels.Submit(fmt.Sprintf("treasure_panel:%d", roundID), func() { refreshTreasurePanelSync(bot, roundID) }, true)
+}
+func retryTreasurePanels(bot *tgbotapi.BotAPI) {
+	var rounds []model.TreasureRound
+	if storage.DB.Where("panel_dirty = ? AND message_id > 0 AND (panel_next_retry_at IS NULL OR panel_next_retry_at <= ?)", true, time.Now()).
+		Order("panel_next_retry_at ASC, id ASC").Limit(32).Find(&rounds).Error != nil {
+		return
+	}
+	for _, round := range rounds {
+		enqueueTreasurePanel(bot, round.ID)
+	}
+}
+
+func refreshTreasurePanelSync(bot *tgbotapi.BotAPI, roundID uint) {
 	round, picks, err := loadTreasurePanel(roundID)
 	if err != nil {
 		log.Printf("⚠️ 读取藏宝图失败: round=%d err=%s", roundID, textfmt.FormatPlainError(err))
 		return
 	}
-	if round.MessageID <= 0 || (round.Status != TreasureActive && round.Status != TreasureClosed) {
+	if !round.PanelDirty || round.MessageID <= 0 || (round.PanelNextRetryAt != nil && time.Now().Before(*round.PanelNextRetryAt)) {
+		return
+	}
+	// Reserve backoff durably before rendering or editing this record.
+	res := storage.DB.Model(&model.TreasureRound{}).Where("id = ? AND panel_version = ? AND panel_dirty = ?", roundID, round.PanelVersion, true).
+		UpdateColumn("panel_next_retry_at", time.Now().Add(30*time.Second))
+	if res.Error != nil || res.RowsAffected != 1 {
+		return
+	}
+	if round.Status != TreasureActive && round.Status != TreasureClosed {
 		return
 	}
 	text, markup, err := RenderTreasurePanel(round, picks)
@@ -152,9 +180,14 @@ func refreshTreasurePanel(bot *tgbotapi.BotAPI, roundID uint) {
 	}
 	edit := tgbotapi.NewEditMessageText(round.ChatID, round.MessageID, text)
 	edit.ReplyMarkup = &markup
-	if _, err := bot.Request(edit); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
+	if _, err := bot.Request(edit); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
 		log.Printf("⚠️ 刷新藏宝图失败，资产结果以流水为准: round=%d err=%s", roundID, textfmt.FormatTelegramSendError(err))
+		if !telegram.IsTelegramMessageUnavailableForEdit(err) {
+			return
+		}
 	}
+	storage.DB.Model(&model.TreasureRound{}).Where("id = ? AND panel_version = ?", roundID, round.PanelVersion).
+		Updates(map[string]any{"panel_dirty": false, "panel_next_retry_at": nil})
 }
 
 func finishTreasureRound(bot *tgbotapi.BotAPI, roundID uint, now time.Time) bool {
@@ -279,6 +312,7 @@ func HandleTreasureHuntCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery
 }
 
 func ProcessExpiredTreasureRounds(bot *tgbotapi.BotAPI, now time.Time) {
+	defer retryTreasurePanels(bot)
 	// 发布未完成的局没有任何扣费，过期后释放群内名额。
 	treasureMutex.Lock()
 	err := storage.DB.Model(&model.TreasureRound{}).Where("status = ? AND expires_at <= ?", treasurePublishing, now).Update("status", TreasureCancelled).Error

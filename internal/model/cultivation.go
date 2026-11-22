@@ -96,6 +96,9 @@ type BreakthroughRitual struct {
 	UserName         string
 	OriginChatID     int64
 	ChatID           int64
+	PanelDirty       bool `gorm:"index"`
+	PanelVersion     uint64
+	PanelNextRetryAt *time.Time `gorm:"index"`
 	MessageID        int
 	Mode             string
 	FromMajor        int

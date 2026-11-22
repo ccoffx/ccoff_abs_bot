@@ -2608,18 +2608,21 @@ func handleUnlockSectCave(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, confirmed
 	telegram.ReplyText(bot, chatID, fmt.Sprintf("洞府解锁成功。\n消耗贡献：`%d`\n剩余贡献：`%d`", sectCaveUnlockContributionCost, contributionAfter))
 }
 
-func getUserTodayBonusListeningSeconds(userID int64, absUserID string, now time.Time) float64 {
+func getUserTodayBonusListeningSeconds(userID int64, absUserID string, now time.Time) (float64, error) {
+	// Retreat preparation may refresh one idle account, but never waits behind
+	// a full-server batch, another account flight, or occupied ABS capacity.
 	if strings.TrimSpace(absUserID) != "" {
-		if _, ok := RefreshDailyListeningStatsFromABS(userID, absUserID); ok {
-			if stat, cacheOK := getTodayDailyListeningStat(userID, now); cacheOK {
-				return stat.BonusListeningSeconds()
-			}
-		}
+		EnsureListeningFresh(userID)
+		now = time.Now()
 	}
-	if stat, ok := getTodayDailyListeningStat(userID, now); ok {
-		return stat.BonusListeningSeconds()
+	if stat, ok := getTodayDailyListeningStat(userID, now); ok &&
+		(strings.TrimSpace(absUserID) == "" || stat.AbsUserID == strings.TrimSpace(absUserID)) {
+		return stat.BonusListeningSeconds(), nil
 	}
-	return 0
+	if strings.TrimSpace(absUserID) == "" {
+		return 0, nil
+	}
+	return 0, ErrListeningNotFresh
 }
 
 func handleStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, confirmed bool) {
@@ -2657,19 +2660,56 @@ func handleStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 		return
 	}
 
+	result := sectRetreatPreparations.Submit(fmt.Sprintf("retreat:user:%d", userID), func() {
+		finishStartPersonalSectCaveRetreat(bot, msg, member)
+	}, false)
+	replyBackgroundSubmission(bot, chatID, result, "个人闭关准备")
+}
+
+func finishStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, member model.SectMember) {
+	userID, chatID := msg.From.ID, msg.Chat.ID
+	if _, err := revalidateRetreatOperator(member, false); err != nil {
+		telegram.ReplyTextToMessage(bot, msg, "❌ 宗门身份或洞府状态已变化，请重新提交闭关。")
+		return
+	}
+	now := time.Now()
+	preparedDay := SectDayKey(now)
+
 	var u model.User
 	if err := storage.DB.Select("telegram_id", "abs_user_id").Where("telegram_id = ?", userID).First(&u).Error; err != nil {
 		telegram.ReplyText(bot, chatID, "用户档案读取失败，请稍后再试。")
 		return
 	}
-	baseRawSeconds := getUserTodayBonusListeningSeconds(userID, u.AbsUserID, now)
+	baseRawSeconds, preparationErr := getUserTodayBonusListeningSeconds(userID, u.AbsUserID, now)
+	if preparationErr != nil {
+		telegram.ReplyTextToMessage(bot, msg, "⏳ 暂无可用听书基线，本次未扣除声望，请稍后重新提交闭关。")
+		return
+	}
 
 	var endAt time.Time
 	var personalPrestigeAfter int
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("UPDATE sects SET id = id WHERE id = ?", member.SectID).Error; err != nil {
+			return err
+		}
+		now = time.Now()
+		// Do not carry a previous day's baseline into a retreat starting today.
+		if SectDayKey(now) != preparedDay {
+			return ErrListeningNotFresh
+		}
 		var lockedMember model.SectMember
 		if err := loadSectMemberByUserInTx(tx, userID, &lockedMember, true); err != nil {
 			return err
+		}
+		if lockedMember.ID != member.ID || lockedMember.SectID != member.SectID {
+			return storage.ErrNotInSect
+		}
+		var currentUser model.User
+		if err := tx.Select("abs_user_id").Where("telegram_id = ?", userID).First(&currentUser).Error; err != nil {
+			return err
+		}
+		if currentUser.AbsUserID != u.AbsUserID {
+			return fmt.Errorf("RETREAT_ABS_BINDING_CHANGED")
 		}
 		if lockedMember.CaveUnlockedAt == nil {
 			return storage.ErrSectCaveLocked
@@ -2713,11 +2753,17 @@ func handleStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 	})
 
 	if err != nil {
+		if errors.Is(err, ErrListeningNotFresh) {
+			telegram.ReplyTextToMessage(bot, msg, "⏳ 准备期间已跨日，本次未扣除声望，请重新提交闭关。")
+			return
+		}
 		switch SectErrorCode(err) {
 		case "PERSONAL_PRESTIGE_NOT_ENOUGH":
 			telegram.ReplyText(bot, chatID, fmt.Sprintf("个人声望不足，闭关需要 `%d` 声望。", sectCavePersonalRetreatCost))
 		case "SECT_RETREAT_ACTIVE":
 			telegram.ReplyText(bot, chatID, "你当前已有闭关，结束后才能再次闭关。")
+		case "NOT_IN_SECT":
+			telegram.ReplyTextToMessage(bot, msg, "❌ 宗门身份已变化，请重新提交闭关。")
 		case "SECT_CAVE_LOCKED":
 			telegram.ReplyText(bot, chatID, "请先解锁洞府后再闭关。")
 		default:
@@ -2727,7 +2773,7 @@ func handleStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 		return
 	}
 
-	telegram.ReplyText(bot, chatID, fmt.Sprintf("个人闭关已开启。\n持续时长：`%d` 小时\n结束时间：`%s`\n消耗个人声望：`%d`\n剩余个人声望：`%d`", sectCavePersonalRetreatHours, sectCaveRetreatEndText(endAt), sectCavePersonalRetreatCost, personalPrestigeAfter))
+	telegram.ReplyTextToMessage(bot, msg, fmt.Sprintf("个人闭关已开启。\n持续时长：`%d` 小时\n结束时间：`%s`\n消耗个人声望：`%d`\n剩余个人声望：`%d`", sectCavePersonalRetreatHours, sectCaveRetreatEndText(endAt), sectCavePersonalRetreatCost, personalPrestigeAfter))
 }
 
 func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, confirmed bool) {
@@ -2763,7 +2809,27 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 		return
 	}
 
+	result := sectRetreatPreparations.Submit(fmt.Sprintf("retreat:sect:%d", member.SectID), func() {
+		finishStartSectCaveRetreat(bot, msg, member)
+	}, false)
+	replyBackgroundSubmission(bot, chatID, result, "宗门闭关准备")
+}
+
+func finishStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, member model.SectMember) {
+	userID, chatID := msg.From.ID, msg.Chat.ID
+	if _, err := revalidateRetreatOperator(member, true); err != nil {
+		telegram.ReplyTextToMessage(bot, msg, "❌ 宗门身份或权限已变化，请重新提交宗门闭关。")
+		return
+	}
+	var sect model.Sect
+	if err := storage.DB.Where("id = ?", member.SectID).First(&sect).Error; err != nil {
+		telegram.ReplyTextToMessage(bot, msg, "❌ 宗门档案读取失败，请稍后重试。")
+		return
+	}
+	cost := sectCaveSectRetreatCost(sect.Level)
+
 	now := time.Now()
+	preparedDay := SectDayKey(now)
 	type retreatTarget struct {
 		Member model.SectMember
 		User   model.User
@@ -2793,7 +2859,6 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 		targets = append(targets, retreatTarget{
 			Member: m,
 			User:   u,
-			Base:   getUserTodayBonusListeningSeconds(m.UserID, u.AbsUserID, now),
 		})
 	}
 	if len(targets) == 0 {
@@ -2801,10 +2866,31 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 		return
 	}
 
+	preparationErrors := captureActivitySnapshotBatch(len(targets), func(i int) error {
+		var err error
+		targets[i].Base, err = getUserTodayBonusListeningSeconds(targets[i].User.TelegramID, targets[i].User.AbsUserID, now)
+		return err
+	})
+	for _, err := range preparationErrors {
+		if err != nil {
+			log.Printf("宗门闭关准备失败: sect=%d err=%s", member.SectID, textfmt.FormatPlainError(err))
+			telegram.ReplyTextToMessage(bot, msg, "❌ 宗门闭关准备失败，本次未扣除声望，请稍后重试。")
+			return
+		}
+	}
+
 	var endAt time.Time
 	var sectPrestigeAfter int
 	startedCount := 0
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("UPDATE sects SET id = id WHERE id = ?", member.SectID).Error; err != nil {
+			return err
+		}
+		now = time.Now()
+		// Do not carry a previous day's baseline into a retreat starting today.
+		if SectDayKey(now) != preparedDay {
+			return ErrListeningNotFresh
+		}
 		var lockedOperator model.SectMember
 		if err := loadSectMemberByUserInTx(tx, userID, &lockedOperator, true); err != nil {
 			return err
@@ -2812,7 +2898,7 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 		if lockedOperator.Role != SectRoleOwner && lockedOperator.Role != SectRoleElder {
 			return storage.ErrSectNoPermission
 		}
-		if lockedOperator.SectID != member.SectID {
+		if lockedOperator.ID != member.ID || lockedOperator.SectID != member.SectID {
 			return storage.ErrSectNoPermission
 		}
 		var lockedSect model.Sect
@@ -2851,6 +2937,16 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 					continue
 				}
 				return err
+			}
+			var currentUser model.User
+			if err := tx.Select("abs_user_id").Where("telegram_id = ?", target.Member.UserID).First(&currentUser).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					continue
+				}
+				return err
+			}
+			if currentUser.AbsUserID != target.User.AbsUserID {
+				continue
 			}
 			if _, active, err := getActiveSectCaveRetreatTx(tx, target.Member.UserID, now); err != nil {
 				return err
@@ -2897,6 +2993,10 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 	})
 
 	if err != nil {
+		if errors.Is(err, ErrListeningNotFresh) {
+			telegram.ReplyTextToMessage(bot, msg, "⏳ 准备期间已跨日，本次未扣除声望，请重新提交闭关。")
+			return
+		}
 		switch SectErrorCode(err) {
 		case "NO_PERMISSION":
 			telegram.ReplyText(bot, chatID, "只有宗主或长老可以开启宗门闭关。")
@@ -2913,7 +3013,7 @@ func handleStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, con
 		return
 	}
 
-	telegram.ReplyText(bot, chatID, fmt.Sprintf("宗门闭关已开启。\n覆盖成员：`%d`\n持续时长：`%d` 小时\n结束时间：`%s`\n消耗宗门声望：`%d`\n剩余宗门声望：`%d`", startedCount, sectCaveSectRetreatHours, sectCaveRetreatEndText(endAt), cost, sectPrestigeAfter))
+	telegram.ReplyTextToMessage(bot, msg, fmt.Sprintf("宗门闭关已开启。\n覆盖成员：`%d`\n持续时长：`%d` 小时\n结束时间：`%s`\n消耗宗门声望：`%d`\n剩余宗门声望：`%d`", startedCount, sectCaveSectRetreatHours, sectCaveRetreatEndText(endAt), cost, sectPrestigeAfter))
 }
 
 func AwardSectContributionInTx(tx *gorm.DB, userID int64, delta int, reason string, refType string, refID string) error {
@@ -3245,7 +3345,7 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 // persistence. Do not acquire a second read lock: a queued batch writer would
 // block recursive RLock calls while waiting for the caller's first read lock.
 func recordDailyListeningStatsFromABSDaysUnlocked(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
-	_, err := recordOfficialDailyListeningStats(userID, absUserID, days, fetchedAt, nil)
+	_, err := recordOfficialDailyListeningStats(userID, absUserID, days, fetchedAt)
 	return err
 }
 
@@ -3369,7 +3469,7 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 	records := make([]model.DailyListeningStat, 0, len(daySet))
 	for dayKey := range daySet {
 		rawSeconds := rawOfficialByDay[dayKey]
-		cappedSeconds := math.Min(cappedListeningSeconds(rawSeconds), dailyListeningElapsedLimit(dayKey, recordedAt))
+		cappedSeconds := dailyListeningCreditSeconds(dayKey, rawSeconds, recordedAt)
 		records = append(records, model.DailyListeningStat{
 			UserID:             userID,
 			AbsUserID:          strings.TrimSpace(absUserID),
@@ -3444,22 +3544,6 @@ func freshTodaySectListeningHoursFromCache(userID int64, now time.Time) (float64
 	return GetTodaySectListeningHoursFromCache(userID, now)
 }
 
-func sumDailyListeningRawSeconds(userID int64) (float64, bool) {
-	if storage.DB == nil || userID == 0 {
-		return 0, false
-	}
-
-	var total float64
-	if err := storage.DB.Model(&model.DailyListeningStat{}).
-		Where("user_id = ?", userID).
-		Select("COALESCE(SUM(raw_seconds), 0)").
-		Scan(&total).Error; err != nil {
-		log.Printf("每日听书原始秒数汇总失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
-		return 0, false
-	}
-	return total, true
-}
-
 // dailyListeningABSFetchMinInterval 限制同一用户连续两次真实 ABS 拉取的间隔。
 // 宗门任务、领奖等消息路径会按需刷新今日净修为；若 10 分钟内已有当日官方数据，
 // 直接复用缓存，避免每次点击都同步打 ABS（最多 1 次统计 + 5 页会话历史）。
@@ -3514,7 +3598,7 @@ func refreshDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, f
 		if !acquireListeningSyncSlot() {
 			return listeningFetchResult{}
 		}
-		defer func() { <-listeningSyncSlots }()
+		defer releaseListeningSyncSlot()
 		days, ok := fetchDailyListeningStatsFromABSUnlocked(userID, absUserID, true, abuseDays...)
 		return listeningFetchResult{days: days, ok: ok}
 	})
@@ -3568,8 +3652,7 @@ func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, for
 	}
 
 	if !forAbuse {
-		reportTotal := abs.AuthoritativeABSListeningTotalSeconds(stats.TotalTime, stats.Days)
-		days, err := recordOfficialDailyListeningStats(userID, absUserID, stats.Days, startedAt, &reportTotal)
+		days, err := recordOfficialDailyListeningStats(userID, absUserID, stats.Days, startedAt)
 		if err != nil {
 			outcome, failure = "write_failed", textfmt.FormatPlainError(err)
 			return nil, false
@@ -3641,27 +3724,9 @@ func refreshSectMembersDailyListeningStatsWithOptions(sectID int64, limit int, f
 }
 
 func getTodaySectListeningHoursFromABS(userID int64, now time.Time) (float64, bool) {
-	if storage.DB == nil || abs.DefaultClient == nil {
+	if !EnsureListeningFresh(userID).Fresh {
 		return 0, false
 	}
-
-	var u model.User
-	if err := storage.DB.Select("telegram_id", "abs_user_id").
-		Where("telegram_id = ?", userID).
-		First(&u).Error; err != nil {
-		return 0, false
-	}
-
-	if strings.TrimSpace(u.AbsUserID) == "" {
-		return 0, false
-	}
-
-	if _, ok := RefreshDailyListeningStatsFromABS(userID, u.AbsUserID); !ok {
-		return 0, false
-	}
-	// Tasks and cached reads share the saved cultivation basis, including
-	// migration/rebind baselines and retreat bonuses. Refolding credited seconds
-	// here would pay excluded account history as new task progress.
 	return GetTodaySectListeningHoursFromCache(userID, now)
 }
 
@@ -3791,10 +3856,8 @@ func sectWeeklyTaskExcessPercent(actual float64, target float64) int {
 func getSectDailyTaskStatuses(userID int64, sectID int64, now time.Time) ([]sectDailyTaskStatus, error) {
 	listenHoursOverride := (*float64)(nil)
 
-	if listenHoursFromABS, listenOK := getTodaySectListeningHoursFromABS(userID, now); listenOK {
-		listenHoursOverride = &listenHoursFromABS
-	} else if listenHoursFromCache, cacheOK := freshTodaySectListeningHoursFromCache(userID, now); cacheOK {
-		listenHoursOverride = &listenHoursFromCache
+	if hours, ok := GetTodaySectListeningHoursFromCache(userID, now); ok {
+		listenHoursOverride = &hours
 	}
 
 	return getSectDailyTaskStatusesTx(storage.DB, userID, sectID, now, listenHoursOverride)
@@ -3978,10 +4041,6 @@ func handleSectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	now := time.Now()
 	dayKey := SectDayKey(now)
 
-	if canViewSectListeningStats(member) {
-		refreshSectMembersDailyListeningStats(member.SectID, sectTaskViewMemberRefreshLimit)
-	}
-
 	sectDailyTaskRewardContributionText := "读取失败"
 	sectDailyTaskRewardPrestigeText := "读取失败"
 	sectDailyTaskRewardContribution, sectDailyTaskRewardPrestige, rewardReadErr := getSectDailyTaskRewardsTxChecked(storage.DB, member.SectID)
@@ -4058,6 +4117,7 @@ func handleSectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 	b.WriteString("\n统计口径按北京时间计算。")
 
+	b.WriteString("\n统计使用已保存数据，由后台更新；领取奖励时仍会校验数据有效性。")
 	telegram.ReplyText(bot, chatID, b.String())
 }
 
@@ -4131,6 +4191,7 @@ func handleMySectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	b.WriteString("完成全部个人任务后，可发送 `领取宗门任务奖励`。\n")
 	b.WriteString("统计口径按北京时间计算。")
 
+	b.WriteString("\n统计使用已保存数据，由后台更新；领取奖励时仍会校验数据有效性。")
 	telegram.ReplyText(bot, chatID, b.String())
 }
 

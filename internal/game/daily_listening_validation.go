@@ -234,6 +234,12 @@ func finitePositiveListeningSeconds(seconds float64) bool {
 	return seconds > 0 && !math.IsNaN(seconds) && !math.IsInf(seconds, 0)
 }
 
+// Shared by ordinary daily credit and activity baselines/progress. Gameplay
+// cultivation suppression and activity reward multipliers apply afterwards.
+func dailyListeningCreditSeconds(day string, raw float64, now time.Time) float64 {
+	return math.Min(cappedListeningSeconds(raw), dailyListeningElapsedLimit(day, now))
+}
+
 func dailyListeningElapsedLimit(day string, now time.Time) float64 {
 	start, err := time.ParseInLocation("2006-01-02", day, storage.DailyOperationsLocation)
 	if err != nil || !now.After(start) {

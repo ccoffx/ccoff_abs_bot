@@ -12,6 +12,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 
+	"ccoff-abs-bot/internal/background"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/sectbonus"
 	"ccoff-abs-bot/internal/spiritfire"
@@ -226,8 +227,23 @@ func RefreshSpiritFireDailyStat(stat *model.DailyListeningStat, now time.Time) e
 }
 
 func handleRefreshMyDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	if CachedListeningFreshness(msg.From.ID).Fresh {
+		sendMyDailyListeningStatFromCache(bot, msg)
+		return
+	}
+	result := background.Submit(fmt.Sprintf("personal_listening:%d", msg.From.ID), func() {
+		_, _, _, err := refreshUserDailyListeningAndCultivation(msg.From.ID)
+		if err != nil {
+			telegram.ReplyText(bot, msg.Chat.ID, "⚠️ 本次听书同步未完成，保留已保存数据，请稍后重试。")
+		}
+		sendMyDailyListeningStatFromCache(bot, msg)
+	})
+	replyBackgroundSubmission(bot, msg.Chat.ID, result, "本人净修为刷新")
+}
+
+func sendMyDailyListeningStatFromCache(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	// Share the cache policy with listening reports and other personal queries.
-	freshness := EnsureListeningFresh(msg.From.ID)
+	freshness := CachedListeningFreshness(msg.From.ID)
 	if storage.DB == nil {
 		telegram.ReplyText(bot, msg.Chat.ID, "❌ 今日净修为读取失败，请稍后再试。")
 		return
@@ -286,20 +302,35 @@ func handleRefreshSectDailyListeningStatsCommand(bot *tgbotapi.BotAPI, msg *tgbo
 		return
 	}
 
-	count := refreshSectMembersDailyListeningStatsWithOptions(member.SectID, 100, true)
-	telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已刷新本宗门 `%d` 名成员的每日净修为。", count))
+	result := background.Submit(fmt.Sprintf("sect_listening:%d", member.SectID), func() {
+		var current model.SectMember
+		if err := storage.DB.Where("user_id = ? AND sect_id = ?", msg.From.ID, member.SectID).First(&current).Error; err != nil || !canViewSectListeningStats(current) {
+			telegram.ReplyText(bot, msg.Chat.ID, "❌ 宗门刷新权限已变化，任务已取消。")
+			return
+		}
+		count := refreshSectMembersDailyListeningStatsWithOptions(member.SectID, 100, true)
+		telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 宗门净修为后台刷新完成：成功 `%d` 名成员。", count))
+	})
+	replyBackgroundSubmission(bot, msg.Chat.ID, result, "宗门净修为刷新")
 }
 
 func handleRefreshAllDailyListeningStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	success, total, skipped, refreshErr := RefreshAllDailyListeningStatsWithOptions(true)
-	// 全服级批量重算属于高危管理操作，补齐与其他管理变更一致的审计留痕。
-	storage.WriteAuditLog(msg.From.ID, "REFRESH_ALL_DAILY_LISTENING", "daily_listening_stats",
-		fmt.Sprintf("全服今日净修为刷新: 成功 %d/%d，跳过 %d", success, total, skipped))
-	if refreshErr != nil {
-		telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 全服今日净修为刷新未全部完成：成功 `%d/%d`，跳过 `%d`。请检查后台错误日志。", success, total, skipped))
-		return
-	}
-	telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 全服今日净修为刷新完成：成功 `%d/%d`，跳过 `%d`。", success, total, skipped))
+	result := background.Submit("listening_full_refresh", func() {
+		if storage.GetUserRole(msg.From.ID) != "super_admin" {
+			telegram.ReplyText(bot, msg.Chat.ID, "❌ 刷新权限已变化，任务已取消。")
+			return
+		}
+		success, total, skipped, refreshErr := RefreshAllDailyListeningStatsWithOptions(true)
+		// 全服级批量重算属于高危管理操作，补齐与其他管理变更一致的审计留痕。
+		storage.WriteAuditLog(msg.From.ID, "REFRESH_ALL_DAILY_LISTENING", "daily_listening_stats",
+			fmt.Sprintf("全服今日净修为刷新: 成功 %d/%d，跳过 %d", success, total, skipped))
+		if refreshErr != nil {
+			telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("⚠️ 全服今日净修为刷新未全部完成：成功 `%d/%d`，跳过 `%d`。请检查后台错误日志。", success, total, skipped))
+			return
+		}
+		telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 全服今日净修为刷新完成：成功 `%d/%d`，跳过 `%d`。", success, total, skipped))
+	})
+	replyBackgroundSubmission(bot, msg.Chat.ID, result, "全服净修为刷新")
 }
 
 func handleQueryDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) {
@@ -323,7 +354,7 @@ func handleQueryDailyListeningStat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, 
 
 	var freshness ListeningFreshness
 	if dayKey == todayKey {
-		freshness = EnsureListeningFresh(targetID)
+		freshness = CachedListeningFreshness(targetID)
 	}
 	var stat model.DailyListeningStat
 	var totalEffective float64

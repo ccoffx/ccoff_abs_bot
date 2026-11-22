@@ -1,7 +1,6 @@
 package game
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -16,7 +15,6 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/realm"
@@ -97,8 +95,8 @@ func worldBossPointDescriptionName(name string) string {
 
 var (
 	worldBossRankOrder = "damage DESC, delta_hours DESC, created_at ASC"
-	// worldBossLiveRefreshMu 串行化实时伤害刷新：调度器、Boss状态/Boss排行/参加Boss 都会触发，
-	// 每轮刷新按参与人数对 ABS 逐个拉取听书时长并回写伤害/血量，重入会导致重复 ABS 请求与伤害重复写库。
+	// worldBossLiveRefreshMu serializes scheduled damage refreshes and payouts.
+	// Foreground queries never acquire it or perform remote synchronization.
 	worldBossLiveRefreshMu sync.Mutex
 )
 
@@ -117,7 +115,7 @@ func worldBossShouldStartAt(local time.Time) bool {
 
 func StartWorldBossScheduler(bot *tgbotapi.BotAPI) {
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(activitySchedulerInterval)
 		defer ticker.Stop()
 
 		runWorldBossSchedulerTick(bot, time.Now())
@@ -149,7 +147,7 @@ func HandleWorldBossCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text st
 	}
 
 	text = strings.TrimSpace(text)
-	if text != "世界Boss" && text != "Boss状态" && text != "参加Boss" && text != "Boss排行" {
+	if text != "世界Boss" && text != "Boss状态" && text != "参加Boss" && text != "Boss排行" && text != "Boss明细" {
 		return false
 	}
 
@@ -162,6 +160,8 @@ func HandleWorldBossCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text st
 		handleJoinWorldBoss(bot, msg)
 	case "Boss排行":
 		handleWorldBossRank(bot, msg)
+	case "Boss明细":
+		handleWorldBossDetail(bot, msg)
 	}
 
 	return true
@@ -209,7 +209,7 @@ func startWorldBossEvent(bot *tgbotapi.BotAPI, chatID int64, now time.Time) {
 			"最后 `%d` 分钟停止新道友加入。\n"+
 			"结算伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技）。\n"+
 			"修为加成：按小境界进度递增，每个完整大境界 `+4%%`，最高 `+25%%`。\n\n"+
-			"发送 `Boss状态` 查看进度，`Boss排行` 查看伤害榜。",
+			"发送 `Boss状态` 查看进度，`Boss排行` 查看伤害榜，`Boss明细` 查看本人战况。",
 		textfmt.EscapeMarkdown(event.Name),
 		event.CurrentHP,
 		event.MaxHP,
@@ -260,7 +260,7 @@ func worldBossJoinDeadline(event model.WorldBossEvent) time.Time {
 }
 
 func canJoinWorldBossAt(event model.WorldBossEvent, now time.Time) bool {
-	if event.BossID == "" || event.Status != "active" || event.ListeningCutoffAt != nil {
+	if event.BossID == "" || event.Status != "active" || event.IsKilled || event.ListeningCutoffAt != nil {
 		return false
 	}
 	if now.Before(event.StartAt) || !now.Before(event.EndAt) {
@@ -269,71 +269,97 @@ func canJoinWorldBossAt(event model.WorldBossEvent, now time.Time) bool {
 	return now.Before(worldBossJoinDeadline(event))
 }
 
-func refreshWorldBossStoredHPByParticipants(bossID string) (model.WorldBossEvent, error) {
-	var event model.WorldBossEvent
-	if err := storage.DB.Where("boss_id = ? AND status = ?", bossID, "active").First(&event).Error; err != nil {
-		return event, err
-	}
+func refreshWorldBossStoredHPByParticipants(bossID string) (event model.WorldBossEvent, err error) {
+	err = storage.DB.Transaction(func(tx *gorm.DB) error {
+		event, err = refreshWorldBossStoredHPByParticipantsInTx(tx, bossID)
+		return err
+	})
+	return event, err
+}
 
-	var participantCount int64
-	if err := storage.DB.Model(&model.WorldBossParticipant{}).
-		Where("boss_id = ?", bossID).
-		Count(&participantCount).Error; err != nil {
-		return event, err
-	}
+func refreshWorldBossStoredHPByParticipantsInTx(tx *gorm.DB, bossID string) (event model.WorldBossEvent, err error) {
+	err = func() error {
+		// Serialize the local join/HP update with background publication, without
+		// waiting for the refresh mutex or holding a transaction across ABS calls.
+		lock := tx.Model(&model.WorldBossEvent{}).Where("boss_id = ? AND status = ?", bossID, "active").UpdateColumn("status", "active")
+		if lock.Error != nil {
+			return lock.Error
+		}
+		if lock.RowsAffected != 1 {
+			return fmt.Errorf("WORLD_BOSS_ACTIVE_STATE_CHANGED")
+		}
+		if err := tx.Where("boss_id = ? AND status = ?", bossID, "active").First(&event).Error; err != nil {
+			return err
+		}
 
-	var totalDamage float64
-	if err := storage.DB.Model(&model.WorldBossParticipant{}).
-		Where("boss_id = ?", bossID).
-		Select("COALESCE(SUM(damage), 0)").
-		Scan(&totalDamage).Error; err != nil {
-		return event, err
-	}
-	totalDamage = roundWorldBossDamage(totalDamage)
+		if event.IsKilled || event.ListeningCutoffAt != nil {
+			return nil
+		}
 
-	maxHP := calculateWorldBossMaxHP(int(participantCount))
-	currentHP := float64(maxHP) - totalDamage
-	if currentHP < 0 {
-		currentHP = 0
-	} else {
-		currentHP = roundWorldBossDamage(currentHP)
-	}
-	isKilled := totalDamage >= float64(maxHP)
+		var participantCount int64
+		if err := tx.Model(&model.WorldBossParticipant{}).
+			Where("boss_id = ?", bossID).
+			Count(&participantCount).Error; err != nil {
+			return err
+		}
 
-	res := storage.DB.Model(&model.WorldBossEvent{}).
-		Where("boss_id = ? AND status = ?", bossID, "active").
-		Updates(map[string]interface{}{
-			"max_hp":            maxHP,
-			"current_hp":        currentHP,
-			"is_killed":         isKilled,
-			"participant_count": int(participantCount),
-		})
-	if res.Error != nil {
-		return event, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return event, fmt.Errorf("WORLD_BOSS_ACTIVE_STATE_CHANGED")
-	}
+		var totalDamage float64
+		if err := tx.Model(&model.WorldBossParticipant{}).
+			Where("boss_id = ?", bossID).
+			Select("COALESCE(SUM(damage), 0)").
+			Scan(&totalDamage).Error; err != nil {
+			return err
+		}
+		totalDamage = roundWorldBossDamage(totalDamage)
 
-	event.MaxHP = maxHP
-	event.CurrentHP = currentHP
-	event.IsKilled = isKilled
-	event.ParticipantCount = int(participantCount)
-	return event, nil
+		maxHP := calculateWorldBossMaxHP(int(participantCount))
+		currentHP := float64(maxHP) - totalDamage
+		if currentHP < 0 {
+			currentHP = 0
+		} else {
+			currentHP = roundWorldBossDamage(currentHP)
+		}
+		isKilled := totalDamage >= float64(maxHP)
+		if isKilled {
+			cutoff := minTime(time.Now(), event.EndAt)
+			event.ListeningCutoffAt = &cutoff
+		}
+
+		res := tx.Model(&model.WorldBossEvent{}).
+			Where("boss_id = ? AND status = ?", bossID, "active").
+			Updates(map[string]interface{}{
+				"max_hp":              maxHP,
+				"current_hp":          currentHP,
+				"is_killed":           isKilled,
+				"listening_cutoff_at": event.ListeningCutoffAt,
+				"participant_count":   int(participantCount),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("WORLD_BOSS_ACTIVE_STATE_CHANGED")
+		}
+
+		event.MaxHP = maxHP
+		event.CurrentHP = currentHP
+		event.IsKilled = isKilled
+		event.ParticipantCount = int(participantCount)
+		return nil
+	}()
+	return event, err
 }
 
 func settleExpiredWorldBosses(bot *tgbotapi.BotAPI, now time.Time) {
 	recoverStaleWorldBossSettlements(now)
 
 	var events []model.WorldBossEvent
-	if err := storage.DB.Where("status = ? AND end_at <= ?", "active", now).Find(&events).Error; err != nil {
+	if err := storage.DB.Where("status IN ? AND (end_at <= ? OR listening_cutoff_at IS NOT NULL OR is_killed = ?)", []string{"active", "settling"}, now, true).Find(&events).Error; err != nil {
 		log.Printf("⚠️ 查询到期世界Boss失败，已跳过本轮结算扫描: now=%s err=%s", textfmt.FormatPlainValue(now.Format(time.RFC3339)), textfmt.FormatPlainError(err))
 		return
 	}
 
-	for _, event := range events {
-		settleWorldBoss(bot, event.BossID)
-	}
+	runActivityEventBatch(len(events), func(i int) { settleWorldBoss(bot, events[i].BossID) })
 }
 
 func refreshActiveWorldBosses(bot *tgbotapi.BotAPI, now time.Time) {
@@ -346,7 +372,11 @@ func refreshActiveWorldBosses(bot *tgbotapi.BotAPI, now time.Time) {
 	}
 
 	for _, event := range events {
-		if time.Since(event.UpdatedAt) < worldBossLiveRefreshInterval {
+		if event.IsKilled || event.ListeningCutoffAt != nil {
+			settleWorldBoss(bot, event.BossID)
+			continue
+		}
+		if !worldBossLiveRefreshDue(event, now) {
 			continue
 		}
 		refreshed, ran, err := tryRefreshWorldBossLiveDamage(event)
@@ -381,14 +411,6 @@ func recoverStaleWorldBossSettlements(now time.Time) {
 	}
 }
 
-func refreshWorldBossLiveDamage(event model.WorldBossEvent) (model.WorldBossEvent, float64, error) {
-	// 用户触发路径（Boss状态/Boss排行/参加Boss）使用阻塞锁：等待在途刷新完成后重算，
-	// 保证参加后立即看到最新血量；调度器走 tryRefreshWorldBossLiveDamage，忙时跳过。
-	worldBossLiveRefreshMu.Lock()
-	defer worldBossLiveRefreshMu.Unlock()
-	return refreshWorldBossLiveDamageLocked(event)
-}
-
 // tryRefreshWorldBossLiveDamage 调度器专用：已有刷新在途时直接跳过，等待下一轮 tick，避免重复 ABS 拉取。
 // 返回 ran=false 表示本轮未执行，调用方不得基于旧数据刷新战榜或结算。
 func tryRefreshWorldBossLiveDamage(event model.WorldBossEvent) (model.WorldBossEvent, bool, error) {
@@ -396,7 +418,14 @@ func tryRefreshWorldBossLiveDamage(event model.WorldBossEvent) (model.WorldBossE
 		return event, false, nil
 	}
 	defer worldBossLiveRefreshMu.Unlock()
-	refreshed, _, err := refreshWorldBossLiveDamageLocked(event)
+	var current model.WorldBossEvent
+	if err := storage.DB.Where("boss_id = ?", event.BossID).First(&current).Error; err != nil {
+		return event, false, err
+	}
+	if !worldBossLiveRefreshDue(current, time.Now()) {
+		return current, false, nil
+	}
+	refreshed, _, err := refreshWorldBossLiveDamageLocked(current)
 	return refreshed, true, err
 }
 
@@ -404,128 +433,151 @@ func refreshWorldBossLiveDamageLocked(event model.WorldBossEvent) (model.WorldBo
 	if event.BossID == "" || event.Status != "active" {
 		return event, 0, nil
 	}
-
 	var participants []model.WorldBossParticipant
-	if err := storage.DB.Where("boss_id = ? AND deleted_at IS NULL", event.BossID).Find(&participants).Error; err != nil {
+	if err := storage.DB.Where("boss_id = ?", event.BossID).Find(&participants).Error; err != nil {
 		return event, 0, err
 	}
-
-	totalDamage := 0.0
-	maxHP := calculateWorldBossMaxHP(len(participants))
-	for i := range participants {
-		p := &participants[i]
-
-		var u model.User
-		if err := storage.DB.Where("telegram_id = ?", p.UserID).First(&u).Error; err != nil {
-			if !errors.Is(err, gorm.ErrRecordNotFound) {
-				log.Printf("⚠️ 世界Boss实时读取本地档案失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), p.UserID, textfmt.FormatPlainError(err))
+	refreshAt := time.Now()
+	processed := make([]bool, len(participants))
+	failures := make([]error, len(participants))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(listeningSyncWorkers-1, len(participants)) {
+		workers.Go(func() {
+			for i := range jobs {
+				processed[i], failures[i] = refreshWorldBossLiveParticipant(&participants[i], event, refreshAt)
 			}
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if err := clearWorldBossParticipantComputedDamage(*p, "user_not_found"); err != nil {
-					return event, totalDamage, err
-				}
-			} else {
-				totalDamage += p.Damage
-			}
-			continue
-		}
-		if u.Status != "active" || p.AbsUserID == "" || u.AbsUserID != p.AbsUserID {
-			if err := clearWorldBossParticipantComputedDamage(*p, "binding_changed_or_unbound"); err != nil {
-				return event, totalDamage, err
-			}
-			continue
-		}
-
-		provenHours, _, err := worldBossListeningHours(p, event, u.AbsUserID, time.Now())
-		if err != nil {
-			log.Printf("⚠️ 世界Boss实时读取ABS失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), p.UserID, textfmt.FormatPlainError(err))
-			totalDamage += p.Damage
-			continue
-		}
-
-		maxDeltaHours := calculateWorldBossDamageWindowHours(*p, event, time.Now())
-		damage, baseDamage, multiplier := calculateWorldBossDamage(0, provenHours, maxDeltaHours)
-		damage, multiplier, err = ApplyWorldBossDamageBonusesChecked(p.UserID, baseDamage)
-		if err != nil {
-			log.Printf("⚠️ 世界Boss实时读取伤害加成失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), p.UserID, textfmt.FormatPlainError(err))
-			totalDamage += p.Damage
-			continue
-		}
-
-		deltaHours := provenHours
-		finalHours := p.BaseHours + provenHours
-		if deltaHours > maxDeltaHours {
-			deltaHours = maxDeltaHours
-		}
-		totalDamage += damage
-
-		damageRes := storage.DB.Model(&model.WorldBossParticipant{}).
-			Where("id = ? AND boss_id = ? AND user_id = ?", p.ID, event.BossID, p.UserID).
-			Updates(map[string]interface{}{
-				"final_hours": finalHours,
-				"delta_hours": deltaHours,
-				"base_damage": baseDamage,
-				"multiplier":  multiplier,
-				"damage":      damage,
-			})
-		if damageRes.Error != nil {
-			log.Printf("⚠️ 世界Boss实时伤害写入失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), p.UserID, textfmt.FormatPlainError(damageRes.Error))
-		} else if damageRes.RowsAffected == 0 {
-			log.Printf("⚠️ 世界Boss实时伤害写入未命中: boss=%s user=%d participant=%d", textfmt.FormatPlainValue(event.BossID), p.UserID, p.ID)
-		}
-	}
-	totalDamage = roundWorldBossDamage(totalDamage)
-
-	currentHP := float64(maxHP) - totalDamage
-	if currentHP < 0 {
-		currentHP = 0
-	} else {
-		currentHP = roundWorldBossDamage(currentHP)
-	}
-	isKilled := totalDamage >= float64(maxHP)
-
-	event.MaxHP = maxHP
-	event.CurrentHP = currentHP
-	event.IsKilled = isKilled
-	event.ParticipantCount = len(participants)
-
-	eventRes := storage.DB.Model(&model.WorldBossEvent{}).
-		Where("boss_id = ? AND status = ?", event.BossID, "active").
-		Updates(map[string]interface{}{
-			"max_hp":            maxHP,
-			"current_hp":        currentHP,
-			"is_killed":         isKilled,
-			"participant_count": len(participants),
 		})
-	if eventRes.Error != nil {
-		return event, totalDamage, eventRes.Error
 	}
-	if eventRes.RowsAffected == 0 {
-		return event, totalDamage, fmt.Errorf("WORLD_BOSS_ACTIVE_STATE_CHANGED")
+	for i := range participants {
+		jobs <- i
 	}
-
-	return event, totalDamage, nil
+	close(jobs)
+	workers.Wait()
+	incomplete := false
+	for i, err := range failures {
+		if err != nil {
+			incomplete = true
+			log.Printf("世界Boss后台刷新参与者失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), participants[i].UserID, textfmt.FormatPlainError(err))
+		}
+	}
+	completedAt := time.Now()
+	totalDamage := 0.0
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		// Acquire the writer before eligibility reads, without holding it during ABS.
+		lock := tx.Model(&model.WorldBossEvent{}).Where("boss_id = ? AND status = ? AND listening_cutoff_at IS NULL", event.BossID, "active").UpdateColumn("status", "active")
+		if lock.Error != nil {
+			return lock.Error
+		}
+		if lock.RowsAffected != 1 {
+			return fmt.Errorf("WORLD_BOSS_ACTIVE_STATE_CHANGED")
+		}
+		incomplete = false
+		for i := range participants {
+			p := participants[i]
+			eligible, err := activityLiveParticipantEligible(tx, p.UserID, p.AbsUserID, 0)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				if err := clearWorldBossParticipantComputedDamageInTx(tx, p, "eligibility_changed_before_publication"); err != nil {
+					return err
+				}
+				continue
+			}
+			if failures[i] != nil {
+				// A failed account retains its saved damage; healthy accounts still publish.
+				incomplete = true
+				totalDamage += p.Damage
+				continue
+			}
+			if !processed[i] {
+				if err := clearWorldBossParticipantComputedDamageInTx(tx, p, "ineligible_for_live_preview"); err != nil {
+					return err
+				}
+				continue
+			}
+			res := tx.Model(&model.WorldBossParticipant{}).
+				Where("id = ? AND boss_id = ? AND user_id = ?", p.ID, event.BossID, p.UserID).
+				Updates(map[string]interface{}{"final_hours": p.FinalHours, "delta_hours": p.DeltaHours,
+					"base_damage": p.BaseDamage, "multiplier": p.Multiplier, "damage": p.Damage})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected != 1 {
+				return fmt.Errorf("WORLD_BOSS_PARTICIPANT_DAMAGE_UPDATE_MISSED")
+			}
+			totalDamage += p.Damage
+		}
+		totalDamage = roundWorldBossDamage(totalDamage)
+		var count int64
+		if err := tx.Model(&model.WorldBossParticipant{}).Where("boss_id = ?", event.BossID).Count(&count).Error; err != nil {
+			return err
+		}
+		event.MaxHP = calculateWorldBossMaxHP(int(count))
+		event.CurrentHP = math.Max(0, roundWorldBossDamage(float64(event.MaxHP)-totalDamage))
+		event.IsKilled = totalDamage >= float64(event.MaxHP)
+		event.ParticipantCount = int(count)
+		event.LiveRefreshedAt, event.LiveRefreshIncomplete = &completedAt, incomplete
+		if event.IsKilled {
+			cutoff := minTime(completedAt, event.EndAt)
+			event.ListeningCutoffAt = &cutoff
+		}
+		res := tx.Model(&model.WorldBossEvent{}).
+			Where("boss_id = ? AND status = ? AND listening_cutoff_at IS NULL", event.BossID, "active").
+			Updates(map[string]interface{}{"max_hp": event.MaxHP, "current_hp": event.CurrentHP, "is_killed": event.IsKilled,
+				"participant_count": event.ParticipantCount, "live_refreshed_at": completedAt, "live_refresh_incomplete": incomplete,
+				"listening_cutoff_at": event.ListeningCutoffAt})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("WORLD_BOSS_ACTIVE_STATE_CHANGED")
+		}
+		return nil
+	})
+	log.Printf("Boss刷新完成: boss=%s participants=%d failures=%d duration_ms=%d", textfmt.FormatPlainValue(event.BossID), len(participants), countActivityFailures(failures), time.Since(refreshAt).Milliseconds())
+	return event, totalDamage, err
 }
 
 func settleWorldBoss(bot *tgbotapi.BotAPI, bossID string) {
-	worldBossLiveRefreshMu.Lock()
-	defer worldBossLiveRefreshMu.Unlock()
-	now := time.Now()
-	res := storage.DB.Model(&model.WorldBossEvent{}).
-		Where("boss_id = ? AND status = ?", bossID, "active").
-		Updates(map[string]interface{}{
-			"status": "settling",
-			// A kill can finish the event early. Freeze one cutoff for all
-			// participants and retain it if historical scanning needs retries.
-			"listening_cutoff_at": gorm.Expr("COALESCE(listening_cutoff_at, CASE WHEN end_at < ? THEN end_at ELSE ? END)", now, now),
-		})
-	if res.Error != nil || res.RowsAffected == 0 {
+	// Scheduled passes retry later rather than accumulating blocked goroutines.
+	if !worldBossLiveRefreshMu.TryLock() {
 		return
 	}
-
+	defer worldBossLiveRefreshMu.Unlock()
+	now := time.Now()
 	var event model.WorldBossEvent
-	if err := storage.DB.Where("boss_id = ?", bossID).First(&event).Error; err != nil {
-		resetWorldBossToActive(bossID, err)
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		// Acquire the writer before reading the cutoff, and publish the claim
+		// and its immutable deadline together before any final ABS requests.
+		res := tx.Model(&model.WorldBossEvent{}).
+			Where("boss_id = ? AND status IN ?", bossID, []string{"active", "settling"}).Update("status", "settling")
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		if err := tx.Where("boss_id = ?", bossID).First(&event).Error; err != nil {
+			return err
+		}
+		if event.ListeningCutoffAt != nil {
+			return nil
+		}
+		cutoff := minTime(now, event.EndAt)
+		// Recover kills published by older versions before they could save a
+		// cutoff. Their last live publication is the known kill observation.
+		if event.IsKilled && event.LiveRefreshedAt != nil {
+			cutoff = minTime(cutoff, *event.LiveRefreshedAt)
+		}
+		event.ListeningCutoffAt = &cutoff
+		return tx.Model(&event).Update("listening_cutoff_at", cutoff).Error
+	})
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("世界Boss结算认领失败: boss=%s err=%s", textfmt.FormatPlainValue(bossID), textfmt.FormatPlainError(err))
+		}
 		return
 	}
 
@@ -535,6 +587,24 @@ func settleWorldBoss(bot *tgbotapi.BotAPI, bossID string) {
 		return
 	}
 	event.MaxHP = calculateWorldBossMaxHP(len(participants))
+	snapshotErrors := captureActivitySnapshotBatch(len(participants), func(i int) error {
+		p := &participants[i]
+		var current model.User
+		if err := storage.DB.Where("telegram_id = ?", p.UserID).First(&current).Error; err != nil {
+			return err
+		}
+		if current.Status != "active" || p.AbsUserID == "" || current.AbsUserID != p.AbsUserID {
+			return nil
+		}
+		_, _, err := worldBossListeningHours(p, event, p.AbsUserID, time.Now())
+		return err
+	})
+
+	for _, err := range snapshotErrors {
+		if errors.Is(err, ErrActivitySnapshotPending) {
+			return
+		}
+	}
 
 	rewardParticipants := make([]model.WorldBossParticipant, 0, len(participants))
 	for i := range participants {
@@ -560,19 +630,16 @@ func settleWorldBoss(bot *tgbotapi.BotAPI, bossID string) {
 			continue
 		}
 
-		provenHours, complete, err := worldBossListeningHours(p, event, u.AbsUserID, time.Now())
-		if err != nil || !complete {
-			if err == nil {
-				err = fmt.Errorf("WORLD_BOSS_HISTORY_SCAN_PENDING")
-			}
-			resetWorldBossToActive(bossID, err)
+		if snapshotErrors[i] != nil || !p.ListeningSnapshot.Finalized {
+			resetWorldBossToActive(bossID, fmt.Errorf("WORLD_BOSS_FINAL_SNAPSHOT_FAILED: %v", snapshotErrors[i]))
 			return
 		}
+		provenHours := p.ListeningSnapshot.Seconds / 3600
 
 		// Use current wall-clock time; the helper clamps the window to the event end time.
 		maxDeltaHours := calculateWorldBossDamageWindowHours(*p, event, time.Now())
-		damage, baseDamage, multiplier := calculateWorldBossDamage(0, provenHours, maxDeltaHours)
-		damage, multiplier, err = ApplyWorldBossDamageBonusesChecked(p.UserID, baseDamage)
+		damage, baseDamage, multiplier := calculateWorldBossDamage(provenHours, maxDeltaHours)
+		damage, multiplier, err := ApplyWorldBossDamageBonusesChecked(p.UserID, baseDamage)
 		if err != nil {
 			resetWorldBossToActive(bossID, err)
 			return
@@ -979,93 +1046,45 @@ func awardWorldBossSectRewardTx(tx *gorm.DB, userID int64, contribution int, pre
 }
 
 func handleJoinWorldBoss(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	event, eventErr := getActiveWorldBossChecked()
-	if errors.Is(eventErr, gorm.ErrRecordNotFound) {
-		telegram.ReplyTextToMessage(bot, msg, "📜 当前没有开放中的世界Boss。\n\n开放时间：每周六、周日 `21:00 - 22:00`。")
+	event, err := getActiveWorldBossChecked()
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		replyActivityEntry(bot, msg, "📜 当前没有开放中的世界Boss。")
 		return
 	}
-	if eventErr != nil {
-		log.Printf("⚠️ 世界Boss参加活动读取失败: user=%d err=%s", msg.From.ID, textfmt.FormatPlainError(eventErr))
-		telegram.ReplyTextToMessage(bot, msg, "❌ 世界Boss状态读取失败，请稍后重试。")
+	if err != nil {
+		replyActivityEntry(bot, msg, "❌ 世界Boss状态读取失败，请稍后重试。")
 		return
 	}
-	now := time.Now()
-	if !canJoinWorldBossAt(event, now) {
-		telegram.ReplyTextToMessage(bot, msg, fmt.Sprintf(
-			"⚠️ 本期世界Boss已进入最后 `%d` 分钟冲刺阶段，停止新道友加入。\n\n请等待下一场 Boss 降临。",
-			int(worldBossJoinCloseBeforeEnd.Minutes()),
-		))
+	var user model.User
+	if err := storage.DB.Where("telegram_id = ?", msg.From.ID).First(&user).Error; err != nil {
+		replyActivityEntry(bot, msg, "❌ 账号档案读取失败，请稍后重试。")
 		return
 	}
-
-	var u model.User
-	if err := storage.DB.Where("telegram_id = ?", msg.From.ID).First(&u).Error; err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("⚠️ 世界Boss参加读取本地档案失败: user=%d err=%s", msg.From.ID, textfmt.FormatPlainError(err))
-			telegram.ReplyTextToMessage(bot, msg, "❌ 参加世界Boss读取本地档案失败，请稍后重试。")
+	var existing model.WorldBossParticipant
+	err = storage.DB.Where("boss_id = ? AND user_id = ?", event.BossID, msg.From.ID).First(&existing).Error
+	if err == nil {
+		if existing.AbsUserID != user.AbsUserID {
+			replyActivityEntry(bot, msg, "⚠️ 本期已有参与记录，但账号绑定已变化，无法重新入场。请发送 `Boss明细` 查看记录。")
 			return
 		}
-		telegram.ReplyTextToMessage(bot, msg, "❌ 参加世界Boss需要先绑定有效 ABS 听书账号。")
+		replyActivityEntry(bot, msg, formatWorldBossEntry(event, existing))
 		return
 	}
-	if u.AbsUserID == "" {
-		telegram.ReplyTextToMessage(bot, msg, "❌ 参加世界Boss需要先绑定有效 ABS 听书账号。")
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		replyActivityEntry(bot, msg, "❌ 参与记录读取失败，请稍后重试。")
 		return
 	}
-	usable, statusErr := storage.UserHasUsableLocalAbsAccountAt(u, now)
-	if statusErr != nil {
-		log.Printf("⚠️ 世界Boss参加状态读取失败: user=%d abs=%s err=%s", msg.From.ID, textfmt.FormatPlainValue(u.AbsUserID), textfmt.FormatPlainError(statusErr))
-		telegram.ReplyTextToMessage(bot, msg, "❌ 账号状态读取失败，请稍后重试。")
+	if !canJoinWorldBossAt(event, time.Now()) {
+		replyActivityEntry(bot, msg, "⏳ 当前 Boss 已停止新道友加入，请等待下一场活动。")
 		return
 	}
-	if !usable {
-		telegram.ReplyTextToMessage(bot, msg, "❌ 参加世界Boss需要当前有效且未暂停的 ABS 听书账号。")
+	usable, err := storage.UserHasUsableLocalAbsAccountAt(user, time.Now())
+	if err != nil || !usable {
+		replyActivityEntry(bot, msg, "❌ 参加世界Boss需要有效且未暂停的 ABS 听书账号。")
 		return
 	}
-
-	baseHours, err := getWorldBossRawListeningHours(u.AbsUserID)
-	if err != nil {
-		telegram.ReplyTextToMessage(bot, msg, "❌ 读取当前实际听书时长失败，请稍后重试。")
-		return
-	}
-
-	userName := textfmt.GetTelegramDisplayName(msg.From)
-	_, err = createWorldBossParticipantInTx(storage.DB, &model.WorldBossParticipant{
-		BossID:    event.BossID,
-		UserID:    msg.From.ID,
-		UserName:  userName,
-		BaseHours: baseHours,
-		AbsUserID: u.AbsUserID,
-	})
-	if err != nil {
-		telegram.ReplyTextToMessage(bot, msg, "❌ 参加失败，请稍后重试。")
-		return
-	}
-
-	var p model.WorldBossParticipant
-	baseHoursText := fmt.Sprintf("`%.1f` 小时", baseHours)
-	if err := storage.DB.Where("boss_id = ? AND user_id = ?", event.BossID, msg.From.ID).First(&p).Error; err != nil {
-		log.Printf("⚠️ 世界Boss参与记录读取失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), msg.From.ID, textfmt.FormatPlainError(err))
-		baseHoursText = "`读取失败`"
-	} else {
-		baseHoursText = fmt.Sprintf("`%.1f` 小时", p.BaseHours)
-	}
-	if refreshed, err := refreshWorldBossStoredHPByParticipants(event.BossID); err == nil {
-		event = refreshed
-	} else {
-		log.Printf("⚠️ 世界Boss参与后血量刷新失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), msg.From.ID, textfmt.FormatPlainError(err))
-	}
-
-	ensureWorldBossLiveBoard(bot, event)
-
-	telegram.ReplyTextToMessage(bot, msg, fmt.Sprintf(
-		"✅ 已加入世界Boss讨伐。\n\nBoss：**%s**\n当前基线实际听书：%s\n当前血量：`%.2f/%d`\n参与人数：`%d`\n\n请在 `22:00` 前实际听书，结算时仅按参与后的 Boss 时段实际听书时长造成伤害。",
-		textfmt.EscapeMarkdown(event.Name),
-		baseHoursText,
-		event.CurrentHP,
-		event.MaxHP,
-		event.ParticipantCount,
-	))
+	submitActivityEntry(bot, msg, model.ActivityEntryRequest{Kind: activityEntryBoss, EventID: event.BossID, UserID: msg.From.ID,
+		AbsUserID: user.AbsUserID, DeadlineAt: worldBossJoinDeadline(event)})
 }
 
 func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -1079,30 +1098,10 @@ func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		telegram.ReplyText(bot, msg.Chat.ID, "📜 世界Boss状态暂时读取失败，请稍后重试。")
 		return
 	}
-	if event.Status == "active" {
-		// 实时刷新按参与人数逐个拉取 ABS 听书时长，对单用户加冷却防止刷屏拖垮 ABS。
-		if !storage.CheckRateLimit(msg.From.ID, "world_boss_live_refresh", 10*time.Second) {
-			telegram.ReplyText(bot, msg.Chat.ID, "⏳ 查询太频繁了，请稍等几秒再刷新实时战况。")
-			return
-		}
-		if refreshed, _, err := refreshWorldBossLiveDamage(event); err == nil {
-			event = refreshed
-			ensureWorldBossLiveBoard(bot, event)
-			if event.IsKilled {
-				settleWorldBoss(bot, event.BossID)
-				if latest, latestErr := getActiveOrLatestWorldBossChecked(); latestErr == nil {
-					event = latest
-				} else if latestErr != nil && !errors.Is(latestErr, gorm.ErrRecordNotFound) {
-					log.Printf("⚠️ 世界Boss状态结算后活动重读失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), msg.From.ID, textfmt.FormatPlainError(latestErr))
-				}
-			}
-		} else {
-			log.Printf("⚠️ 世界Boss状态实时刷新失败: boss=%s err=%s", textfmt.FormatPlainValue(event.BossID), textfmt.FormatPlainError(err))
-		}
-	}
-
 	statusText := "进行中"
-	if event.Status == "active" && event.IsKilled {
+	if event.Status != "settled" && (event.Status == "settling" || event.ListeningCutoffAt != nil || (event.Status == "active" && !time.Now().Before(event.EndAt))) {
+		statusText = "结算中"
+	} else if event.Status == "active" && event.IsKilled {
 		statusText = "已击杀，待结算"
 	} else if event.Status == "settled" {
 		if event.IsKilled {
@@ -1113,7 +1112,7 @@ func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	telegram.ReplyText(bot, msg.Chat.ID, fmt.Sprintf(
-		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技），不计算白天净修为，无单人伤害上限。\n修为加成：按小境界进度递增，每个完整大境界 `+4%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。",
+		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技），不计算白天净修为，无单人伤害上限。\n修为加成：按小境界进度递增，每个完整大境界 `+4%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。%s",
 		textfmt.EscapeMarkdown(event.Name),
 		statusText,
 		event.CurrentHP,
@@ -1126,6 +1125,7 @@ func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		worldBossMaxHP,
 		worldBossActualDamagePerHour,
 		int(worldBossJoinCloseBeforeEnd.Minutes()),
+		worldBossLiveRefreshNotice(event),
 	))
 }
 
@@ -1140,28 +1140,6 @@ func handleWorldBossRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		telegram.ReplyText(bot, msg.Chat.ID, "📜 暂无世界Boss记录。")
 		return
 	}
-	if event.Status == "active" {
-		// 实时刷新按参与人数逐个拉取 ABS 听书时长，对单用户加冷却防止刷屏拖垮 ABS。
-		if !storage.CheckRateLimit(msg.From.ID, "world_boss_live_refresh", 10*time.Second) {
-			telegram.ReplyText(bot, msg.Chat.ID, "⏳ 查询太频繁了，请稍等几秒再刷新实时战况。")
-			return
-		}
-		if refreshed, _, err := refreshWorldBossLiveDamage(event); err == nil {
-			event = refreshed
-			ensureWorldBossLiveBoard(bot, event)
-			if event.IsKilled {
-				settleWorldBoss(bot, event.BossID)
-				if latest, latestErr := getActiveOrLatestWorldBossChecked(); latestErr == nil {
-					event = latest
-				} else if latestErr != nil && !errors.Is(latestErr, gorm.ErrRecordNotFound) {
-					log.Printf("⚠️ 世界Boss排行结算后活动重读失败: boss=%s user=%d err=%s", textfmt.FormatPlainValue(event.BossID), msg.From.ID, textfmt.FormatPlainError(latestErr))
-				}
-			}
-		} else {
-			log.Printf("⚠️ 世界Boss排行实时刷新失败: boss=%s err=%s", textfmt.FormatPlainValue(event.BossID), textfmt.FormatPlainError(err))
-		}
-	}
-
 	participants, err := worldBossTopParticipants(event.BossID, 10)
 	if err != nil {
 		log.Printf("⚠️ 世界Boss排行读取失败: boss=%s err=%s", textfmt.FormatPlainValue(event.BossID), textfmt.FormatPlainError(err))
@@ -1170,7 +1148,7 @@ func handleWorldBossRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if len(participants) == 0 {
-		telegram.ReplyText(bot, msg.Chat.ID, "📜 当前世界Boss暂无参与者。")
+		telegram.ReplyText(bot, msg.Chat.ID, "📜 当前世界Boss暂无参与者。"+worldBossLiveRefreshNotice(event))
 		return
 	}
 
@@ -1189,6 +1167,8 @@ func handleWorldBossRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		))
 	}
 
+	b.WriteString("\n发送 `Boss明细` 查看本人的听书时长与伤害。\n")
+	b.WriteString(worldBossLiveRefreshNotice(event))
 	telegram.ReplyText(bot, msg.Chat.ID, b.String())
 }
 
@@ -1235,7 +1215,9 @@ func sendWorldBossSettlement(bot *tgbotapi.BotAPI, event model.WorldBossEvent, k
 
 	targetChatID := event.ChatID
 	if targetChatID == 0 {
-		targetChatID = config.AppConfig.NoticeGroupID
+		if config.AppConfig != nil {
+			targetChatID = config.AppConfig.NoticeGroupID
+		}
 	}
 	if targetChatID != 0 {
 		telegram.SendGroupAutoDeleteMessage(bot, targetChatID, notice)
@@ -1274,10 +1256,12 @@ func renderWorldBossLiveBoard(event model.WorldBossEvent) string {
 
 	if participantsErr != nil {
 		b.WriteString("排行读取失败，请稍后发送 `Boss排行` 查看。\n")
+		b.WriteString(worldBossLiveRefreshNotice(event))
 		return b.String()
 	}
 	if len(participants) == 0 {
 		b.WriteString("暂无道友参战。\n")
+		b.WriteString(worldBossLiveRefreshNotice(event))
 		return b.String()
 	}
 
@@ -1292,7 +1276,7 @@ func renderWorldBossLiveBoard(event model.WorldBossEvent) string {
 		))
 	}
 
-	b.WriteString("\n每 2 分钟自动刷新；发送 `Boss排行` 可手动刷新。")
+	b.WriteString(worldBossLiveRefreshNotice(event))
 	return b.String()
 }
 
@@ -1424,8 +1408,7 @@ func getActiveOrLatestWorldBossChecked() (model.WorldBossEvent, error) {
 	return event, nil
 }
 
-func calculateWorldBossDamage(baseHours float64, finalHours float64, maxDeltaHours float64) (float64, float64, float64) {
-	deltaHours := finalHours - baseHours
+func calculateWorldBossDamage(deltaHours float64, maxDeltaHours float64) (float64, float64, float64) {
 	if deltaHours < 0 {
 		deltaHours = 0
 	}
@@ -1533,31 +1516,6 @@ func calculateWorldBossDamageWindowHours(p model.WorldBossParticipant, event mod
 		return 0
 	}
 	return end.Sub(start).Hours()
-}
-
-func getWorldBossRawListeningHours(absUserID string) (float64, error) {
-	if absUserID == "" {
-		return 0, storage.ErrAbsUserIDEmpty
-	}
-
-	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
-	if err != nil {
-		return 0, err
-	}
-	if code != 200 {
-		return 0, fmt.Errorf("ABS_STATUS_%d", code)
-	}
-
-	var stats struct {
-		TotalTime float64            `json:"totalTime"`
-		Days      map[string]float64 `json:"days"`
-	}
-	if err := json.Unmarshal(body, &stats); err != nil {
-		return 0, err
-	}
-
-	rawSeconds := abs.AuthoritativeABSListeningTotalSeconds(stats.TotalTime, stats.Days)
-	return rawSeconds / 3600.0, nil
 }
 
 // Activity refreshes use the same authoritative daily records and atomic

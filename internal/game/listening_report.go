@@ -12,7 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Render fresh snapshots locally; synchronize only expired data before reading.
+// Read the saved report without remote synchronization or a batch wait.
 // Keep the client argument for callers compiled against the existing API.
 func GetPersonalReport(_ *abs.AbsClient, absUserID string) string {
 	if storage.DB == nil {
@@ -22,11 +22,7 @@ func GetPersonalReport(_ *abs.AbsClient, absUserID string) string {
 	if err := storage.DB.Where("abs_user_id = ?", absUserID).First(&user).Error; err != nil {
 		return "❌ 听书统计暂时读取失败，请稍后再试。"
 	}
-	freshness := EnsureListeningFresh(user.TelegramID)
-	var snapshot model.ListeningReportSnapshot
-	if err := storage.DB.Where("user_id = ? AND abs_user_id = ?", user.TelegramID, absUserID).First(&snapshot).Error; (err == nil || errors.Is(err, gorm.ErrRecordNotFound)) && !listeningTimestampFresh(snapshot.ProgressFetchedAt, time.Now(), ListeningMaxAge) {
-		refreshListeningReportProgress(user.TelegramID, absUserID, time.Now())
-	}
+	freshness := CachedListeningFreshness(user.TelegramID)
 	report := personalReportFromCache(absUserID)
 	if freshness.Notice != "" {
 		report += "\n\n" + freshness.Notice
@@ -44,7 +40,6 @@ func personalReportFromCache(absUserID string) string {
 	var snapshot model.ListeningReportSnapshot
 	var stat model.DailyListeningStat
 	var cul model.Cultivation
-	var raw float64
 	var ok, totalOK bool
 	// A short read transaction pins one SQLite snapshot without the batch lock.
 	// A concurrent settlement or rebind cannot mix different database versions.
@@ -60,12 +55,6 @@ func personalReportFromCache(absUserID string) string {
 			return err
 		}
 		ok = err == nil
-		raw = snapshot.RawTotalSeconds
-		if snapshot.StatsFetchedAt.IsZero() {
-			if err := tx.Model(&model.DailyListeningStat{}).Where("user_id = ? AND abs_user_id = ?", user.TelegramID, absUserID).Select("COALESCE(SUM(raw_seconds),0)").Scan(&raw).Error; err != nil {
-				return err
-			}
-		}
 		err = tx.Where("user_id = ?", user.TelegramID).First(&cul).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -88,7 +77,7 @@ func personalReportFromCache(absUserID string) string {
 		if DailyListeningCultivationSettled(stat) {
 			todayTotal = fmt.Sprintf("%.2f 小时", stat.AppliedTotalHours)
 			detail = fmt.Sprintf("\n🔥 今日基础净修为: %.2f 小时；异火额外修为: +%.2f 小时", stat.BaseCultivationHours, stat.SpiritFireHours) + SectOwnerDailyBonusLine(stat) + fmt.Sprintf("\n今日有效计入听书: %.2f 小时", stat.CappedSeconds/3600) + dailyListeningValidationNotice(stat)
-			notice = fmt.Sprintf("\n🗄 使用上次成功统计（%s）；后台约每 5 分钟更新，查询在缓存满 10 分钟时尝试同步。", stat.LastFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
+			notice = fmt.Sprintf("\n🗄 使用上次成功统计（%s）；后台约每 5 分钟更新，查询直接展示已保存数据。", stat.LastFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05"))
 		} else {
 			todayTotal = "待结算"
 			notice = "\n⏳ 听书数据已同步，净修为待结算；累计修为为上次结算值。可发送「刷新我的今日净修为」重试。"
@@ -103,10 +92,10 @@ func personalReportFromCache(absUserID string) string {
 	if !snapshot.ProgressFetchedAt.IsZero() {
 		progressNotice = "\n📚 书籍进度更新时间：" + snapshot.ProgressFetchedAt.In(storage.DailyOperationsLocation).Format("01-02 15:04:05")
 		if !listeningTimestampFresh(snapshot.ProgressFetchedAt, now, ListeningMaxAge) {
-			progressNotice += "（已超过10分钟，更新失败，展示旧数据）"
+			progressNotice += "（已超过10分钟，待后台更新，展示旧数据）"
 		}
 	}
-	return fmt.Sprintf("📊 你的专属听书战绩%s\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %s\n✨ 净修炼时长: %s\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本%s", notice, raw/3600, todayRaw, totalText, todayTotal, detail, finished, listening, progressNotice)
+	return fmt.Sprintf("📊 你的专属听书战绩%s\n\n🕒 今日实际听书: %s\n✨ 净修炼时长: %s\n🌅 今日净修为: %s%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本%s", notice, todayRaw, totalText, todayTotal, detail, finished, listening, progressNotice)
 }
 
 // Source rows can commit before cultivation settlement. Readers must not

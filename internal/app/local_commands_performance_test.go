@@ -1,6 +1,8 @@
 package app
 
 import (
+	"ccoff-abs-bot/internal/background"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -60,6 +62,7 @@ func TestFreshAccountAndListeningQueriesDoNotWaitForABS(t *testing.T) {
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":123,"chat":{"id":1,"type":"private"}}}`)
 	}))
 	defer server.Close()
+	defer waitActivityBackground(t)
 	bot, err := tgbotapi.NewBotAPIWithClient("test", server.URL+"/bot%s/%s", server.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -97,8 +100,18 @@ func TestFreshAccountAndListeningQueriesDoNotWaitForABS(t *testing.T) {
 		}
 		before := requests.Load()
 		handleInteractiveMessage(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1, FirstName: "Listener"}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: command})
-		if requests.Load() <= before {
-			t.Fatalf("%s did not refresh an expired snapshot", command)
+		if command == "刷新我的今日净修为" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := background.Default.WaitIdle(ctx)
+			cancel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if requests.Load() <= before {
+				t.Fatal("explicit refresh did not run in the background")
+			}
+		} else if requests.Load() != before {
+			t.Fatalf("%s queried ABS instead of its saved data", command)
 		}
 	}
 	// A failed refresh after a binding change must not expose the old account's row.
@@ -109,6 +122,7 @@ func TestFreshAccountAndListeningQueriesDoNotWaitForABS(t *testing.T) {
 	before := len(texts)
 	mu.Unlock()
 	handleInteractiveMessage(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}, Text: "刷新我的今日净修为"})
+	waitActivityBackground(t)
 	mu.Lock()
 	reply := strings.Join(texts[before:], "\n")
 	mu.Unlock()

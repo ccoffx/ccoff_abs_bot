@@ -8,7 +8,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/spiritfire"
@@ -452,16 +451,9 @@ func simulateExpireWithAudit(actorID int64, targetID int64, reason string) (admi
 
 // Validate local guards and serialize with automatic reactivation before ABS.
 func changeAdminSuspensionWithAudit(actorID, targetID int64, absID string, suspended bool, action, reason string) error {
-	return storage.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec("UPDATE users SET id = id WHERE telegram_id = ?", targetID).Error; err != nil {
-			return err
-		}
-		if err := applySuspendLocalStatusWithAuditDB(tx, actorID, targetID, absID, suspended, action, reason); err != nil {
-			return err
-		}
-		if abs.DefaultClient == nil {
-			return fmt.Errorf("ABS_CLIENT_UNAVAILABLE")
-		}
-		return abs.DefaultClient.SetUserActiveStatus(absID, !suspended)
-	})
+	if err := prepareAdminStatusChange(actorID, targetID, absID, suspended, action, reason); err != nil {
+		return err
+	}
+	_, err := completeAdminStatusChange(targetID)
+	return err
 }

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -218,6 +219,7 @@ func run(loadConfig func()) {
 	game.StartLeaderboardScheduler(bot)
 	game.StartSpiritFireScheduler(bot)
 	game.StartWorldBossScheduler(bot)
+	game.StartActivityEntryScheduler(bot)
 	game.StartSectSecretRealmScheduler(bot)
 	activity.StartLotteryScheduler(bot)
 	game.StartSectLotteryScheduler(bot)
@@ -319,24 +321,25 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			return
 		}
 		logIncomingMessage(update.Message)
-		turn := reserveUserUpdate(update.Message.From.ID)
-		if turn.isReady() && handlePrivateStartFastPath(bot, update.Message) {
-			turn.finish()
+		turn := reserveUserMessage(update.Message.From.ID, cap(jobs))
+		if turn == nil {
+			metrics.RecordMessageQueueDropped()
+			// Never perform a network send from the polling loop.
+			telegram.EnqueueTelegramAsync(telegram.TelegramAsyncJob{Kind: "message_queue_busy", DedupeKey: fmt.Sprintf("message_queue_busy:%d", update.Message.From.ID), Send: func() error {
+				return telegram.ReplyTextChecked(bot, update.Message.Chat.ID, "⚠️ 当前系统繁忙，请稍后再试。")
+			}})
 			return
 		}
-		select {
-		case jobs <- telegramMessageJob{msg: update.Message, enqueuedAt: time.Now(), turn: turn}:
-			metrics.RecordMessageQueueState(len(jobs), cap(jobs))
-		default:
-			turn.finish()
-			metrics.RecordMessageQueueDropped()
-			fromID := int64(0)
-			if update.Message.From != nil {
-				fromID = update.Message.From.ID
+		job := telegramMessageJob{msg: update.Message, enqueuedAt: time.Now(), turn: turn}
+		turn.whenReady(func() {
+			select {
+			case jobs <- job:
+				metrics.RecordMessageQueueState(len(jobs), cap(jobs))
+			default:
+				turn.finish()
+				metrics.RecordMessageQueueDropped()
 			}
-			log.Printf("⚠️ 消息队列已满，丢弃消息: user=%d chat=%d", fromID, update.Message.Chat.ID)
-			telegram.ReplyText(bot, update.Message.Chat.ID, "⚠️ 当前系统繁忙，请稍后再试。")
-		}
+		})
 	}
 
 	if update.CallbackQuery != nil && update.CallbackQuery.From != nil {
@@ -621,7 +624,11 @@ func botWorker(bot *tgbotapi.BotAPI, jobs <-chan telegramMessageJob) {
 				log.Printf("⚠️ 忽略无 From 的消息: chat=%d message_id=%d", msg.Chat.ID, msg.MessageID)
 				return
 			}
-			job.turn.wait()
+			// The dispatcher queues only ready turns. /start network work runs
+			// here, never on the long-poll receive loop.
+			if handlePrivateStartFastPath(bot, msg) {
+				return
+			}
 			lockWaitStart := time.Now()
 			unlock := telegram.LockUser(msg.From.ID)
 			if wait := time.Since(lockWaitStart); wait > telegram.UserLockSlowWaitThreshold {

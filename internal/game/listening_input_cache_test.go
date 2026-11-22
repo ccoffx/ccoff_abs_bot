@@ -21,7 +21,8 @@ func TestOfficialListeningSyncLoadsOnlyChangedHistory(t *testing.T) {
 	for i := 1; i <= 730; i++ {
 		days[SectDayKey(now.AddDate(0, 0, -i))] = 3600
 	}
-	writeOfficial(t, days)
+	_, err := recordOfficialDailyListeningStats(1, "abs1", days, time.Now())
+	contributionMust(t, err)
 	before := officialTotal(t)
 	loaded := int64(0)
 	contributionMust(t, db.Callback().Query().After("gorm:query").Register("count_official_history", func(tx *gorm.DB) {
@@ -30,7 +31,8 @@ func TestOfficialListeningSyncLoadsOnlyChangedHistory(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { db.Callback().Query().Remove("count_official_history") })
-	writeOfficial(t, days)
+	_, err = recordOfficialDailyListeningStats(1, "abs1", days, time.Now())
+	contributionMust(t, err)
 	if loaded > 2 || officialTotal(t) != before {
 		t.Fatalf("unchanged 730-day sync loaded %d days; total %g -> %g", loaded, before, officialTotal(t))
 	}
@@ -38,14 +40,16 @@ func TestOfficialListeningSyncLoadsOnlyChangedHistory(t *testing.T) {
 	loaded = 0
 	corrected := SectDayKey(now.AddDate(0, 0, -300))
 	days[corrected] = 7200
-	writeOfficial(t, days)
-	if loaded > 4 || math.Abs(officialTotal(t)-before-1) > 1e-9 {
-		t.Fatalf("one historical correction loaded %d days; total %g -> %g", loaded, before, officialTotal(t))
+	_, err = recordOfficialDailyListeningStats(1, "abs1", days, time.Now())
+	contributionMust(t, err)
+	if loaded > 4 || math.Abs(officialTotal(t)-before) > 1e-9 {
+		t.Fatalf("archived historical correction loaded %d days; total %g -> %g", loaded, before, officialTotal(t))
 	}
-	t.Logf("one historical correction: %d daily rows loaded (corrected day and today)", loaded)
+	t.Logf("archived historical correction: %d daily rows loaded (corrected day and today)", loaded)
 	// Replaying the corrected snapshot must not load the corrected history again.
 	loaded = 0
-	writeOfficial(t, days)
+	_, err = recordOfficialDailyListeningStats(1, "abs1", days, time.Now())
+	contributionMust(t, err)
 	if loaded > 2 {
 		t.Fatal("unchanged historical correction was loaded again", loaded)
 	}
@@ -65,8 +69,9 @@ func TestOfficialListeningSyncLoadsOnlyChangedHistory(t *testing.T) {
 			loaded += tx.RowsAffected
 		}
 	}))
-	writeOfficial(t, days)
-	if loaded > 2 || math.Abs(officialTotal(t)-before-1) > 1e-9 {
+	_, err = recordOfficialDailyListeningStats(1, "abs1", days, time.Now())
+	contributionMust(t, err)
+	if loaded > 2 || math.Abs(officialTotal(t)-before) > 1e-9 {
 		t.Fatalf("restart loaded %d daily rows or changed credit", loaded)
 	}
 	// The secret-realm path must consume this incremental result, without an
@@ -77,7 +82,7 @@ func TestOfficialListeningSyncLoadsOnlyChangedHistory(t *testing.T) {
 	loaded = 0
 	snapshot, err := fetchSectSecretRealmListeningSnapshotFromABS("abs1")
 	contributionMust(t, err)
-	if loaded > 2 || math.Abs(snapshot.EffectiveHours-before-1) > 1e-9 {
+	if loaded > 2 || math.Abs(snapshot.EffectiveHours-before) > 1e-9 {
 		t.Fatalf("secret realm loaded %d daily rows; snapshot=%+v", loaded, snapshot)
 	}
 	t.Logf("secret realm with 730 historical days: %d daily rows loaded", loaded)

@@ -99,8 +99,8 @@ func runAccountLifecycleAt(bot *tgbotapi.BotAPI, now time.Time) error {
 			}
 			continue
 		}
-		if kind == lifecycle.ListeningAbuseReleaseOperation {
-			// The abuse monitor resumes the active freeze record, including after restart.
+		if kind == lifecycle.ListeningAbuseReleaseOperation || kind == "admin_suspend" || kind == "admin_resume" {
+			// Each specialized dispatcher resumes its own durable intent.
 			continue
 		}
 		if kind == "reactivate" {

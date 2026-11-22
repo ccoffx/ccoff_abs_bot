@@ -14,10 +14,10 @@ import (
 
 // Session-derived day projections are test-only; production uses official daily totals.
 func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time, validations ...*dailyListeningValidation) error {
-	return recordPreparedDailyListeningStatsWithReport(userID, absUserID, days, correctedDays, fetchedAt, nil, validations...)
+	return recordPreparedDailyListeningStatsWithReport(userID, absUserID, days, correctedDays, fetchedAt, false, validations...)
 }
 
-func recordPreparedDailyListeningStatsWithReport(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time, reportTotal *float64, validations ...*dailyListeningValidation) error {
+func recordPreparedDailyListeningStatsWithReport(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time, withReport bool, validations ...*dailyListeningValidation) error {
 	if storage.DB == nil || userID == 0 {
 		return nil
 	}
@@ -84,8 +84,8 @@ func recordPreparedDailyListeningStatsWithReport(userID int64, absUserID string,
 				return fmt.Errorf("DAILY_LISTENING_STATS_UPSERT_MISSED")
 			}
 		}
-		if reportTotal != nil {
-			return saveListeningReportStatsInTx(tx, userID, strings.TrimSpace(absUserID), *reportTotal, fetchedAt)
+		if withReport {
+			return saveListeningReportStatsInTx(tx, userID, strings.TrimSpace(absUserID), fetchedAt)
 		}
 		return nil
 	})

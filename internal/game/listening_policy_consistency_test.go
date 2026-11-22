@@ -17,7 +17,7 @@ func TestSectTaskUsesSavedRebindBaseline(t *testing.T) {
 	day := SectDayKey(time.Now())
 	writeOfficial(t, map[string]float64{day: 0})
 	contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", "abs2").Error)
-	_, err := recordOfficialDailyListeningStats(1, "abs2", map[string]float64{day: 7200}, time.Now(), nil)
+	_, err := recordOfficialDailyListeningStats(1, "abs2", map[string]float64{day: 7200}, time.Now())
 	contributionMust(t, err)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("fresh report unexpectedly fetched: %s", r.URL.Path)

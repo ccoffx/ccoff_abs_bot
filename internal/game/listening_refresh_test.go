@@ -38,7 +38,7 @@ func TestListeningBatchIsolatesConcurrentPersonalRefreshUntilPublication(t *test
 			fmt.Fprint(w, `{"sessions":[]}`)
 			return
 		}
-		seconds := 3600
+		seconds := 10
 		if strings.Contains(r.URL.Path, "/abs1/") {
 			if firstRequests.Add(1) > 1 {
 				// The personal request must reach ABS only after batch publication.
@@ -46,7 +46,7 @@ func TestListeningBatchIsolatesConcurrentPersonalRefreshUntilPublication(t *test
 				if err := storage.DB.Where("title_key = ?", rankings.ListeningTitle).Take(&holder).Error; err != nil || holder.UserID != 2 {
 					t.Errorf("personal refresh ran before batch publication: holder=%+v err=%v", holder, err)
 				}
-				seconds = 10800
+				seconds = 30
 			}
 		} else {
 			go func() {
@@ -55,7 +55,7 @@ func TestListeningBatchIsolatesConcurrentPersonalRefreshUntilPublication(t *test
 				personalDone <- err
 			}()
 			<-personalStarted
-			seconds = 7200
+			seconds = 20
 		}
 		fmt.Fprintf(w, `{"days":{%q:%d}}`, today, seconds)
 	})
@@ -147,21 +147,21 @@ func TestListeningBatchPublishesOnlyAfterAllAccountsSucceed(t *testing.T) {
 				t.Errorf("batch published intermediate holder: %+v err=%v", holder, err)
 			}
 		}
-		seconds := 3600
+		seconds := 10
 		if p > 0 {
-			seconds = 10800
+			seconds = 30
 		}
 		if p == 3 {
-			seconds = 18000
+			seconds = 50
 		}
 		if strings.Contains(r.URL.Path, "/abs2/") {
 			if p == 1 {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			seconds = 7200
+			seconds = 20
 			if p > 1 {
-				seconds = 14400
+				seconds = 40
 			}
 		}
 		fmt.Fprintf(w, `{"days":{%q:%d}}`, today, seconds)

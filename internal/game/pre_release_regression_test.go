@@ -208,7 +208,7 @@ func TestBossChangedBindingMustNotBlockOtherParticipants(t *testing.T) {
 	if err := storage.DB.Create(&model.User{TelegramID: p.UserID, Username: "new-account", AbsUserID: "replacement-abs"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	valid := model.WorldBossParticipant{Model: gorm.Model{CreatedAt: event.StartAt}, BossID: event.BossID, UserID: 2, AbsUserID: "abs2"}
+	valid := model.WorldBossParticipant{Model: gorm.Model{CreatedAt: event.StartAt}, BossID: event.BossID, UserID: 2, AbsUserID: "abs2", ListeningSnapshot: newActivityListeningSnapshot(nil, event.StartAt)}
 	for _, row := range []any{&model.User{TelegramID: 2, Username: "valid-account", AbsUserID: "abs2"}, &valid} {
 		if err := storage.DB.Create(row).Error; err != nil {
 			t.Fatal(err)
@@ -217,7 +217,7 @@ func TestBossChangedBindingMustNotBlockOtherParticipants(t *testing.T) {
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		session := bossSession("valid-playback", event.StartAt, event.EndAt, 3600)
 		session["userId"] = "abs2"
-		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{session}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 3600, "days": map[string]float64{SectDayKey(event.StartAt): 3600}})
 	})
 	for range 2 {
 		settleWorldBoss(nil, event.BossID)

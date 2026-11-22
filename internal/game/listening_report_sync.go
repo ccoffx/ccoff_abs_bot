@@ -15,18 +15,18 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-func saveListeningReportStats(userID int64, absID string, total float64, fetchedAt time.Time) error {
+func saveListeningReportStats(userID int64, absID string, fetchedAt time.Time) error {
 	return storage.DB.Transaction(func(tx *gorm.DB) error {
 		if err := lockCurrentListeningBindingInTx(tx, userID, absID); err != nil {
 			return err
 		}
-		return saveListeningReportStatsInTx(tx, userID, absID, total, fetchedAt)
+		return saveListeningReportStatsInTx(tx, userID, absID, fetchedAt)
 	})
 }
 
 // The caller holds the current-binding write guard. Sharing its transaction
 // with daily rows prevents a failed metadata write leaving a partial snapshot.
-func saveListeningReportStatsInTx(tx *gorm.DB, userID int64, absID string, total float64, fetchedAt time.Time, officialInput ...string) error {
+func saveListeningReportStatsInTx(tx *gorm.DB, userID int64, absID string, fetchedAt time.Time, officialInput ...string) error {
 	var previous model.ListeningReportSnapshot
 	err := tx.First(&previous, "user_id = ?", userID).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -39,7 +39,7 @@ func saveListeningReportStatsInTx(tx *gorm.DB, userID int64, absID string, total
 	if previous.AbsUserID != absID {
 		previous = model.ListeningReportSnapshot{UserID: userID}
 	}
-	previous.AbsUserID, previous.RawTotalSeconds, previous.StatsFetchedAt = absID, total, fetchedAt
+	previous.AbsUserID, previous.StatsFetchedAt = absID, fetchedAt
 	if len(officialInput) > 0 {
 		previous.OfficialInputJSON = officialInput[0]
 	} else {
@@ -70,7 +70,7 @@ func refreshListeningReportProgressOnce(userID int64, absID string, now time.Tim
 	if abs.DefaultClient == nil || !acquireListeningSyncSlot() {
 		return
 	}
-	defer func() { <-listeningSyncSlots }()
+	defer releaseListeningSyncSlot()
 	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserPath(absID), nil)
 	if err != nil || code != 200 {
 		return

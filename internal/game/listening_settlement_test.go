@@ -2,7 +2,6 @@ package game
 
 import (
 	"fmt"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -137,7 +136,7 @@ func TestListeningReportReadsSnapshotsWithoutABSOrBatchWait(t *testing.T) {
 	assertListeningSync(t, now, 15.84)
 	contributionMust(t, db.Create(&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: SectDayKey(now), RawSeconds: 7200, EffectiveHours: 2, CappedSeconds: 7200, LastFetchedAt: now}).Error)
 	assertListeningSync(t, now, 17.84)
-	contributionMust(t, saveListeningReportStats(1, "abs1", 40000, now))
+	contributionMust(t, saveListeningReportStats(1, "abs1", now))
 	var requests atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -162,16 +161,19 @@ func TestListeningReportReadsSnapshotsWithoutABSOrBatchWait(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatal("report contacted ABS")
 	}
-	for _, want := range []string{"累计实际听书: 11.11 小时", "净修炼时长: 17.84 小时", "今日净修为: 2.00 小时", "已经听完书籍: 1 本", "当前正在收听: 1 本"} {
+	if strings.Contains(report, "累计实际听书") || strings.Contains(report, "累计上报时长") {
+		t.Fatalf("report still displayed account-wide ABS playback: %s", report)
+	}
+	for _, want := range []string{"净修炼时长: 17.84 小时", "今日净修为: 2.00 小时", "已经听完书籍: 1 本", "当前正在收听: 1 本"} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("missing %q: %s", want, report)
 		}
 	}
 	// Ignore older responses even when SQLite timestamp strings use other offsets.
-	contributionMust(t, saveListeningReportStats(1, "abs1", 100, now.Add(-time.Minute).UTC()))
+	contributionMust(t, saveListeningReportStats(1, "abs1", now.Add(-time.Minute).UTC()))
 	var snapshot model.ListeningReportSnapshot
 	contributionMust(t, db.First(&snapshot, "user_id=1").Error)
-	if math.Abs(snapshot.RawTotalSeconds-40000) > 1e-9 {
+	if !snapshot.StatsFetchedAt.Equal(now) {
 		t.Fatal("stale metadata overwrote snapshot", snapshot)
 	}
 }

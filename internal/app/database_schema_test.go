@@ -112,6 +112,15 @@ func TestDatabaseFreshStartAndRestart(t *testing.T) {
 	if err := storage.DB.Create(&model.Inventory{UserID: 1, ItemName: "回气丹", Quantity: 4}).Error; err != nil {
 		t.Fatalf("soft deletion blocks replacement inventory: %v", err)
 	}
+	pendingEntry := model.ActivityEntryRequest{Kind: "boss", EventID: "pending-entry", UserID: 1, AbsUserID: "entry-abs", Status: "pending", DeadlineAt: time.Now().Add(time.Minute)}
+	if err := storage.DB.Create(&pendingEntry).Error; err != nil {
+		t.Fatal(err)
+	}
+	duplicateEntry := pendingEntry
+	duplicateEntry.ID = 0
+	if err := storage.DB.Create(&duplicateEntry).Error; err == nil {
+		t.Fatal("duplicate durable activity entry accepted")
+	}
 	connection, err := storage.DB.DB()
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +130,10 @@ func TestDatabaseFreshStartAndRestart(t *testing.T) {
 	}
 	InitDB()
 	assertCurrentDatabaseIndexes(t)
+	var resumedEntry model.ActivityEntryRequest
+	if err := storage.DB.First(&resumedEntry, pendingEntry.ID).Error; err != nil || resumedEntry.Status != "pending" || resumedEntry.Generation != 1 || !resumedEntry.DeadlineAt.Equal(pendingEntry.DeadlineAt) {
+		t.Fatalf("restart lost pending activity entry: %+v %v", resumedEntry, err)
+	}
 	assertLifecycleGuard()
 	assertOrphanGuard()
 	var receipt model.BlindBoxReceipt

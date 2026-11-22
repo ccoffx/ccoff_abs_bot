@@ -355,6 +355,10 @@ type SectSecretRealmEvent struct {
 
 	SettledAt *time.Time
 
+	// Separate from UpdatedAt, which also changes when the board message is saved.
+	LiveRefreshedAt       *time.Time
+	LiveRefreshIncomplete bool
+
 	BoardChatID    int64
 	BoardMessageID int
 }
@@ -371,6 +375,7 @@ type SectSecretRealmParticipant struct {
 	UserID  int64  `gorm:"index;not null"`
 
 	AbsUserID                  string
+	ListeningSnapshot          ActivityListeningSnapshot `gorm:"embedded;embeddedPrefix:listening_snapshot_"`
 	ListeningEvidenceJSON      string
 	ListeningScanPage          int
 	FinalListeningScanStarted  bool

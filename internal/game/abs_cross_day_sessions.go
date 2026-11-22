@@ -114,6 +114,11 @@ func fetchABSCrossDayListeningSessions(absUserID string) (absListeningSessionSna
 	sessions := make([]absListeningSession, 0, dailyListeningSessionPageSize)
 	seenSessionKeys := make(map[string]struct{}, dailyListeningSessionPageSize)
 	valid := true
+	// Periodic reports use official daily totals plus recent session validation.
+	// Older corrections are retained locally and repaired by the separate cursor;
+	// do not repeatedly fetch old account history on every five-minute refresh.
+	now := snapshot.StartedAt.In(storage.DailyOperationsLocation)
+	recentStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -2)
 	for page := 0; page < dailyListeningSessionMaxPages; page++ {
 		body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningSessionsPath(absUserID, page, dailyListeningSessionPageSize), nil)
 		if err != nil {
@@ -149,6 +154,11 @@ func fetchABSCrossDayListeningSessions(absUserID string) (absListeningSessionSna
 		}
 		if len(rawSessions) < dailyListeningSessionPageSize {
 			snapshot.Complete = valid
+			break
+		}
+		if listeningSessionPageReachesBefore(rawSessions, recentStart) {
+			// Complete means full account history: a recent-window snapshot must
+			// never delete/invalidate older persisted observations as "missing".
 			break
 		}
 	}

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"ccoff-abs-bot/internal/model"
-	"ccoff-abs-bot/internal/rankings"
 	"ccoff-abs-bot/internal/storage"
 )
 
@@ -39,7 +38,7 @@ func seedListeningFreshnessUser(t *testing.T, id int64, age time.Duration, hours
 		CultivationApplied: true, AppliedEligible: true, AppliedEffectiveHours: hours,
 		AppliedCappedSeconds: hours * 3600, AppliedBaseHours: hours, AppliedTotalHours: hours,
 	}).Error)
-	contributionMust(t, storage.DB.Create(&model.ListeningReportSnapshot{UserID: id, AbsUserID: absID, RawTotalSeconds: hours * 3600, StatsFetchedAt: at, ProgressFetchedAt: at}).Error)
+	contributionMust(t, storage.DB.Create(&model.ListeningReportSnapshot{UserID: id, AbsUserID: absID, StatsFetchedAt: at, ProgressFetchedAt: at}).Error)
 }
 
 func TestListeningFreshnessCutoffAndMidnight(t *testing.T) {
@@ -192,9 +191,9 @@ func TestFutureListeningTimestampsCanRecover(t *testing.T) {
 	if snapshot.FinishedBooks != 1 || snapshot.ProgressFetchedAt.After(time.Now()) {
 		t.Fatalf("future book progress timestamp blocked recovery: %+v", snapshot)
 	}
-	contributionMust(t, saveListeningReportStats(1, "abs1", 7200, time.Now()))
+	contributionMust(t, saveListeningReportStats(1, "abs1", time.Now()))
 	contributionMust(t, storage.DB.Where("user_id=1").First(&snapshot).Error)
-	if snapshot.RawTotalSeconds != 7200 || snapshot.StatsFetchedAt.After(time.Now()) {
+	if snapshot.StatsFetchedAt.After(time.Now()) {
 		t.Fatalf("future report timestamp blocked recovery: %+v", snapshot)
 	}
 	contributionMust(t, recordPreparedDailyListeningStats(1, "abs1", map[string]float64{day: 3600}, nil, time.Now()))
@@ -218,9 +217,9 @@ func TestBookProgressCanStartBeforeStatsSnapshotExists(t *testing.T) {
 	if requests.Load() != 1 || snapshot.FinishedBooks != 1 || snapshot.ListeningBooks != 1 || snapshot.ProgressFetchedAt.IsZero() {
 		t.Fatalf("book progress remained blocked by missing stats: %+v requests=%d", snapshot, requests.Load())
 	}
-	contributionMust(t, saveListeningReportStats(1, "abs1", 3600, time.Now()))
+	contributionMust(t, saveListeningReportStats(1, "abs1", time.Now()))
 	contributionMust(t, storage.DB.Where("user_id=1").First(&snapshot).Error)
-	if snapshot.RawTotalSeconds != 3600 || snapshot.FinishedBooks != 1 || snapshot.ListeningBooks != 1 {
+	if snapshot.StatsFetchedAt.IsZero() || snapshot.FinishedBooks != 1 || snapshot.ListeningBooks != 1 {
 		t.Fatalf("later stats refresh erased earlier book progress: %+v", snapshot)
 	}
 	if report := GetPersonalReport(nil, "abs1"); !strings.Contains(report, "已经听完书籍: 1 本") || !strings.Contains(report, "今日净修为: 待同步") {
@@ -275,7 +274,7 @@ func TestExpiredListeningQueryRefreshesOrLabelsOldData(t *testing.T) {
 					t.Fatalf("failed refresh changed data or hid its age: state=%+v stat=%+v cul=%+v", state, stat, cul)
 				}
 			} else {
-				if !state.Fresh || state.Notice != "" || cul.TotalAudioTime != 1 || !DailyListeningCultivationSettled(stat) || sessions.Load() != 0 {
+				if !state.Fresh || state.Notice != "" || cul.TotalAudioTime != calculateSectEffectiveHoursFromSeconds(stat.CappedSeconds) || !DailyListeningCultivationSettled(stat) || sessions.Load() != 0 {
 					t.Fatalf("refresh not settled: state=%+v stat=%+v cul=%+v", state, stat, cul)
 				}
 				EnsureListeningFresh(1)
@@ -418,7 +417,7 @@ func TestDueListeningQueueRefreshesOnlyExpiredUsersAndProgress(t *testing.T) {
 	}
 }
 
-func TestExpiredBookProgressIsRefreshedAndFailureIsLabelled(t *testing.T) {
+func TestExpiredBookProgressIsReadLocallyAndLabelled(t *testing.T) {
 	setupListeningFreshnessTest(t)
 	seedListeningFreshnessUser(t, 1, time.Minute, .5)
 	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=1").Updates(map[string]any{"finished_books": 3, "progress_fetched_at": time.Now().Add(-11 * time.Minute)}).Error)
@@ -435,15 +434,15 @@ func TestExpiredBookProgressIsRefreshedAndFailureIsLabelled(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"mediaProgress":[{"isFinished":true}]}`)
 	})
-	if report := GetPersonalReport(nil, "abs1"); !strings.Contains(report, "已经听完书籍: 1 本") {
+	if report := GetPersonalReport(nil, "abs1"); !strings.Contains(report, "已经听完书籍: 3 本") {
 		t.Fatal(report)
 	}
 	fail.Store(true)
 	contributionMust(t, storage.DB.Model(&model.ListeningReportSnapshot{}).Where("user_id=1").UpdateColumn("progress_fetched_at", time.Now().Add(-11*time.Minute)).Error)
-	if report := GetPersonalReport(nil, "abs1"); !strings.Contains(report, "已经听完书籍: 1 本") || !strings.Contains(report, "更新失败，展示旧数据") {
+	if report := GetPersonalReport(nil, "abs1"); !strings.Contains(report, "已经听完书籍: 3 本") || !strings.Contains(report, "待后台更新，展示旧数据") {
 		t.Fatal(report)
 	}
-	if requests.Load() != 2 {
+	if requests.Load() != 0 {
 		t.Fatal(requests.Load())
 	}
 }
@@ -517,49 +516,18 @@ func TestValidBreakthroughRitualRemainsRetryableDuringABSOutage(t *testing.T) {
 	}
 }
 
-func TestRankFreshnessIncludesUsersOutsideTopTen(t *testing.T) {
-	for _, failure := range []bool{false, true} {
-		t.Run(fmt.Sprint("failure=", failure), func(t *testing.T) {
-			setupListeningFreshnessTest(t)
-			contributionMust(t, storage.DB.AutoMigrate(&model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}))
-			for id := int64(1); id <= 11; id++ {
-				age := time.Minute
-				if id == 11 {
-					age = 11 * time.Minute
-				}
-				seedListeningFreshnessUser(t, id, age, .5)
-			}
-			var requests atomic.Int32
-			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if !strings.HasSuffix(r.URL.Path, "/listening-stats") {
-					fmt.Fprint(w, `{"sessions":[]}`)
-					return
-				}
-				requests.Add(1)
-				seconds := 3600
-				if strings.Contains(r.URL.Path, "/abs11/") {
-					if failure {
-						w.WriteHeader(503)
-						return
-					}
-					seconds = 7200
-				}
-				fmt.Fprintf(w, `{"days":{%q:%d}}`, SectDayKey(time.Now()), seconds)
-			})
-			notice := ensureListeningRankFresh()
-			if requests.Load() != 11 {
-				t.Fatalf("did not refresh a full batch: %d requests", requests.Load())
-			}
-			var holder model.RankTitleHolder
-			err := storage.DB.Where("title_key = ?", rankings.CultivationTitle).First(&holder).Error
-			if failure {
-				if !strings.Contains(notice, "排名可能滞后") || err == nil {
-					t.Fatalf("partial batch published a title or hid staleness: notice=%s holder=%+v", notice, holder)
-				}
-			} else if notice != "" || err != nil || holder.UserID != 11 {
-				t.Fatalf("stale user outside top ten did not become first: notice=%s holder=%+v err=%v", notice, holder, err)
-			}
-		})
+func TestRankFreshnessReadsSavedDataWithoutRefreshingUsers(t *testing.T) {
+	setupListeningFreshnessTest(t)
+	for id := int64(1); id <= 11; id++ {
+		seedListeningFreshnessUser(t, id, 11*time.Minute, .5)
+	}
+	var requests atomic.Int32
+	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(503) })
+	listeningRefreshMu.Lock()
+	notice := ensureListeningRankFresh()
+	listeningRefreshMu.Unlock()
+	if requests.Load() != 0 || !strings.Contains(notice, "排名可能滞后") {
+		t.Fatalf("rank query synchronized accounts or hid staleness: %d %s", requests.Load(), notice)
 	}
 }
 

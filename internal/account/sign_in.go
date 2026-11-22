@@ -484,7 +484,7 @@ func HandleUserSignIn(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	// Rewards are already committed; refresh only an expired listening snapshot.
-	listeningFreshness := game.EnsureListeningFresh(userID)
+	listeningFreshness := game.CachedListeningFreshness(userID)
 
 	cul := game.GetOrCreateCultivation(userID)
 	realmStr := game.GetRealmName(cul)

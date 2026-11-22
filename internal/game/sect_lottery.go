@@ -19,6 +19,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"ccoff-abs-bot/internal/background"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
 	"ccoff-abs-bot/internal/storage"
@@ -318,8 +319,15 @@ func handleSectLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, te
 			return
 		}
 		telegram.ClearSession(userID)
-		success, failed := remindSectLotteryMembers(bot, lotteryID)
-		telegram.SendPlainText(bot, chatID, fmt.Sprintf("✅ 宗门抽奖已创建\n\n活动ID：%d\n\n成员私聊发送：\n"+textfmt.Copyable("参加宗门抽奖 %d")+"\n\n成员提醒：成功 %d，失败 %d", lotteryID, lotteryID, success, failed))
+		result := background.Submit(fmt.Sprintf("sect_lottery_delivery:%d", lotteryID), func() {
+			success, failed := remindSectLotteryMembers(bot, lotteryID)
+			telegram.SendPlainText(bot, chatID, fmt.Sprintf("✅ 宗门抽奖 #%d 成员提醒发送完成：成功 %d，失败 %d", lotteryID, success, failed))
+		})
+		notice := "成员提醒已提交后台发送。"
+		if result == background.Full {
+			notice = fmt.Sprintf("后台繁忙，请稍后发送「提醒宗门抽奖 %d」补发成员提醒。", lotteryID)
+		}
+		telegram.SendPlainText(bot, chatID, fmt.Sprintf("✅ 宗门抽奖已创建\n\n活动ID：%d\n\n成员私聊发送：\n"+textfmt.Copyable("参加宗门抽奖 %d")+"\n\n%s", lotteryID, lotteryID, notice))
 	default:
 		telegram.ClearSession(userID)
 		telegram.SendPlainText(bot, chatID, "宗门抽奖创建会话异常，已中止。")
@@ -467,10 +475,13 @@ func handleJoinSectLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, r
 		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已参与宗门福利抽奖 #%d\n当前参与：%d", id, joined))
 	}
 	if shouldDraw {
-		if err := drawSectLottery(bot, uint(id), "participant_limit"); err != nil && !errors.Is(err, storage.ErrLotteryNotActive) {
-			log.Printf("⚠️ 满人宗门抽奖开奖失败: lottery=%d err=%s", id, textfmt.FormatPlainError(err))
-			telegram.NotifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 宗门抽奖 #%d 满人开奖失败：%s", id, textfmt.FormatPlainError(err)))
-		}
+		// The persisted active round and participant count let the scheduler
+		// retry this draw if the bounded queue is full or the process restarts.
+		background.Submit(fmt.Sprintf("sect_lottery_draw:%d", id), func() {
+			if err := drawSectLottery(bot, uint(id), "participant_limit"); err != nil && !errors.Is(err, storage.ErrLotteryNotActive) {
+				log.Printf("满人宗门抽奖后台开奖失败，将由巡检重试: lottery=%d err=%s", id, textfmt.FormatPlainError(err))
+			}
+		})
 	}
 }
 
@@ -927,8 +938,14 @@ func handleRetrySectLotteryDeliveryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.M
 		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 只有已开奖的宗门抽奖可以重发失败奖品。")
 		return
 	}
-	delivered, failed := deliverSectLotteryWinners(bot, lot.ID)
-	telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 重发完成\n成功：%d\n失败：%d", delivered, failed))
+	result := background.Submit(fmt.Sprintf("sect_lottery_delivery:%d", lot.ID), func() {
+		if _, ok := loadSectLotteryForOperator(bot, msg, rawID); !ok {
+			return
+		}
+		delivered, failed := deliverSectLotteryWinners(bot, lot.ID)
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 重发完成\n成功：%d\n失败：%d", delivered, failed))
+	})
+	replyBackgroundSubmission(bot, msg.Chat.ID, result, "宗门抽奖投递")
 }
 
 func handleRemindSectLotteryMembersCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawID string) {
@@ -940,8 +957,14 @@ func handleRemindSectLotteryMembersCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.M
 		telegram.SendPlainText(bot, msg.Chat.ID, "❌ 只有可参与中的宗门抽奖可以补发成员提醒。")
 		return
 	}
-	success, failed := remindSectLotteryMembers(bot, lot.ID)
-	telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 宗门抽奖提醒已补发\n成功：%d\n失败：%d", success, failed))
+	result := background.Submit(fmt.Sprintf("sect_lottery_delivery:%d", lot.ID), func() {
+		if _, ok := loadSectLotteryForOperator(bot, msg, rawID); !ok {
+			return
+		}
+		success, failed := remindSectLotteryMembers(bot, lot.ID)
+		telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 宗门抽奖提醒已补发\n成功：%d\n失败：%d", success, failed))
+	})
+	replyBackgroundSubmission(bot, msg.Chat.ID, result, "宗门抽奖投递")
 }
 
 func handleCancelSectLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawID string) {

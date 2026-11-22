@@ -143,21 +143,24 @@ func (LotteryClaimLog) TableName() string {
 
 // 不使用软删除：每局每人、每箱的唯一约束在历史记录中同样有效。
 type TreasureRound struct {
-	ID           uint `gorm:"primaryKey"`
-	CreatedAt    time.Time
-	ChatID       int64  `gorm:"index;not null"`
-	DayKey       string `gorm:"index;not null"`
-	Status       string `gorm:"index;not null"`
-	EntryCost    int
-	RewardsJSON  string `gorm:"not null"`
-	MessageID    int
-	ExpiresAt    time.Time `gorm:"index;not null"`
-	ClosedAt     time.Time
-	PoolInjected int
-	PoolAfter    int
-	FireID       uint
-	FireName     string
-	FireOwnerID  int64
+	ID               uint `gorm:"primaryKey"`
+	CreatedAt        time.Time
+	ChatID           int64  `gorm:"index;not null"`
+	DayKey           string `gorm:"index;not null"`
+	Status           string `gorm:"index;not null"`
+	EntryCost        int
+	RewardsJSON      string `gorm:"not null"`
+	PanelDirty       bool   `gorm:"index"`
+	PanelVersion     uint64
+	PanelNextRetryAt *time.Time `gorm:"index"`
+	MessageID        int
+	ExpiresAt        time.Time `gorm:"index;not null"`
+	ClosedAt         time.Time
+	PoolInjected     int
+	PoolAfter        int
+	FireID           uint
+	FireName         string
+	FireOwnerID      int64
 }
 
 type TreasurePick struct {

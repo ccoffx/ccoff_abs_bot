@@ -41,7 +41,7 @@ func TestDailyAndReportSnapshotRollBackTogether(t *testing.T) {
 	}
 	var snapshot model.ListeningReportSnapshot
 	contributionMust(t, storage.DB.First(&snapshot, "user_id=1").Error)
-	if snapshot.RawTotalSeconds != 3600 || recoveryListeningDay(t, day).RawSeconds != 3600 {
+	if snapshot.AbsUserID != "abs1" || snapshot.StatsFetchedAt.IsZero() || recoveryListeningDay(t, day).RawSeconds != 3600 {
 		t.Fatal("retry did not persist the same snapshot")
 	}
 }
@@ -92,7 +92,7 @@ func TestReportUsesOneDatabaseSnapshotDuringConcurrentSettlement(t *testing.T) {
 	today := model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: SectDayKey(now), RawSeconds: 3600, CappedSeconds: 3600, EffectiveHours: 1}
 	contributionMust(t, db.Create(&today).Error)
 	assertListeningSync(t, now, 16.84)
-	contributionMust(t, saveListeningReportStats(1, "abs1", 40000, now))
+	contributionMust(t, saveListeningReportStats(1, "abs1", now))
 	written := false
 	contributionMust(t, db.Callback().Query().After("gorm:query").Register("review_report_snapshot", func(tx *gorm.DB) {
 		if tx.Statement.Table != "listening_report_snapshots" || written {
@@ -110,7 +110,7 @@ func TestReportUsesOneDatabaseSnapshotDuringConcurrentSettlement(t *testing.T) {
 			if err := writer.Model(&model.Cultivation{}).Where("user_id = 1").UpdateColumn("total_audio_time", 17.84).Error; err != nil {
 				return err
 			}
-			return writer.Model(&model.ListeningReportSnapshot{}).Where("user_id = 1").UpdateColumn("raw_total_seconds", 50000).Error
+			return writer.Model(&model.ListeningReportSnapshot{}).Where("user_id = 1").UpdateColumn("finished_books", 99).Error
 		})
 		if err != nil {
 			t.Error(err)
@@ -118,7 +118,7 @@ func TestReportUsesOneDatabaseSnapshotDuringConcurrentSettlement(t *testing.T) {
 	}))
 	t.Cleanup(func() { db.Callback().Query().Remove("review_report_snapshot") })
 	report := personalReportFromCache("abs1")
-	for _, want := range []string{"累计实际听书: 11.11 小时", "净修炼时长: 16.84 小时", "今日净修为: 1.00 小时"} {
+	for _, want := range []string{"净修炼时长: 16.84 小时", "今日净修为: 1.00 小时"} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report mixed database versions (want %q): %s", want, report)
 		}

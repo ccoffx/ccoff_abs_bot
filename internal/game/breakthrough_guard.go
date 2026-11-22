@@ -14,6 +14,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 
+	"ccoff-abs-bot/internal/background"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
@@ -45,7 +46,6 @@ var (
 	ErrBreakthroughGuardDailyLimit   = errors.New("您今天已参加三次护道，请明天再来")
 	ErrBreakthroughGuardRulesInvalid = errors.New("护道规则快照异常，本次突破取消")
 	breakthroughGuardSweepMu         sync.Mutex
-	breakthroughGuardPanelMu         sync.Mutex
 )
 
 func decodeBreakthroughRitualRules(ritual model.BreakthroughRitual) (BreakthroughSetting, error) {
@@ -378,13 +378,40 @@ func BeginBreakthroughWithGuards(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mo
 }
 
 func refreshBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *BreakthroughOutcome) {
-	breakthroughGuardPanelMu.Lock()
-	defer breakthroughGuardPanelMu.Unlock()
+	res := storage.DB.Model(&model.BreakthroughRitual{}).Where("id = ?", id).Updates(map[string]interface{}{"panel_dirty": true, "panel_version": gorm.Expr("panel_version + 1"), "panel_next_retry_at": nil})
+	if res.Error != nil {
+		log.Printf("护道面板更新标记失败: ritual=%d err=%s", id, textfmt.FormatPlainError(res.Error))
+		return
+	}
+	enqueueBreakthroughPanel(bot, id)
+}
+func enqueueBreakthroughPanel(bot *tgbotapi.BotAPI, id uint) {
+	background.Panels.Submit(fmt.Sprintf("breakthrough_panel:%d", id), func() { refreshBreakthroughRitualPanelSync(bot, id, nil) }, true)
+}
+func retryBreakthroughPanels(bot *tgbotapi.BotAPI) {
+	var rituals []model.BreakthroughRitual
+	if storage.DB.Where("panel_dirty = ? AND message_id > 0 AND (panel_next_retry_at IS NULL OR panel_next_retry_at <= ?)", true, time.Now()).
+		Order("panel_next_retry_at ASC, id ASC").Limit(32).Find(&rituals).Error != nil {
+		return
+	}
+	for _, ritual := range rituals {
+		enqueueBreakthroughPanel(bot, ritual.ID)
+	}
+}
+
+func refreshBreakthroughRitualPanelSync(bot *tgbotapi.BotAPI, id uint, result *BreakthroughOutcome) {
 	var ritual model.BreakthroughRitual
 	if err := storage.DB.First(&ritual, id).Error; err != nil {
 		return
 	}
-	if ritual.MessageID == 0 {
+	if !ritual.PanelDirty || ritual.MessageID == 0 || (ritual.PanelNextRetryAt != nil && time.Now().Before(*ritual.PanelNextRetryAt)) {
+		return
+	}
+	// Persist backoff before reading/rendering, so malformed records and a
+	// restart also yield their recovery slots to other dirty panels.
+	res := storage.DB.Model(&model.BreakthroughRitual{}).Where("id = ? AND panel_version = ? AND panel_dirty = ?", id, ritual.PanelVersion, true).
+		UpdateColumn("panel_next_retry_at", time.Now().Add(30*time.Second))
+	if res.Error != nil || res.RowsAffected != 1 {
 		return
 	}
 	if ritual.Status == BreakthroughRitualSettled && result == nil {
@@ -415,7 +442,12 @@ func refreshBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *Break
 	edit.ReplyMarkup = &markup
 	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {
 		log.Printf("护道面板刷新失败: ritual=%d err=%s", id, textfmt.FormatTelegramSendError(err))
+		if !telegram.IsTelegramMessageUnavailableForEdit(err) {
+			return
+		}
 	}
+	storage.DB.Model(&model.BreakthroughRitual{}).Where("id = ? AND panel_version = ?", id, ritual.PanelVersion).
+		Updates(map[string]any{"panel_dirty": false, "panel_next_retry_at": nil})
 }
 
 func finishBreakthroughRitualPanel(bot *tgbotapi.BotAPI, id uint, result *BreakthroughOutcome) {
@@ -487,6 +519,7 @@ func HandleBreakthroughGuardCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Callback
 }
 
 func ProcessDueBreakthroughRituals(bot *tgbotapi.BotAPI, now time.Time) {
+	defer retryBreakthroughPanels(bot)
 	if !breakthroughGuardSweepMu.TryLock() {
 		return
 	}

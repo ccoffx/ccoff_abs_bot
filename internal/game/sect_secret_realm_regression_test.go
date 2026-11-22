@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,7 +22,7 @@ func secretRealmSettlementFixture(t *testing.T, users int) model.SectSecretRealm
 	old := config.AppConfig
 	config.AppConfig = &config.Config{}
 	t.Cleanup(func() { config.AppConfig = old })
-	if err := storage.DB.AutoMigrate(&model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.SectSecretRealmEvent{}, &model.SectSecretRealmParticipant{}, &model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.PointTransaction{}, &model.Inventory{}); err != nil {
+	if err := storage.DB.AutoMigrate(&model.ActivityEntryRequest{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.SectSecretRealmEvent{}, &model.SectSecretRealmParticipant{}, &model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.PointTransaction{}, &model.Inventory{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DB.Exec("CREATE UNIQUE INDEX idx_test_realm_inventory ON inventories(user_id, item_name) WHERE deleted_at IS NULL").Error; err != nil {
@@ -34,7 +33,7 @@ func secretRealmSettlementFixture(t *testing.T, users int) model.SectSecretRealm
 		t.Fatal(err)
 	}
 	profile := DefaultSectSecretRealmConfig().Profiles[0]
-	end := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	end := time.Now().Add(-time.Second).Truncate(time.Second)
 	event := model.SectSecretRealmEvent{RealmID: "regression", SectID: int64(sect.ID), Name: "回归秘境", ProfileKey: profile.Key, ConfigSnapshot: sectSecretRealmProfileSnapshot(profile), Status: "active", StartAt: end.Add(-time.Hour), EndAt: end}
 	if err := storage.DB.Create(&event).Error; err != nil {
 		t.Fatal(err)
@@ -43,7 +42,7 @@ func secretRealmSettlementFixture(t *testing.T, users int) model.SectSecretRealm
 		for _, row := range []any{
 			&model.User{TelegramID: id, Username: fmt.Sprint("user", id), AbsUserID: fmt.Sprint("abs", id)},
 			&model.SectMember{UserID: id, SectID: event.SectID},
-			&model.SectSecretRealmParticipant{Model: gorm.Model{CreatedAt: event.StartAt}, RealmID: event.RealmID, SectID: event.SectID, UserID: id, AbsUserID: fmt.Sprint("abs", id)},
+			&model.SectSecretRealmParticipant{Model: gorm.Model{CreatedAt: event.StartAt}, RealmID: event.RealmID, SectID: event.SectID, UserID: id, AbsUserID: fmt.Sprint("abs", id), ListeningSnapshot: newActivityListeningSnapshot(nil, event.StartAt)},
 		} {
 			if err := storage.DB.Create(row).Error; err != nil {
 				t.Fatal(err)
@@ -68,30 +67,35 @@ func secretRealmSessionResponse(w http.ResponseWriter, r *http.Request, event mo
 	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{session}})
 }
 
-func TestSecretRealmRetriesABSFailureWithoutLosingRewards(t *testing.T) {
+func TestSecretRealmABSFailureFreezesSavedProgressAndPaysOnce(t *testing.T) {
 	event := secretRealmSettlementFixture(t, 1)
-	var fail atomic.Bool
-	fail.Store(true)
-	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if fail.Load() {
-			w.WriteHeader(503)
-			return
-		}
-		secretRealmSessionResponse(w, r, event, false)
-	})
+	contributionMust(t, storage.DB.Model(&model.SectSecretRealmParticipant{}).Where("realm_id = ?", event.RealmID).Update("raw_delta_seconds", 1800).Error)
+	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) })
 	settleSectSecretRealm(nil, event.RealmID, 0)
-	if err := storage.DB.First(&event, event.ID).Error; err != nil || event.Status != "active" || event.SettledAt != nil {
-		t.Fatalf("failed ABS read finalized rewards: %+v %v", event, err)
+	contributionMust(t, storage.DB.First(&event, event.ID).Error)
+	if event.Status != "settling" {
+		t.Fatalf("temporary failure finalized event: %+v", event)
 	}
-	fail.Store(false)
+	// A restarted closing pass must use the saved progress once the window expires.
+	contributionMust(t, storage.DB.Model(&event).Update("end_at", time.Now().Add(-activityFinalSnapshotGrace-time.Second)).Error)
 	settleSectSecretRealm(nil, event.RealmID, 0)
-	if err := storage.DB.First(&event, event.ID).Error; err != nil || event.Status != "settled" || event.TotalRewardPoints <= 0 {
-		t.Fatalf("retry failed to pay earned rewards: %+v %v", event, err)
+	contributionMust(t, storage.DB.First(&event, event.ID).Error)
+	if event.Status != "settled" || event.TotalRewardPoints <= 0 {
+		t.Fatalf("saved progress not paid after deadline: %+v", event)
+	}
+	before := event.TotalRewardPoints
+	settleSectSecretRealm(nil, event.RealmID, 0)
+	var user model.User
+	contributionMust(t, storage.DB.First(&user, "telegram_id = ?", 1).Error)
+	if user.Points != before {
+		t.Fatalf("duplicate payout: %d != %d", user.Points, before)
 	}
 }
 
 func TestSecretRealmExcludesListeningAfterEvent(t *testing.T) {
 	event := secretRealmSettlementFixture(t, 1)
+	event.EndAt = time.Now().Add(-10 * time.Minute)
+	contributionMust(t, storage.DB.Model(&event).Update("end_at", event.EndAt).Error)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { secretRealmSessionResponse(w, r, event, true) })
 	settleSectSecretRealm(nil, event.RealmID, 0)
 	if err := storage.DB.First(&event, event.ID).Error; err != nil || event.Status != "settled" || event.TotalRewardPoints != 0 {
@@ -99,7 +103,7 @@ func TestSecretRealmExcludesListeningAfterEvent(t *testing.T) {
 	}
 }
 
-func TestSecretRealmSettlesPlaybackWithSmallClientClockSkew(t *testing.T) {
+func TestSecretRealmDailyProgressCapsAtParticipationWindow(t *testing.T) {
 	event := secretRealmSettlementFixture(t, 1)
 	event.StartAt = event.EndAt.Add(-2 * time.Hour)
 	if err := storage.DB.Model(&event).Update("start_at", event.StartAt).Error; err != nil {
@@ -109,26 +113,23 @@ func TestSecretRealmSettlesPlaybackWithSmallClientClockSkew(t *testing.T) {
 	if err := storage.DB.First(&p, "realm_id = ?", event.RealmID).Error; err != nil {
 		t.Fatal(err)
 	}
-	// Reproduce a participant joining 18.76 seconds after opening, whose ABS
-	// session reports about 19 seconds more playback than its wall-clock span.
+	// A participant joins 18.76 seconds after opening. Excess daily input cannot
+	// credit the pre-entry interval or exceed the participant's own window.
 	p.CreatedAt = event.StartAt.Add(18*time.Second + 755625828*time.Nanosecond)
-	p.BaseRawSeconds = 59439.05850859936
+	p.ListeningSnapshot = newActivityListeningSnapshot(nil, p.CreatedAt)
 	if err := storage.DB.Save(&p).Error; err != nil {
 		t.Fatal(err)
 	}
-	sessionStart := event.StartAt.Add(-2*time.Hour - 6*time.Minute - 43*time.Second)
-	sessionEnd := sessionStart.Add(19721800 * time.Millisecond)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "listening-stats") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{
-				SectDayKey(event.StartAt.AddDate(0, 0, -1)): 42387.48418782577,
-				SectDayKey(event.StartAt):                   24251.99260032269,
+				SectDayKey(p.CreatedAt): 86400,
+				SectDayKey(event.EndAt): 86400,
 			}})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{
-			bossSession("client-clock-skew", sessionStart, sessionEnd, 19740.760275532873),
-		}})
+		t.Errorf("activity requested sessions: %s", r.URL.Path)
+		w.WriteHeader(503)
 	})
 	settleSectSecretRealm(nil, event.RealmID, 0)
 	if err := storage.DB.First(&event, event.ID).Error; err != nil || event.Status != "settled" {
@@ -138,17 +139,17 @@ func TestSecretRealmSettlesPlaybackWithSmallClientClockSkew(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantSeconds := event.EndAt.Sub(p.CreatedAt).Seconds()
-	if math.Abs(p.RawDeltaSeconds-wantSeconds) > 1e-6 || !p.IsRewarded || p.RewardPoints != 12 || p.RewardContribution != 5 || p.RewardPrestige != 1 {
-		t.Fatalf("small client skew lost or inflated rewards: %+v; want seconds=%.9f points=12 contribution=5 prestige=1", p, wantSeconds)
+	if math.Abs(p.RawDeltaSeconds-wantSeconds) > 1e-6 || !p.IsRewarded || p.RewardPoints != 11 || p.RewardContribution != 5 || p.RewardPrestige != 1 {
+		t.Fatalf("daily input lost or inflated rewards: %+v; want seconds=%.9f points=11 contribution=5 prestige=1", p, wantSeconds)
 	}
 	// Repeated settlement must preserve both the wallet balance and its ledger.
 	settleSectSecretRealm(nil, event.RealmID, 0)
 	var user model.User
-	if err := storage.DB.First(&user, "telegram_id = ?", p.UserID).Error; err != nil || user.Points != 12 {
+	if err := storage.DB.First(&user, "telegram_id = ?", p.UserID).Error; err != nil || user.Points != 11 {
 		t.Fatalf("unexpected wallet balance: %+v err=%v", user, err)
 	}
 	var rewards []model.PointTransaction
-	if err := storage.DB.Where("user_id = ? AND type = ? AND ref_id = ?", p.UserID, "sect_secret_realm_reward", event.RealmID).Find(&rewards).Error; err != nil || len(rewards) != 1 || rewards[0].Delta != 12 {
+	if err := storage.DB.Where("user_id = ? AND type = ? AND ref_id = ?", p.UserID, "sect_secret_realm_reward", event.RealmID).Find(&rewards).Error; err != nil || len(rewards) != 1 || rewards[0].Delta != 11 {
 		t.Fatalf("unexpected reward ledger: %+v err=%v", rewards, err)
 	}
 }
@@ -169,57 +170,44 @@ func TestSecretRealmDepartedMemberDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
-func TestSecretRealmHistoricalScanResumesAcrossSettlementRetries(t *testing.T) {
+func TestSecretRealmFinalSnapshotSurvivesFailedPayoutAndRetry(t *testing.T) {
 	event := secretRealmSettlementFixture(t, 1)
-	var fail atomic.Bool
-	fail.Store(true)
+	var calls atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "listening-stats") {
-			secretRealmSessionResponse(w, r, event, false)
-			return
-		}
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		if page == 5 {
-			if fail.Load() {
-				w.WriteHeader(503)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{bossSession("earned", event.StartAt, event.EndAt, 3600)}})
-			return
-		}
-		if page > 5 {
-			t.Errorf("unexpected page %d", page)
-		}
-		sessions := make([]any, dailyListeningSessionPageSize)
-		for i := range sessions {
-			sessions[i] = bossSession(fmt.Sprintf("newer-%d-%d", page, i), event.EndAt.Add(time.Hour), event.EndAt.Add(2*time.Hour), 3600)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
+		calls.Add(1)
+		secretRealmSessionResponse(w, r, event, false)
 	})
-	for attempt := 0; attempt < 2; attempt++ {
-		settleSectSecretRealm(nil, event.RealmID, 0)
-		if err := storage.DB.First(&event, event.ID).Error; err != nil || event.Status != "active" || event.SettledAt != nil {
-			t.Fatalf("incomplete history finalized event: %+v %v", event, err)
+	fail := true
+	contributionMust(t, storage.DB.Callback().Update().Before("gorm:update").Register("fail_final_payout", func(tx *gorm.DB) {
+		if tx.Statement.Table == "sect_secret_realm_events" {
+			if values, ok := tx.Statement.Dest.(map[string]interface{}); ok && values["status"] == "settled" && fail {
+				tx.AddError(fmt.Errorf("injected payout failure"))
+			}
 		}
-		var p model.SectSecretRealmParticipant
-		if err := storage.DB.First(&p, "realm_id = ?", event.RealmID).Error; err != nil || p.ListeningScanPage != 5 || p.FinalListeningScanComplete || p.IsRewarded {
-			t.Fatalf("retry lost history cursor: %+v %v", p, err)
-		}
-	}
-	fail.Store(false)
+	}))
+	t.Cleanup(func() { storage.DB.Callback().Update().Remove("fail_final_payout") })
 	settleSectSecretRealm(nil, event.RealmID, 0)
-	if err := storage.DB.First(&event, event.ID).Error; err != nil || event.Status != "settled" || event.TotalRewardPoints <= 0 {
-		t.Fatalf("resumed history failed to pay: %+v %v", event, err)
+	contributionMust(t, storage.DB.First(&event, event.ID).Error)
+	if event.Status != "active" {
+		t.Fatal("payout did not roll back")
 	}
+	var p model.SectSecretRealmParticipant
+	contributionMust(t, storage.DB.First(&p, "realm_id = ?", event.RealmID).Error)
+	if !p.ListeningSnapshot.Finalized || p.IsRewarded {
+		t.Fatalf("final input lost: %+v", p)
+	}
+	fail = false
 	settleSectSecretRealm(nil, event.RealmID, 0)
-	var u model.User
-	if err := storage.DB.First(&u, "telegram_id = ?", 1).Error; err != nil || u.Points != event.TotalRewardPoints {
-		t.Fatalf("retry paid rewards more than once: %+v %v", u, err)
+	contributionMust(t, storage.DB.First(&event, event.ID).Error)
+	if event.Status != "settled" || event.TotalRewardPoints <= 0 || calls.Load() != 1 {
+		t.Fatalf("retry changed snapshot: calls=%d event=%+v", calls.Load(), event)
 	}
 }
 
 func TestSecretRealmListeningStartsAtJoinTime(t *testing.T) {
 	event := secretRealmSettlementFixture(t, 1)
+	event.Status = "settling"
+	contributionMust(t, storage.DB.Save(&event).Error)
 	var p model.SectSecretRealmParticipant
 	if err := storage.DB.First(&p, "realm_id = ?", event.RealmID).Error; err != nil {
 		t.Fatal(err)
@@ -254,6 +242,54 @@ func TestSecretRealmBindingChangeBeforeRewardIsExcluded(t *testing.T) {
 	}
 	if err := storage.DB.First(&p, p.ID).Error; err != nil || p.RewardPoints != 0 || p.IsRewarded {
 		t.Fatalf("rebound participant kept reward: %+v %v", p, err)
+	}
+}
+
+func TestSecretRealmGuardianChangeBeforeRewardRetriesWithoutStaleBonus(t *testing.T) {
+	for _, change := range []string{"leave", "binding"} {
+		t.Run(change, func(t *testing.T) {
+			event := secretRealmSettlementFixture(t, 2)
+			event.GuardianUserID, event.GuardianName = 1, "former guardian"
+			event.GuardianMajorRealm, event.GuardianBonusPercent = 4, 10
+			contributionMust(t, storage.DB.Save(&event).Error)
+			var participants []model.SectSecretRealmParticipant
+			contributionMust(t, storage.DB.Where("realm_id = ?", event.RealmID).Order("user_id").Find(&participants).Error)
+			for i := range participants {
+				p := &participants[i]
+				p.ListeningSnapshot.Finalized, p.ListeningSnapshot.Seconds = true, 1800
+				p.RawDeltaSeconds, p.SuppressedHours, p.DeltaHours = 1800, .5, .55
+				p.GuardianBonusPercent, p.RewardPoints = 10, 3
+				contributionMust(t, storage.DB.Save(p).Error)
+			}
+			if change == "leave" {
+				contributionMust(t, storage.DB.Where("user_id = ?", 1).Delete(&model.SectMember{}).Error)
+			} else {
+				contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("abs_user_id", "replacement").Error)
+			}
+			if err := grantSectSecretRealmRewards(event, participants); err == nil {
+				t.Fatal("stale guardian bonus was paid instead of retrying settlement")
+			}
+			var user model.User
+			contributionMust(t, storage.DB.First(&user, "telegram_id = ?", 2).Error)
+			if user.Points != 0 {
+				t.Fatal("failed settlement paid a partial reward")
+			}
+			// The scheduler retries from the already frozen listening snapshots.
+			settleSectSecretRealm(nil, event.RealmID, 0)
+			contributionMust(t, storage.DB.First(&event, event.ID).Error)
+			var p model.SectSecretRealmParticipant
+			contributionMust(t, storage.DB.First(&p, "realm_id = ? AND user_id = ?", event.RealmID, 2).Error)
+			if event.Status != "settled" || event.GuardianUserID != 0 || event.GuardianBonusPercent != 0 || p.DeltaHours != .5 || p.GuardianBonusPercent != 0 || !p.IsRewarded {
+				t.Fatalf("retry retained stale guardian bonus: event=%+v participant=%+v", event, p)
+			}
+			contributionMust(t, storage.DB.First(&user, "telegram_id = ?", 2).Error)
+			points := user.Points
+			settleSectSecretRealm(nil, event.RealmID, 0)
+			contributionMust(t, storage.DB.First(&user, "telegram_id = ?", 2).Error)
+			if user.Points != points {
+				t.Fatal("settlement retry paid twice")
+			}
+		})
 	}
 }
 

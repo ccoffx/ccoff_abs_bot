@@ -1,6 +1,8 @@
 package app
 
 import (
+	"ccoff-abs-bot/internal/background"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -115,7 +117,7 @@ func TestTreasureTelegramFlowAndFailedPublication(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "result": map[string]interface{}{"message_id": 123, "chat": map[string]interface{}{"id": -100, "type": "supergroup"}, "text": r.Form.Get("text")}})
 				}
 			}))
-			t.Cleanup(server.Close)
+			t.Cleanup(func() { waitActivityBackground(t); server.Close() })
 			bot, err := tgbotapi.NewBotAPIWithClient("test", server.URL+"/bot%s/%s", server.Client())
 			if err != nil {
 				t.Fatal(err)
@@ -151,6 +153,7 @@ func TestTreasureTelegramFlowAndFailedPublication(t *testing.T) {
 			if !activity.HandleTreasureHuntCallback(bot, callback) || treasureTestBalance(t, 1) != 108 {
 				t.Fatal("callback did not award fixed prize")
 			}
+			waitActivityBackground(t)
 			mu.Lock()
 			activeEdit, activeMarkup, answer := edits[len(edits)-1], editMarkups[len(editMarkups)-1], answers[len(answers)-1]
 			mu.Unlock()
@@ -185,6 +188,7 @@ func TestTreasureTelegramFlowAndFailedPublication(t *testing.T) {
 			if err := storage.DB.First(&round, round.ID).Error; err != nil || round.Status != activity.TreasureClosed {
 				t.Fatal("scheduler did not close expired round", err)
 			}
+			waitActivityBackground(t)
 			mu.Lock()
 			lastEdit := edits[len(edits)-1]
 			mu.Unlock()
@@ -199,5 +203,93 @@ func TestTreasureTelegramFlowAndFailedPublication(t *testing.T) {
 				t.Fatal("could not start next round immediately after settlement", err)
 			}
 		})
+	}
+}
+
+func waitActivityBackground(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := background.Panels.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := background.Default.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSlowTreasurePanelDoesNotBlockAnotherRoundAndFailedEditsRetry(t *testing.T) {
+	setupTreasureTestDB(t)
+	first, second := newTreasureTestRound(t, -100), newTreasureTestRound(t, -200)
+	started, release, other := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var startOnce, releaseOnce, otherOnce sync.Once
+	var failOther atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			fmt.Fprint(w, `{"ok":true,"result":{"id":99,"is_bot":true,"first_name":"test"}}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/answerCallbackQuery") {
+			fmt.Fprint(w, `{"ok":true,"result":true}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/editMessageText") {
+			if r.Form.Get("chat_id") == "-100" {
+				startOnce.Do(func() { close(started) })
+				<-release
+			} else {
+				otherOnce.Do(func() { close(other) })
+				if failOther.Load() {
+					fmt.Fprint(w, `{"ok":false,"error_code":503,"description":"try later"}`)
+					return
+				}
+			}
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":123,"chat":{"id":-100,"type":"supergroup"}}}`)
+	}))
+	defer server.Close()
+	defer func() { releaseOnce.Do(func() { close(release) }); waitActivityBackground(t) }()
+	bot, err := tgbotapi.NewBotAPIWithClient("test", server.URL+"/bot%s/%s", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pick := func(round model.TreasureRound, userID int64, box int) {
+		t.Helper()
+		activity.HandleTreasureHuntCallback(bot, &tgbotapi.CallbackQuery{ID: fmt.Sprint(userID), From: &tgbotapi.User{ID: userID}, Message: &tgbotapi.Message{MessageID: 123, Chat: &tgbotapi.Chat{ID: round.ChatID, Type: "supergroup"}}, Data: fmt.Sprintf("hunt:%d:%d", round.ID, box)})
+	}
+	pick(first, 1, 0)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first panel edit did not start")
+	}
+	pick(second, 2, 0)
+	select {
+	case <-other:
+	case <-time.After(time.Second):
+		t.Fatal("another round waited behind the slow panel")
+	}
+	// A newer request for the blocked panel must remain pending until it is sent.
+	pick(first, 3, 1)
+	releaseOnce.Do(func() { close(release) })
+	waitActivityBackground(t)
+	if err := storage.DB.First(&first, first.ID).Error; err != nil || first.PanelDirty {
+		t.Fatalf("latest panel state did not finish: %+v %v", first, err)
+	}
+	failOther.Store(true)
+	pick(second, 4, 1)
+	waitActivityBackground(t)
+	if err := storage.DB.First(&second, second.ID).Error; err != nil || !second.PanelDirty || second.PanelNextRetryAt == nil {
+		t.Fatalf("failed edit lost its durable retry marker: %+v %v", second, err)
+	}
+	failOther.Store(false)
+	if err := storage.DB.Model(&second).UpdateColumn("panel_next_retry_at", time.Now().Add(-time.Second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	activity.ProcessExpiredTreasureRounds(bot, time.Now())
+	waitActivityBackground(t)
+	if err := storage.DB.First(&second, second.ID).Error; err != nil || second.PanelDirty {
+		t.Fatalf("panel sweep did not retry saved state: %+v %v", second, err)
 	}
 }

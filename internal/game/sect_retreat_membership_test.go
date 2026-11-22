@@ -61,7 +61,9 @@ func TestSectRetreatRevalidatesMembershipAfterABSFetch(t *testing.T) {
 					fmt.Fprint(w, `{"days":{}}`)
 				}
 			})
+			t.Cleanup(func() { waitSectRetreatPreparations(t) })
 			handleStartSectCaveRetreat(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}}, true)
+			waitSectRetreatPreparations(t)
 			var retreats int64
 			if err := storage.DB.Model(&model.SectCaveRetreat{}).Count(&retreats).Error; err != nil {
 				t.Fatal(err)

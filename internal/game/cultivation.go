@@ -1082,28 +1082,6 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 	}
 
 	var results []RankResult
-	// A full batch writes users one by one. Pin both ranking reads outside its
-	// publication window so a query cannot observe a half-finished batch.
-	listeningRefreshMu.RLock()
-	locked := true
-	defer func() {
-		if locked {
-			listeningRefreshMu.RUnlock()
-		}
-	}()
-	if freshnessNotice == "" {
-		users, freshnessErr := listeningSyncUsers(time.Now())
-		if freshnessErr != nil {
-			freshnessNotice = "⚠️ 榜单新鲜度检查失败，以下为已保存数据。"
-		} else {
-			for _, user := range users {
-				if !user.Settled || !listeningDailyTimestampFresh(user.LastFetchedAt, time.Now(), ListeningMaxAge) {
-					freshnessNotice = "⚠️ 榜单数据可能滞后，以下为已保存数据。\n" + staleListeningNotice(user.LastFetchedAt)
-					break
-				}
-			}
-		}
-	}
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		if err := rankings.Cultivation(tx).
 			Select("cultivations.user_id, users.username, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time, COALESCE(sects.owner_id = cultivations.user_id, 0) AS is_sect_owner").
@@ -1140,8 +1118,6 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 		}
 		return nil
 	})
-	listeningRefreshMu.RUnlock()
-	locked = false
 
 	if err != nil {
 		if _, sendErr := telegram.SendAutoDelete(bot, tgbotapi.NewMessage(chatID, "❌ 天机阁拉取榜单异常，请联系管理员查看后台日志！")); sendErr != nil {
@@ -1157,9 +1133,7 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 	}
 
 	reply := "📜 **【斗气风云榜·万界至尊】** 📜\n\n"
-	if freshnessNotice != "" {
-		reply += freshnessNotice + "\n\n"
-	}
+
 	medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"}
 
 	for i, r := range results {
@@ -1181,6 +1155,7 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 		reply += "\n"
 	}
 
+	reply += freshnessNotice + "\n\n"
 	reply += fmt.Sprintf("👑 创建宗门成为宗主，可享每日基础净修为 **+%d%%**；身份变更次日生效，转让后保留历史加成。\n\n", sectbonus.Percent)
 	reply += "*(💡 发送 `突破` 引动雷劫，提升境界排位！)*"
 	msg := tgbotapi.NewMessage(chatID, reply)

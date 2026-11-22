@@ -14,6 +14,30 @@ import (
 	"ccoff-abs-bot/internal/storage"
 )
 
+// Exercise migration, rewards, repair and rebinding within an open day using
+// historical fixtures. Archive/rollover tests use an explicit clock separately.
+func recordOpenOfficialTestDay(userID int64, absID string, days map[string]float64, fetchedAt time.Time) (map[string]float64, error) {
+	realNow := time.Now()
+	latest := ""
+	for day := range days {
+		if day > latest {
+			latest = day
+		}
+	}
+	logicalNow := realNow
+	if latest != "" && latest <= SectDayKey(realNow) {
+		date, err := time.ParseInLocation("2006-01-02", latest, storage.DailyOperationsLocation)
+		if err == nil {
+			logicalNow = date.Add(23*time.Hour + time.Duration(realNow.Minute())*time.Minute + time.Duration(realNow.Second())*time.Second + time.Duration(realNow.Nanosecond()))
+		}
+	}
+	var previous model.ListeningReportSnapshot
+	if storage.DB.First(&previous, "user_id = ?", userID).Error == nil && previous.StatsFetchedAt.After(logicalNow) {
+		logicalNow = previous.StatsFetchedAt.Add(time.Millisecond)
+	}
+	return recordOfficialDailyListeningStatsAt(userID, absID, days, fetchedAt.Add(logicalNow.Sub(realNow)), logicalNow)
+}
+
 func officialStat(t *testing.T, day string) model.DailyListeningStat {
 	t.Helper()
 	var s model.DailyListeningStat
@@ -28,7 +52,7 @@ func officialTotal(t *testing.T) float64 {
 }
 func writeOfficial(t *testing.T, days map[string]float64) {
 	t.Helper()
-	_, err := recordOfficialDailyListeningStats(1, "abs1", days, time.Now(), nil)
+	_, err := recordOpenOfficialTestDay(1, "abs1", days, time.Now())
 	contributionMust(t, err)
 }
 func TestOfficialDailyRefreshDoesNotRequestSessions(t *testing.T) {
@@ -65,7 +89,7 @@ func TestOfficialDailyRetainsDecreasesAndMissingHistoryAndSupplementsGrowth(t *t
 	before := officialTotal(t)
 	writeOfficial(t, map[string]float64{day: 4 * 3600, today: 30})
 	s := officialStat(t, day)
-	if s.CappedSeconds != 5*3600 || s.OfficialRawSeconds != 4*3600 || !strings.Contains(s.ValidationJSON, "official_decrease_retained") || officialTotal(t) != before {
+	if s.CappedSeconds != 5*3600 || s.OfficialRawSeconds != 5*3600 || !s.Archived || officialTotal(t) != before {
 		t.Fatalf("decrease changed credit: %+v", s)
 	}
 	writeOfficial(t, map[string]float64{})
@@ -73,7 +97,7 @@ func TestOfficialDailyRetainsDecreasesAndMissingHistoryAndSupplementsGrowth(t *t
 		t.Fatal("missing day erased history")
 	}
 	writeOfficial(t, map[string]float64{day: 8 * 3600, today: 120})
-	want := calculateSectEffectiveHoursFromSeconds(8*3600) + 120.0/3600
+	want := calculateSectEffectiveHoursFromSeconds(5*3600) + 120.0/3600
 	if math.Abs(officialTotal(t)-want) > 1e-9 {
 		t.Fatalf("tier delta=%g want=%g", officialTotal(t), want)
 	}
@@ -129,7 +153,7 @@ func TestOfficialDailySourceAndSettlementRollbackTogether(t *testing.T) {
 	total := officialTotal(t)
 	for _, table := range []string{"cultivations", "listening_report_snapshots"} {
 		contributionMust(t, storage.DB.Exec("CREATE TRIGGER reject_official_update BEFORE UPDATE ON "+table+" BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error)
-		_, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{day: 7200}, time.Now(), nil)
+		_, err := recordOpenOfficialTestDay(1, "abs1", map[string]float64{day: 7200}, time.Now())
 		if err == nil {
 			t.Fatal("expected rollback", table)
 		}
@@ -155,7 +179,7 @@ func TestOfficialDailyConcurrentAndStaleResponses(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{day: 7200}, time.Now(), nil)
+			_, err := recordOpenOfficialTestDay(1, "abs1", map[string]float64{day: 7200}, time.Now())
 			errors <- err
 		}()
 	}
@@ -169,7 +193,7 @@ func TestOfficialDailyConcurrentAndStaleResponses(t *testing.T) {
 	if officialTotal(t) != 2 {
 		t.Fatal("duplicate credit", officialTotal(t))
 	}
-	if _, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{day: 10800}, older, nil); err == nil {
+	if _, err := recordOpenOfficialTestDay(1, "abs1", map[string]float64{day: 10800}, older); err == nil {
 		t.Fatal("accepted stale larger response")
 	}
 	if officialStat(t, day).OfficialRawSeconds != 7200 {
@@ -206,12 +230,12 @@ func TestOfficialDailyInvalidValuesAndRebinding(t *testing.T) {
 	setupRetreatBackfillDB(t)
 	day := SectDayKey(time.Now())
 	for _, seconds := range []float64{-1, math.NaN(), math.Inf(1)} {
-		if _, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{day: seconds}, time.Now(), nil); err == nil {
+		if _, err := recordOpenOfficialTestDay(1, "abs1", map[string]float64{day: seconds}, time.Now()); err == nil {
 			t.Fatal("accepted invalid seconds")
 		}
 	}
 	contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", "replacement").Error)
-	if _, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{day: 60}, time.Now(), nil); err == nil {
+	if _, err := recordOpenOfficialTestDay(1, "abs1", map[string]float64{day: 60}, time.Now()); err == nil {
 		t.Fatal("accepted old binding")
 	}
 	var count int64
@@ -270,14 +294,14 @@ func TestOfficialDailyRebindingBaselinesNewAccountHistory(t *testing.T) {
 	other := SectDayKey(time.Now().AddDate(0, 0, -2))
 	writeOfficial(t, map[string]float64{day: 3600})
 	contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", "abs2").Error)
-	_, err := recordOfficialDailyListeningStats(1, "abs2", map[string]float64{day: 36000, other: 36000}, time.Now(), nil)
+	_, err := recordOpenOfficialTestDay(1, "abs2", map[string]float64{day: 36000, other: 36000}, time.Now())
 	contributionMust(t, err)
 	if officialTotal(t) != 1 {
 		t.Fatal("rebinding imported history again", officialTotal(t))
 	}
-	_, err = recordOfficialDailyListeningStats(1, "abs2", map[string]float64{day: 39600, other: 39600}, time.Now(), nil)
+	_, err = recordOpenOfficialTestDay(1, "abs2", map[string]float64{day: 39600, other: 39600}, time.Now())
 	contributionMust(t, err)
-	want := 1 + 2*(calculateSectEffectiveHoursFromSeconds(39600)-calculateSectEffectiveHoursFromSeconds(36000))
+	want := 1 + (calculateSectEffectiveHoursFromSeconds(39600) - calculateSectEffectiveHoursFromSeconds(36000))
 	if math.Abs(officialTotal(t)-want) > 1e-9 {
 		t.Fatal("growth after rebind incorrect", officialTotal(t), want)
 	}
@@ -291,7 +315,8 @@ func TestOfficialDailyRepairBonusOnlyAtSuppressionCap(t *testing.T) {
 		t.Fatal("settlement failed")
 	}
 	before := officialTotal(t)
-	writeOfficial(t, map[string]float64{stat.DayKey: 86400})
+	_, migrationErr := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{stat.DayKey: 86400}, time.Now())
+	contributionMust(t, migrationErr)
 	if math.Abs(officialTotal(t)-before) > 1e-9 {
 		t.Fatal("migration paid fire gap")
 	}
@@ -359,8 +384,8 @@ func TestOfficialDailyMigrationBaselinesHistoricalDayMissingFromFirstResponse(t 
 		t.Fatal("late source not baselined", s)
 	}
 	writeOfficial(t, map[string]float64{source: 7200})
-	if officialTotal(t) != 2 {
-		t.Fatal("growth after late baseline lost", officialTotal(t))
+	if officialTotal(t) != 1 {
+		t.Fatal("archived history was reopened", officialTotal(t))
 	}
 }
 
@@ -406,7 +431,7 @@ func TestOfficialDailyRebindingProtectsHistoricalSourceMissingFromFirstResponse(
 	writeOfficial(t, map[string]float64{day: 3600})
 	contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", "abs2").Error)
 	for _, days := range []map[string]float64{{}, {source: 36000}, {source: 36000}} {
-		_, err := recordOfficialDailyListeningStats(1, "abs2", days, time.Now(), nil)
+		_, err := recordOpenOfficialTestDay(1, "abs2", days, time.Now())
 		contributionMust(t, err)
 		if officialTotal(t) != 1 {
 			t.Fatal("rebound account imported late source twice", officialTotal(t))
@@ -420,7 +445,7 @@ func TestOfficialDailyMigrationBoundaryRollsBackWithSnapshotFailure(t *testing.T
 	contributionMust(t, storage.DB.Create(&model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: day, CappedSeconds: 3600, EffectiveHours: 1}).Error)
 	assertListeningSync(t, time.Now(), 1)
 	contributionMust(t, storage.DB.Exec("CREATE TRIGGER reject_cutover_snapshot BEFORE INSERT ON listening_report_snapshots BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error)
-	if _, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{}, time.Now(), nil); err == nil {
+	if _, err := recordOpenOfficialTestDay(1, "abs1", map[string]float64{}, time.Now()); err == nil {
 		t.Fatal("expected rollback")
 	}
 	var profile model.Cultivation
@@ -443,7 +468,7 @@ func TestOfficialDailyRebindingCreditsGrowthBelowPreviousAccountHighWater(t *tes
 	before := officialTotal(t)
 	contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", "abs2").Error)
 	for _, seconds := range []float64{3600, 7200, 7200, 1800} {
-		_, err := recordOfficialDailyListeningStats(1, "abs2", map[string]float64{day: seconds}, time.Now(), nil)
+		_, err := recordOpenOfficialTestDay(1, "abs2", map[string]float64{day: seconds}, time.Now())
 		contributionMust(t, err)
 		want := before
 		if seconds != 3600 {
@@ -466,7 +491,7 @@ func TestOfficialDailyRebindingPreservesMigratedBonusBasis(t *testing.T) {
 	writeOfficial(t, map[string]float64{stat.DayKey: 36000})
 	before := officialTotal(t)
 	contributionMust(t, db.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", "abs2").Error)
-	_, err := recordOfficialDailyListeningStats(1, "abs2", map[string]float64{stat.DayKey: 3600}, time.Now(), nil)
+	_, err := recordOpenOfficialTestDay(1, "abs2", map[string]float64{stat.DayKey: 3600}, time.Now())
 	contributionMust(t, err)
 	if math.Abs(officialTotal(t)-before) > 1e-9 {
 		t.Fatal("rebinding changed earned bonus", officialTotal(t), before)
@@ -475,7 +500,7 @@ func TestOfficialDailyRebindingPreservesMigratedBonusBasis(t *testing.T) {
 	if s.CappedSeconds != 3600 || s.BonusListeningSeconds() != 28800 {
 		t.Fatal("rebinding confused account time and bonus basis", s)
 	}
-	_, err = recordOfficialDailyListeningStats(1, "abs2", map[string]float64{stat.DayKey: 7200}, time.Now(), nil)
+	_, err = recordOpenOfficialTestDay(1, "abs2", map[string]float64{stat.DayKey: 7200}, time.Now())
 	contributionMust(t, err)
 	if math.Abs(officialTotal(t)-(before+1)) > 1e-9 {
 		t.Fatal("new low-tier growth or legacy fire basis incorrect", officialTotal(t), before+1)
@@ -490,12 +515,12 @@ func TestOfficialDailyRepeatedRebindingResetsOnlyAccountTime(t *testing.T) {
 	for _, account := range []string{"abs2", "abs3", "abs1"} {
 		contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", account).Error)
 		// An empty account must not inherit an earlier account's playback threshold.
-		_, err := recordOfficialDailyListeningStats(1, account, map[string]float64{day: 0}, time.Now(), nil)
+		_, err := recordOpenOfficialTestDay(1, account, map[string]float64{day: 0}, time.Now())
 		contributionMust(t, err)
 		if math.Abs(officialTotal(t)-before) > 1e-9 {
 			t.Fatal("rebind changed accumulated cultivation")
 		}
-		_, err = recordOfficialDailyListeningStats(1, account, map[string]float64{day: 3600}, time.Now(), nil)
+		_, err = recordOpenOfficialTestDay(1, account, map[string]float64{day: 3600}, time.Now())
 		contributionMust(t, err)
 		before = math.Min(sectDailyCultivationHourCap, before+1)
 		if math.Abs(officialTotal(t)-before) > 1e-9 {
@@ -548,7 +573,7 @@ func TestOfficialDailyRebindingCannotExceedUserDayCap(t *testing.T) {
 	for _, account := range []string{"abs2", "abs3", "abs1"} {
 		contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", account).Error)
 		for _, seconds := range []float64{0, 4 * 3600, 18 * 3600} {
-			_, err := recordOfficialDailyListeningStats(1, account, map[string]float64{day: seconds}, time.Now(), nil)
+			_, err := recordOpenOfficialTestDay(1, account, map[string]float64{day: seconds}, time.Now())
 			contributionMust(t, err)
 			s := officialStat(t, day)
 			if math.Abs(s.EffectiveHours-sectDailyCultivationHourCap) > 1e-9 || math.Abs(officialTotal(t)-sectDailyCultivationHourCap) > 1e-9 {
@@ -566,7 +591,8 @@ func TestOfficialDailyNewRetreatUsesMigratedBonusBasis(t *testing.T) {
 	legacy := model.DailyListeningStat{UserID: 1, AbsUserID: "abs1", DayKey: day, CappedSeconds: 4 * 3600, RawSeconds: 8 * 3600, OfficialRawSeconds: 8 * 3600, EffectiveHours: 4, ValidationJSON: `{"version":2}`}
 	contributionMust(t, storage.DB.Create(&legacy).Error)
 	writeOfficial(t, map[string]float64{day: 8 * 3600})
-	base := getUserTodayBonusListeningSeconds(1, "", start.Add(4*time.Hour))
+	base, err := getUserTodayBonusListeningSeconds(1, "", start.Add(4*time.Hour))
+	contributionMust(t, err)
 	if base != 4*3600 {
 		t.Fatalf("retreat baseline=%g want 14400", base)
 	}
@@ -585,7 +611,7 @@ func TestOfficialDailyRepairRejectsRebindingHistory(t *testing.T) {
 	day := SectDayKey(time.Now().AddDate(0, 0, -1))
 	writeOfficial(t, map[string]float64{day: 3600})
 	contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id=1").Update("abs_user_id", "abs2").Error)
-	_, err := recordOfficialDailyListeningStats(1, "abs2", map[string]float64{day: 10 * 3600}, time.Now(), nil)
+	_, err := recordOpenOfficialTestDay(1, "abs2", map[string]float64{day: 10 * 3600}, time.Now())
 	contributionMust(t, err)
 	before := officialStat(t, day)
 	for _, apply := range []bool{false, true} {

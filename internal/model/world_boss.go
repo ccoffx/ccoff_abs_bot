@@ -24,6 +24,10 @@ type WorldBossEvent struct {
 	SettledAt         *time.Time
 	ListeningCutoffAt *time.Time
 
+	// Progress freshness is independent of participant/board message writes.
+	LiveRefreshedAt       *time.Time
+	LiveRefreshIncomplete bool
+
 	BoardChatID    int64
 	BoardMessageID int
 }
@@ -36,6 +40,7 @@ type WorldBossParticipant struct {
 	UserID                     int64  `gorm:"index;not null"`
 	UserName                   string
 	AbsUserID                  string
+	ListeningSnapshot          ActivityListeningSnapshot `gorm:"embedded;embeddedPrefix:listening_snapshot_"`
 	ListeningEvidenceJSON      string
 	ListeningScanPage          int
 	FinalListeningScanStarted  bool

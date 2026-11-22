@@ -55,17 +55,67 @@ func TestStartFastPathDoesNotOvertakeQueuedMessage(t *testing.T) {
 	// With no Bot client, incorrectly taking the synchronous fast path would
 	// both erase this session and panic while attempting to send the menu.
 	dispatchTelegramUpdate(nil, jobs, tgbotapi.Update{Message: message("/start")})
-	if len(jobs) != 2 || telegram.GetSession(88103).GetStep() != "WAITING_INPUT" {
+	if len(jobs) != 1 || telegram.GetSession(88103).GetStep() != "WAITING_INPUT" {
 		t.Fatal("/start overtook the queued input")
 	}
-	first, second := <-jobs, <-jobs
-	defer first.turn.finish()
-	defer second.turn.finish()
-	if !first.turn.isReady() || second.turn.isReady() {
-		t.Fatal("queued messages were released out of arrival order")
+	first := <-jobs
+	if !first.turn.isReady() {
+		t.Fatal("first turn was not ready")
 	}
 	first.turn.finish()
+	if len(jobs) != 1 {
+		t.Fatal("finishing the first input did not dispatch /start")
+	}
+	second := <-jobs
+	defer second.turn.finish()
 	if !second.turn.isReady() {
-		t.Fatal("finishing the first input did not release /start")
+		t.Fatal("queued /start was not released in order")
+	}
+
+}
+
+func TestWaitingUserMessagesDoNotOccupyWorkers(t *testing.T) {
+	slow := reserveUserUpdate(88201)
+	jobs := make(chan telegramMessageJob, 3)
+	enqueue := func(id int64) *userUpdateTurn {
+		turn := reserveUserMessage(id, 3)
+		if turn == nil {
+			t.Fatal("message unexpectedly rejected")
+		}
+		turn.whenReady(func() { jobs <- telegramMessageJob{msg: &tgbotapi.Message{From: &tgbotapi.User{ID: id}}, turn: turn} })
+		return turn
+	}
+	first, second, other := enqueue(88201), enqueue(88201), enqueue(88202)
+	defer first.finish()
+	defer second.finish()
+	defer other.finish()
+	defer slow.finish()
+	if len(jobs) != 1 {
+		t.Fatal("waiting same-user turns occupied the ready queue")
+	}
+	job := <-jobs
+	if job.turn != other {
+		t.Fatal("unrelated user's turn was starved")
+	}
+	job.turn.finish()
+	slow.finish()
+	if len(jobs) != 1 {
+		t.Fatal("head was not scheduled after its predecessor finished")
+	}
+	job = <-jobs
+	if job.turn != first {
+		t.Fatal("arrival order changed")
+	}
+	job.turn.finish()
+	job = <-jobs
+	if job.turn != second {
+		t.Fatal("second message was not released in order")
+	}
+	job.turn.finish()
+	updateOrder.Lock()
+	pending := updateOrder.messages
+	updateOrder.Unlock()
+	if pending != 0 {
+		t.Fatal("message budget leaked", pending)
 	}
 }

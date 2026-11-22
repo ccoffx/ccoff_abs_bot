@@ -102,7 +102,7 @@ func HandleSpiritFireCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 			send(text)
 		}
 	case "我的异火", "焚诀":
-		freshness := EnsureListeningFresh(user)
+		freshness := CachedListeningFreshness(user)
 		text, err := spiritFirePanel(user, now)
 		if freshness.Notice != "" {
 			text += "\n" + freshness.Notice

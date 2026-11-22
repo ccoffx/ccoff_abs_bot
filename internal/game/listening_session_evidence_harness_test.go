@@ -31,8 +31,7 @@ func refreshSessionEvidenceForTest(userID int64, absID string, force bool, abuse
 		return nil, false
 	}
 	var stats struct {
-		TotalTime float64            `json:"totalTime"`
-		Days      map[string]float64 `json:"days"`
+		Days map[string]float64 `json:"days"`
 	}
 	if json.Unmarshal(body, &stats) != nil || stats.Days == nil {
 		return nil, false
@@ -42,8 +41,7 @@ func refreshSessionEvidenceForTest(userID int64, absID string, force bool, abuse
 		outcome, failure = "correction_failed", textfmt.FormatPlainError(err)
 		return nil, false
 	}
-	total := abs.AuthoritativeABSListeningTotalSeconds(stats.TotalTime, stats.Days)
-	if recordPreparedDailyListeningStatsWithReport(userID, absID, days, corrected, started, &total, validation) != nil {
+	if recordPreparedDailyListeningStatsWithReport(userID, absID, days, corrected, started, true, validation) != nil {
 		return nil, false
 	}
 	return validation.Seconds, true

@@ -19,6 +19,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"ccoff-abs-bot/internal/announcements"
+	"ccoff-abs-bot/internal/background"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/game"
 	"ccoff-abs-bot/internal/model"
@@ -1916,6 +1917,28 @@ func handleLotteryDetailCommand(bot *tgbotapi.BotAPI, chatID int64, text string)
 func handleForceDrawLotteryCommand(bot *tgbotapi.BotAPI, chatID int64, actorID int64, text string) {
 	id, ok := parseTrailingUint(text)
 	if !ok {
+		handleForceDrawLotteryCommandSync(bot, chatID, actorID, text)
+		return
+	}
+	result := background.Submit(fmt.Sprintf("lottery_operation:%d", id), func() {
+		if storage.GetUserRole(actorID) != "super_admin" {
+			telegram.SendPlainText(bot, chatID, "❌ 抽奖管理权限已变化，任务已取消。")
+			return
+		}
+		handleForceDrawLotteryCommandSync(bot, chatID, actorID, text)
+	})
+	if result == background.Full {
+		telegram.SendPlainText(bot, chatID, "⏳ 后台任务较多，请稍后重试。")
+	} else if result == background.Pending {
+		telegram.SendPlainText(bot, chatID, "⏳ 本活动已有操作正在处理中，请在完成后再提交其他操作。")
+	} else {
+		telegram.SendPlainText(bot, chatID, "⏳ 抽奖操作已提交，完成后会通知您，可继续使用其他指令。")
+	}
+}
+
+func handleForceDrawLotteryCommandSync(bot *tgbotapi.BotAPI, chatID int64, actorID int64, text string) {
+	id, ok := parseTrailingUint(text)
+	if !ok {
 		telegram.SendPlainText(bot, chatID, "请按格式发送："+textfmt.Copyable("强制开奖 活动ID"))
 		return
 	}
@@ -1927,6 +1950,28 @@ func handleForceDrawLotteryCommand(bot *tgbotapi.BotAPI, chatID int64, actorID i
 }
 
 func handleCancelLotteryCommand(bot *tgbotapi.BotAPI, chatID int64, actorID int64, text string) {
+	id, ok := parseTrailingUint(text)
+	if !ok {
+		handleCancelLotteryCommandSync(bot, chatID, actorID, text)
+		return
+	}
+	result := background.Submit(fmt.Sprintf("lottery_operation:%d", id), func() {
+		if storage.GetUserRole(actorID) != "super_admin" {
+			telegram.SendPlainText(bot, chatID, "❌ 抽奖管理权限已变化，任务已取消。")
+			return
+		}
+		handleCancelLotteryCommandSync(bot, chatID, actorID, text)
+	})
+	if result == background.Full {
+		telegram.SendPlainText(bot, chatID, "⏳ 后台任务较多，请稍后重试。")
+	} else if result == background.Pending {
+		telegram.SendPlainText(bot, chatID, "⏳ 本活动已有操作正在处理中，请在完成后再提交其他操作。")
+	} else {
+		telegram.SendPlainText(bot, chatID, "⏳ 抽奖操作已提交，完成后会通知您，可继续使用其他指令。")
+	}
+}
+
+func handleCancelLotteryCommandSync(bot *tgbotapi.BotAPI, chatID int64, actorID int64, text string) {
 	id, ok := parseTrailingUint(text)
 	if !ok {
 		telegram.SendPlainText(bot, chatID, "请按格式发送："+textfmt.Copyable("取消抽奖 活动ID"))

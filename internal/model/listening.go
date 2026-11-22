@@ -101,6 +101,7 @@ type DailyListeningStat struct {
 	UserID    int64  `gorm:"index;not null"`
 	AbsUserID string `gorm:"index"`
 	DayKey    string `gorm:"index;not null"` // 北京时间日期 YYYY-MM-DD
+	Archived  bool   `gorm:"not null;default:false;index"`
 
 	// Official daily policy preserves legacy balances until an explicit repair.
 	OfficialBaselineKind            string  `gorm:"not null;default:''"` // legacy_migration / rebind / native / historical_excluded; empty is unknown.
@@ -137,10 +138,9 @@ func (DailyListeningStat) TableName() string {
 
 // ABS metadata is synchronized separately from report rendering.
 type ListeningReportSnapshot struct {
-	UserID          int64 `gorm:"primaryKey"`
-	AbsUserID       string
-	RawTotalSeconds float64
-	StatsFetchedAt  time.Time
+	UserID         int64 `gorm:"primaryKey"`
+	AbsUserID      string
+	StatsFetchedAt time.Time
 	// Last successful official inputs and credited amounts; source mutations
 	// invalidate this cache in the same transaction through database triggers.
 	OfficialInputJSON string `gorm:"not null;default:''"`

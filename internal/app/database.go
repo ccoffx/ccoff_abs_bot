@@ -98,6 +98,7 @@ func InitDB() {
 		&model.BreakthroughGuard{},
 		&model.WorldBossEvent{},
 		&model.WorldBossParticipant{},
+		&model.ActivityEntryRequest{},
 		&model.Inventory{},
 		&model.GardenPlot{},
 		&model.GardenProgress{},

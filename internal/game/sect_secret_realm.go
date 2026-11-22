@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"ccoff-abs-bot/internal/abs"
+	"ccoff-abs-bot/internal/background"
 	"ccoff-abs-bot/internal/config"
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/security"
@@ -97,15 +98,15 @@ const (
 
 var sectSecretRealmRankOrder = "delta_hours DESC, raw_delta_seconds DESC, created_at ASC"
 
-// sectSecretRealmLiveRefreshMu 防止调度器、状态/排行查询和进入后展示并发触发整轮 ABS 拉取。
-// 单轮刷新按参与者逐个请求 ABS（1 次统计 + 最多 5 页会话），ABS 变慢时单轮可能超过
-// UpdatedAt 的 2 分钟跳过窗口；不加保护会让刷新 goroutine 逐分钟叠加，把 ABS 打垮并
-// 连带拖死用户进入秘境时的实时统计读取。
-var sectSecretRealmLiveRefreshMu sync.Mutex
+// Track in-flight realm work through a shared barrier. Per-event turns prevent
+// duplicate refresh/settlement while allowing different realms to run together.
+var sectSecretRealmLiveRefreshMu sync.RWMutex
 
 type sectSecretRealmListeningSnapshot struct {
 	EffectiveHours float64
-	RawSeconds     float64
+	DayKey         string
+	DaySeconds     float64
+	FetchedAt      time.Time
 }
 
 type sectSecretRealmRewardMultiplier struct {
@@ -132,7 +133,6 @@ func HandleSectSecretRealmCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, t
 	}
 
 	telegram.RegisterIncomingGroupCommandForAutoDelete(msg)
-	settleExpiredSectSecretRealms(bot, time.Now())
 
 	switch action {
 	case "status":
@@ -186,16 +186,16 @@ func parseSectSecretRealmCommand(text string) (action string, profileKey string,
 
 func StartSectSecretRealmScheduler(bot *tgbotapi.BotAPI) {
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(activitySchedulerInterval)
 		defer ticker.Stop()
 
 		for now := range ticker.C {
 			go refreshActiveSectSecretRealms(bot, now)
-			settleExpiredSectSecretRealms(bot, now)
+			go settleExpiredSectSecretRealms(bot, now)
 		}
 	}()
 
-	log.Println("✅ 宗门秘境调度器已启动：每分钟巡检过期秘境")
+	log.Println("✅ 宗门秘境调度器已启动：每 15 秒巡检活动，约每 2 分钟刷新进度")
 }
 
 func getSectSecretRealmProfileCost(profile SectSecretRealmProfileConfig, level int) int {
@@ -218,19 +218,6 @@ func sectSecretRealmProfileDuration(profile SectSecretRealmProfileConfig) time.D
 
 func canOperateSectSecretRealm(role string) bool {
 	return role == SectRoleOwner || role == SectRoleElder
-}
-
-func sumSectSecretRealmRawListeningSeconds(days map[string]float64) float64 {
-	total := 0.0
-	for _, seconds := range days {
-		if seconds > 0 {
-			total += seconds
-		}
-	}
-	if total < 0 {
-		return 0
-	}
-	return total
 }
 
 func sectSecretRealmCapEnd(eventEnd time.Time, settledAt time.Time) time.Time {
@@ -465,17 +452,6 @@ func applySectSecretRealmRewardMultiplier(base int, percent int) int {
 	return int(math.Floor(float64(base) * float64(percent) / 100.0))
 }
 
-// tryRefreshSectSecretRealmLiveProgress 在上一轮实时刷新未结束时跳过本次刷新。
-// 刷新只更新实时榜展示数据，不发放资产，跳过永远安全；返回 ran=false 表示跳过。
-func tryRefreshSectSecretRealmLiveProgress(event model.SectSecretRealmEvent) (refreshed model.SectSecretRealmEvent, ran bool, err error) {
-	if !sectSecretRealmLiveRefreshMu.TryLock() {
-		return event, false, nil
-	}
-	defer sectSecretRealmLiveRefreshMu.Unlock()
-	refreshed, err = refreshSectSecretRealmLiveProgress(event)
-	return refreshed, true, err
-}
-
 func refreshSectSecretRealmLiveProgress(event model.SectSecretRealmEvent) (model.SectSecretRealmEvent, error) {
 	if event.RealmID == "" || event.Status != "active" {
 		return event, nil
@@ -491,162 +467,187 @@ func refreshSectSecretRealmLiveProgress(event model.SectSecretRealmEvent) (model
 	}
 
 	refreshAt := time.Now()
-	processed := make(map[uint]bool, len(participants))
+	processed := make([]bool, len(participants))
+	failures := make([]error, len(participants))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	// Leave shared ABS capacity for personal queries; each participant keeps
+	// its own evidence and writes, and guardian calculation waits for all workers.
+	for range min(listeningSyncWorkers-1, len(participants)) {
+		workers.Go(func() {
+			for i := range jobs {
+				processed[i], failures[i] = refreshSectSecretRealmLiveParticipant(&participants[i], event, refreshAt)
+			}
+		})
+	}
 	for i := range participants {
-		p := &participants[i]
-
-		var u model.User
-		if err := storage.DB.Where("telegram_id = ?", p.UserID).First(&u).Error; err != nil {
-			if !errors.Is(err, gorm.ErrRecordNotFound) {
-				log.Printf("⚠️ 宗门秘境实时刷新读取本地档案失败: realm=%s user=%d err=%s", textfmt.FormatPlainValue(event.RealmID), p.UserID, textfmt.FormatPlainError(err))
-			}
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if err := clearSectSecretRealmParticipantComputedReward(*p, "user_not_found"); err != nil {
-					return event, err
-				}
-			}
-			continue
-		}
-		if strings.TrimSpace(u.AbsUserID) == "" || u.Status != "active" {
-			if err := clearSectSecretRealmParticipantComputedReward(*p, "abs_unbound"); err != nil {
-				return event, err
-			}
-			continue
-		}
-
-		finalSnapshot, err := getSectSecretRealmListeningSnapshot(u.AbsUserID)
+		jobs <- i
+	}
+	close(jobs)
+	workers.Wait()
+	incomplete := false
+	for i, err := range failures {
 		if err != nil {
-			log.Printf("⚠️ 宗门秘境实时刷新读取 ABS 失败: realm=%s user=%d err=%s", textfmt.FormatPlainValue(event.RealmID), p.UserID, textfmt.FormatPlainError(err))
-			continue
-		}
-
-		seconds, _, evidenceErr := sectSecretRealmListeningSeconds(p, event, u.AbsUserID, refreshAt)
-		if evidenceErr != nil {
-			continue
-		}
-		updateCultivationAudioHours(p.UserID, finalSnapshot.EffectiveHours)
-		p.MajorRealm, p.MinorRealm = sectSecretRealmCultivationSnapshot(p.UserID)
-		p.FinalHours = finalSnapshot.EffectiveHours
-		p.FinalRawSeconds = finalSnapshot.RawSeconds
-		detail := CalculateSectSecretRealmRawDeltaDetail(p.BaseRawSeconds, finalSnapshot.RawSeconds, p.CreatedAt, event.StartAt, event.EndAt, refreshAt)
-		p.ObservedRawDeltaSeconds = detail.ObservedDeltaSeconds
-		p.WallClockCapSeconds = detail.WallClockCapSeconds
-		p.RawDeltaSeconds = seconds
-		p.RawCapped = detail.WasCapped
-
-		processed[p.ID] = true
-	}
-
-	eligibleParticipants := make([]model.SectSecretRealmParticipant, 0, len(participants))
-	for i := range participants {
-		if processed[participants[i].ID] {
-			eligibleParticipants = append(eligibleParticipants, participants[i])
+			incomplete = true
+			log.Printf("宗门秘境实时刷新参与者失败: realm=%s user=%d err=%s", textfmt.FormatPlainValue(event.RealmID), participants[i].UserID, textfmt.FormatPlainError(err))
 		}
 	}
 
-	guardian, guardianBonusPercent := sectSecretRealmGuardianForProfile(eligibleParticipants, profile)
-	event.GuardianBonusPercent = guardianBonusPercent
-	if guardian.UserID != 0 {
-		event.GuardianUserID = guardian.UserID
-		event.GuardianName = guardian.UserName
-		event.GuardianMajorRealm = guardian.MajorRealm
-		event.GuardianMinorRealm = guardian.MinorRealm
-	} else {
-		event.GuardianUserID = 0
-		event.GuardianName = ""
-		event.GuardianMajorRealm = 0
-		event.GuardianMinorRealm = 0
-	}
-
-	totalDeltaHours := 0.0
-	totalPoints := 0
-	totalContribution := 0
-	totalPrestige := 0
-	totalDrops := 0
-	for i := range participants {
-		p := &participants[i]
-		if !processed[p.ID] {
-			continue
+	err = storage.DB.Transaction(func(tx *gorm.DB) error {
+		lock := tx.Model(&model.SectSecretRealmEvent{}).Where("realm_id = ? AND status = ?", event.RealmID, "active").UpdateColumn("status", "active")
+		if lock.Error != nil {
+			return lock.Error
 		}
-		p.SuppressedHours = calculateSectSecretRealmSuppressedHoursForProfile(p.RawDeltaSeconds, profile)
+		if lock.RowsAffected != 1 {
+			return fmt.Errorf("SECT_SECRET_REALM_EVENT_REFRESH_MISSED")
+		}
+		for i, p := range participants {
+			eligible, err := activityLiveParticipantEligible(tx, p.UserID, p.AbsUserID, event.SectID)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				processed[i], failures[i] = false, nil
+			}
+		}
+		incomplete = countActivityFailures(failures) > 0
+		eligibleParticipants := make([]model.SectSecretRealmParticipant, 0, len(participants))
+		for i := range participants {
+			if processed[i] || failures[i] != nil {
+				eligibleParticipants = append(eligibleParticipants, participants[i])
+			}
+		}
 
-		p.DeltaHours = applySectSecretRealmHourBonus(p.SuppressedHours, guardianBonusPercent)
-		p.GuardianBonusPercent = guardianBonusPercent
-		multiplier := SectSecretRealmRewardMultiplierForProfile(p.MajorRealm, profile)
-		p.PointBonusPercent = sectSecretRealmPointRealmBonusForProfile(p.MajorRealm, profile)
-		p.ContributionBonusPercent = multiplier.ContributionPercent - 100
-		p.PrestigeBonusPercent = multiplier.PrestigePercent - 100
-		p.RewardPoints, p.RewardContribution, p.RewardPrestige = calculateSectSecretRealmRewardsForProfile(p.DeltaHours, p.MajorRealm, profile)
-		p.RewardDropItem, p.RewardDropQuantity = sectSecretRealmDropForParticipantWithProfile(event.RealmID, p.UserID, p.MajorRealm, p.DeltaHours, profile)
+		guardian, guardianBonusPercent := sectSecretRealmGuardianForProfile(eligibleParticipants, profile)
+		event.GuardianBonusPercent = guardianBonusPercent
+		if guardian.UserID != 0 {
+			event.GuardianUserID = guardian.UserID
+			event.GuardianName = guardian.UserName
+			event.GuardianMajorRealm = guardian.MajorRealm
+			event.GuardianMinorRealm = guardian.MinorRealm
+		} else {
+			event.GuardianUserID = 0
+			event.GuardianName = ""
+			event.GuardianMajorRealm = 0
+			event.GuardianMinorRealm = 0
+		}
 
-		res := storage.DB.Model(&model.SectSecretRealmParticipant{}).
-			Where("id = ? AND EXISTS (SELECT 1 FROM sect_secret_realm_events WHERE realm_id = ? AND status = ?)", p.ID, event.RealmID, "active").
+		totalDeltaHours := 0.0
+		totalPoints := 0
+		totalContribution := 0
+		totalPrestige := 0
+		totalDrops := 0
+		for i := range participants {
+			p := &participants[i]
+			if failures[i] != nil && p.GuardianBonusPercent == guardianBonusPercent {
+				// Keep the saved preview only while its shared bonus is unchanged.
+				// A different guardian must reprice even failed samples using their
+				// last saved listening progress, without another ABS request.
+				totalDeltaHours += p.DeltaHours
+				totalPoints += p.RewardPoints
+				totalContribution += p.RewardContribution
+				totalPrestige += p.RewardPrestige
+				totalDrops += p.RewardDropQuantity
+				continue
+			}
+			if !processed[i] && failures[i] == nil {
+				if err := clearSectSecretRealmParticipantComputedRewardInTx(tx, *p, "ineligible_for_live_preview"); err != nil {
+					return err
+				}
+				continue
+			}
+			p.SuppressedHours = calculateSectSecretRealmSuppressedHoursForProfile(p.RawDeltaSeconds, profile)
+
+			p.DeltaHours = applySectSecretRealmHourBonus(p.SuppressedHours, guardianBonusPercent)
+			p.GuardianBonusPercent = guardianBonusPercent
+			multiplier := SectSecretRealmRewardMultiplierForProfile(p.MajorRealm, profile)
+			p.PointBonusPercent = sectSecretRealmPointRealmBonusForProfile(p.MajorRealm, profile)
+			p.ContributionBonusPercent = multiplier.ContributionPercent - 100
+			p.PrestigeBonusPercent = multiplier.PrestigePercent - 100
+			p.RewardPoints, p.RewardContribution, p.RewardPrestige = calculateSectSecretRealmRewardsForProfile(p.DeltaHours, p.MajorRealm, profile)
+			p.RewardDropItem, p.RewardDropQuantity = sectSecretRealmDropForParticipantWithProfile(event.RealmID, p.UserID, p.MajorRealm, p.DeltaHours, profile)
+
+			res := tx.Model(&model.SectSecretRealmParticipant{}).
+				Where("id = ? AND EXISTS (SELECT 1 FROM sect_secret_realm_events WHERE realm_id = ? AND status = ?)", p.ID, event.RealmID, "active").
+				Updates(map[string]interface{}{
+					"major_realm":                p.MajorRealm,
+					"minor_realm":                p.MinorRealm,
+					"final_hours":                p.FinalHours,
+					"final_raw_seconds":          p.FinalRawSeconds,
+					"observed_raw_delta_seconds": p.ObservedRawDeltaSeconds,
+					"wall_clock_cap_seconds":     p.WallClockCapSeconds,
+					"raw_delta_seconds":          p.RawDeltaSeconds,
+					"suppressed_hours":           p.SuppressedHours,
+					"delta_hours":                p.DeltaHours,
+					"raw_capped":                 p.RawCapped,
+					"reward_points":              p.RewardPoints,
+					"reward_contribution":        p.RewardContribution,
+					"reward_prestige":            p.RewardPrestige,
+					"point_bonus_percent":        p.PointBonusPercent,
+					"contribution_bonus_percent": p.ContributionBonusPercent,
+					"prestige_bonus_percent":     p.PrestigeBonusPercent,
+					"guardian_bonus_percent":     p.GuardianBonusPercent,
+					"reward_drop_item":           p.RewardDropItem,
+					"reward_drop_quantity":       p.RewardDropQuantity,
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected != 1 {
+				return fmt.Errorf("SECT_SECRET_REALM_PARTICIPANT_REFRESH_MISSED")
+			}
+
+			totalDeltaHours += p.DeltaHours
+			totalPoints += p.RewardPoints
+			totalContribution += p.RewardContribution
+			totalPrestige += p.RewardPrestige
+			totalDrops += p.RewardDropQuantity
+		}
+
+		completedAt := time.Now()
+		event.LiveRefreshedAt = &completedAt
+		event.LiveRefreshIncomplete = incomplete
+		// Entry can commit while ABS sampling is in flight. Count the committed
+		// rows in this publication transaction instead of restoring the old list.
+		var participantCount int64
+		if err := tx.Model(&model.SectSecretRealmParticipant{}).Where("realm_id = ?", event.RealmID).Count(&participantCount).Error; err != nil {
+			return err
+		}
+		event.ParticipantCount = int(participantCount)
+		event.TotalDeltaHours = totalDeltaHours
+		event.TotalRewardPoints = totalPoints
+		event.TotalRewardContribution = totalContribution
+		event.TotalRewardPrestige = totalPrestige
+		event.TotalRewardDrops = totalDrops
+
+		res := tx.Model(&model.SectSecretRealmEvent{}).
+			Where("realm_id = ? AND status = ?", event.RealmID, "active").
 			Updates(map[string]interface{}{
-				"major_realm":                p.MajorRealm,
-				"minor_realm":                p.MinorRealm,
-				"final_hours":                p.FinalHours,
-				"final_raw_seconds":          p.FinalRawSeconds,
-				"observed_raw_delta_seconds": p.ObservedRawDeltaSeconds,
-				"wall_clock_cap_seconds":     p.WallClockCapSeconds,
-				"raw_delta_seconds":          p.RawDeltaSeconds,
-				"suppressed_hours":           p.SuppressedHours,
-				"delta_hours":                p.DeltaHours,
-				"raw_capped":                 p.RawCapped,
-				"reward_points":              p.RewardPoints,
-				"reward_contribution":        p.RewardContribution,
-				"reward_prestige":            p.RewardPrestige,
-				"point_bonus_percent":        p.PointBonusPercent,
-				"contribution_bonus_percent": p.ContributionBonusPercent,
-				"prestige_bonus_percent":     p.PrestigeBonusPercent,
-				"guardian_bonus_percent":     p.GuardianBonusPercent,
-				"reward_drop_item":           p.RewardDropItem,
-				"reward_drop_quantity":       p.RewardDropQuantity,
+				"live_refreshed_at":         completedAt,
+				"live_refresh_incomplete":   incomplete,
+				"participant_count":         event.ParticipantCount,
+				"total_delta_hours":         event.TotalDeltaHours,
+				"total_reward_points":       event.TotalRewardPoints,
+				"total_reward_contribution": event.TotalRewardContribution,
+				"total_reward_prestige":     event.TotalRewardPrestige,
+				"total_reward_drops":        event.TotalRewardDrops,
+				"guardian_user_id":          event.GuardianUserID,
+				"guardian_name":             event.GuardianName,
+				"guardian_major_realm":      event.GuardianMajorRealm,
+				"guardian_minor_realm":      event.GuardianMinorRealm,
+				"guardian_bonus_percent":    event.GuardianBonusPercent,
 			})
 		if res.Error != nil {
-			log.Printf("⚠️ 宗门秘境实时进度写入失败: realm=%s user=%d err=%s", textfmt.FormatPlainValue(event.RealmID), p.UserID, textfmt.FormatPlainError(res.Error))
-			continue
+			return res.Error
 		}
 		if res.RowsAffected == 0 {
-			continue
+			return fmt.Errorf("SECT_SECRET_REALM_EVENT_REFRESH_MISSED")
 		}
 
-		totalDeltaHours += p.DeltaHours
-		totalPoints += p.RewardPoints
-		totalContribution += p.RewardContribution
-		totalPrestige += p.RewardPrestige
-		totalDrops += p.RewardDropQuantity
-	}
-
-	event.ParticipantCount = len(participants)
-	event.TotalDeltaHours = totalDeltaHours
-	event.TotalRewardPoints = totalPoints
-	event.TotalRewardContribution = totalContribution
-	event.TotalRewardPrestige = totalPrestige
-	event.TotalRewardDrops = totalDrops
-
-	res := storage.DB.Model(&model.SectSecretRealmEvent{}).
-		Where("realm_id = ? AND status = ?", event.RealmID, "active").
-		Updates(map[string]interface{}{
-			"participant_count":         event.ParticipantCount,
-			"total_delta_hours":         event.TotalDeltaHours,
-			"total_reward_points":       event.TotalRewardPoints,
-			"total_reward_contribution": event.TotalRewardContribution,
-			"total_reward_prestige":     event.TotalRewardPrestige,
-			"total_reward_drops":        event.TotalRewardDrops,
-			"guardian_user_id":          event.GuardianUserID,
-			"guardian_name":             event.GuardianName,
-			"guardian_major_realm":      event.GuardianMajorRealm,
-			"guardian_minor_realm":      event.GuardianMinorRealm,
-			"guardian_bonus_percent":    event.GuardianBonusPercent,
-		})
-	if res.Error != nil {
-		return event, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return event, fmt.Errorf("SECT_SECRET_REALM_EVENT_REFRESH_MISSED")
-	}
-
-	return event, nil
+		return nil
+	})
+	log.Printf("秘境刷新完成: realm=%s participants=%d failures=%d duration_ms=%d", textfmt.FormatPlainValue(event.RealmID), len(participants), countActivityFailures(failures), time.Since(refreshAt).Milliseconds())
+	return event, err
 }
 
 func sectSecretRealmCultivationSnapshot(userID int64) (int, int) {
@@ -757,20 +758,21 @@ func refreshActiveSectSecretRealms(bot *tgbotapi.BotAPI, now time.Time) {
 		return
 	}
 
-	for _, event := range events {
-		if time.Since(event.UpdatedAt) < sectSecretRealmLiveRefreshInterval {
-			continue
+	runActivityEventBatch(len(events), func(i int) {
+		event := events[i]
+		if !sectSecretRealmLiveRefreshDue(event, now) {
+			return
 		}
 		refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event)
 		if !ran {
-			continue
+			return
 		}
 		if err != nil {
 			log.Printf("⚠️ 宗门秘境实时刷新失败: realm=%s err=%s", textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
-			continue
+			return
 		}
 		ensureSectSecretRealmLiveBoard(bot, refreshed)
-	}
+	})
 }
 
 func replySectSecretRealmMemberReadFailure(bot *tgbotapi.BotAPI, chatID int64, userID int64, action string, err error) {
@@ -842,14 +844,6 @@ func handleSectSecretRealmStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	if event.Status == "active" {
-		if refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event); ran && err == nil {
-			event = refreshed
-			ensureSectSecretRealmLiveBoard(bot, event)
-		} else if ran && err != nil {
-			log.Printf("⚠️ 宗门秘境状态实时刷新失败: realm=%s err=%s", textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
-		}
-	}
 	profile, err := sectSecretRealmProfileFromSnapshotChecked(event.ProfileKey, event.ConfigSnapshot)
 	if err != nil {
 		log.Printf("宗门秘境状态配置快照读取失败: realm=%s err=%s", textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
@@ -891,7 +885,7 @@ func handleSectSecretRealmStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			"累计贡献奖励：`%d`\n"+
 			"累计声望奖励：`%d`\n"+
 			"累计掉落：`%d`\n\n"+
-			"可用指令：`进入宗门秘境` / `宗门秘境排行`",
+			"可用指令：`进入宗门秘境` / `宗门秘境排行`%s",
 		textfmt.EscapeMarkdown(sect.Name),
 		textfmt.EscapeMarkdown(event.Name),
 		statusText,
@@ -906,6 +900,7 @@ func handleSectSecretRealmStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		event.TotalRewardContribution,
 		event.TotalRewardPrestige,
 		event.TotalRewardDrops,
+		sectSecretRealmLiveRefreshNotice(event),
 	))
 }
 
@@ -1148,143 +1143,51 @@ func handleOpenSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, prof
 }
 
 func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	userID := msg.From.ID
-	chatID := msg.Chat.ID
-
 	var member model.SectMember
-	if err := storage.DB.Where("user_id = ?", userID).First(&member).Error; err != nil {
-		replySectSecretRealmMemberReadFailure(bot, chatID, userID, "进入", err)
+	if err := storage.DB.Where("user_id = ?", msg.From.ID).First(&member).Error; err != nil {
+		replyActivityEntry(bot, msg, "❌ 宗门身份读取失败，请确认已加入宗门。")
 		return
 	}
-
-	event, activeErr := getActiveSectSecretRealmTxChecked(storage.DB, member.SectID, time.Now())
-	if errors.Is(activeErr, storage.ErrSectSecretRealmNotActive) {
-		telegram.ReplyTextToMessage(bot, msg, "📜 当前宗门没有开放中的秘境。")
+	event, err := getActiveSectSecretRealmTxChecked(storage.DB, member.SectID, time.Now())
+	if errors.Is(err, storage.ErrSectSecretRealmNotActive) {
+		replyActivityEntry(bot, msg, "📜 当前宗门没有开放中的秘境。")
 		return
 	}
-
-	if activeErr != nil {
-		log.Printf("⚠️ 宗门秘境进入活动读取失败: sect=%d user=%d err=%s", member.SectID, userID, textfmt.FormatPlainError(activeErr))
-		telegram.ReplyTextToMessage(bot, msg, "❌ 宗门秘境状态读取失败，请稍后重试。")
+	if err != nil {
+		replyActivityEntry(bot, msg, "❌ 秘境状态读取失败，请稍后重试。")
 		return
 	}
-
-	var u model.User
-	if err := storage.DB.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("⚠️ 进入宗门秘境读取本地档案失败: user=%d realm=%s err=%s", userID, textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
-			telegram.ReplyTextToMessage(bot, msg, "❌ 进入宗门秘境读取本地档案失败，请稍后重试。")
+	var user model.User
+	if err := storage.DB.Where("telegram_id = ?", msg.From.ID).First(&user).Error; err != nil {
+		replyActivityEntry(bot, msg, "❌ 账号档案读取失败，请稍后重试。")
+		return
+	}
+	var existing model.SectSecretRealmParticipant
+	err = storage.DB.Where("realm_id = ? AND user_id = ?", event.RealmID, msg.From.ID).First(&existing).Error
+	if err == nil {
+		if existing.AbsUserID != user.AbsUserID {
+			replyActivityEntry(bot, msg, "⚠️ 本次秘境已有参与记录，但账号绑定已变化，无法重新入场。请查看 `宗门秘境明细`。")
 			return
 		}
-		telegram.ReplyTextToMessage(bot, msg, "❌ 进入宗门秘境需要先绑定有效 ABS 听书账号。")
+		profile, profileErr := sectSecretRealmProfileFromSnapshotChecked(event.ProfileKey, event.ConfigSnapshot)
+		if profileErr != nil {
+			replyActivityEntry(bot, msg, "❌ 秘境规则读取失败，请稍后重试。")
+			return
+		}
+		replyActivityEntry(bot, msg, formatSectSecretRealmEntry(event, existing, profile))
 		return
 	}
-	if strings.TrimSpace(u.AbsUserID) == "" {
-		telegram.ReplyTextToMessage(bot, msg, "❌ 进入宗门秘境需要先绑定有效 ABS 听书账号。")
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		replyActivityEntry(bot, msg, "❌ 参与记录读取失败，请稍后重试。")
 		return
 	}
-
-	baseSnapshot, err := getSectSecretRealmListeningSnapshot(u.AbsUserID)
-	if err != nil {
-		log.Printf("⚠️ 进入宗门秘境读取 ABS 失败: user=%d realm=%s err=%s", userID, textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
-		telegram.ReplyTextToMessage(bot, msg, "❌ 读取当前净修为失败，请稍后重试。")
+	usable, err := storage.UserHasUsableLocalAbsAccountAt(user, time.Now())
+	if err != nil || !usable {
+		replyActivityEntry(bot, msg, "❌ 进入秘境需要有效且未暂停的 ABS 听书账号。")
 		return
 	}
-
-	updateCultivationAudioHours(userID, baseSnapshot.EffectiveHours)
-	majorRealm, minorRealm := sectSecretRealmCultivationSnapshot(userID)
-	profile, err := sectSecretRealmProfileFromSnapshotChecked(event.ProfileKey, event.ConfigSnapshot)
-	if err != nil {
-		log.Printf("⚠️ 进入宗门秘境读取配置快照失败: realm=%s user=%d err=%s", textfmt.FormatPlainValue(event.RealmID), userID, textfmt.FormatPlainError(err))
-		telegram.ReplyTextToMessage(bot, msg, "❌ 宗门秘境配置快照读取失败，请稍后重试。")
-		return
-	}
-	if majorRealm < profile.MinMajorRealm {
-		telegram.ReplyTextToMessage(bot, msg, fmt.Sprintf("❌ 进入%s需要境界达到 %s。", textfmt.EscapeMarkdown(profile.Name), sectSecretRealmRealmMarkdown(profile.MinMajorRealm, 0)))
-		return
-	}
-
-	userName := textfmt.GetTelegramDisplayName(msg.From)
-
-	err = storage.DB.Transaction(func(tx *gorm.DB) error {
-		if _, activeErr := getActiveSectSecretRealmTxChecked(tx, member.SectID, time.Now()); errors.Is(activeErr, storage.ErrSectSecretRealmNotActive) {
-			return storage.ErrSectSecretRealmNotActive
-		} else if activeErr != nil {
-			return activeErr
-		}
-
-		var eligible int64
-		if err := tx.Model(&model.SectMember{}).Where("sect_id = ? AND user_id = ?", event.SectID, userID).Count(&eligible).Error; err != nil {
-			return err
-		}
-		if eligible != 1 {
-			return storage.ErrNotInSect
-		}
-		if err := tx.Model(&model.User{}).Where("telegram_id = ? AND abs_user_id = ?", userID, u.AbsUserID).Count(&eligible).Error; err != nil {
-			return err
-		}
-		if eligible != 1 {
-			return fmt.Errorf("SECT_SECRET_REALM_ABS_BINDING_CHANGED")
-		}
-
-		participant := model.SectSecretRealmParticipant{
-			RealmID:        event.RealmID,
-			SectID:         member.SectID,
-			UserID:         userID,
-			AbsUserID:      u.AbsUserID,
-			UserName:       userName,
-			MajorRealm:     majorRealm,
-			MinorRealm:     minorRealm,
-			BaseHours:      baseSnapshot.EffectiveHours,
-			BaseRawSeconds: baseSnapshot.RawSeconds,
-		}
-		if err := createSectSecretRealmParticipantIfMissingInTx(tx, &participant); err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		if errors.Is(err, storage.ErrSectSecretRealmNotActive) {
-			telegram.ReplyTextToMessage(bot, msg, "📜 秘境刚刚关闭，请等待下次开启。")
-		} else {
-			telegram.ReplyTextToMessage(bot, msg, "❌ 进入秘境失败，请稍后重试。")
-		}
-		return
-	}
-
-	var participant model.SectSecretRealmParticipant
-	realmText := sectSecretRealmRealmMarkdown(majorRealm, minorRealm)
-	baseHoursText := fmt.Sprintf("`%.1f` 小时", baseSnapshot.EffectiveHours)
-	if err := storage.DB.Where("realm_id = ? AND user_id = ?", event.RealmID, userID).First(&participant).Error; err != nil {
-		log.Printf("⚠️ 宗门秘境参与记录读取失败: realm=%s user=%d err=%s", textfmt.FormatPlainValue(event.RealmID), userID, textfmt.FormatPlainError(err))
-		realmText = "读取失败"
-		baseHoursText = "`读取失败`"
-	} else {
-		realmText = sectSecretRealmRealmMarkdown(participant.MajorRealm, participant.MinorRealm)
-		baseHoursText = fmt.Sprintf("`%.1f` 小时", participant.BaseHours)
-	}
-
-	telegram.ReplyTextToMessage(bot, msg, fmt.Sprintf(
-		"✅ 已进入宗门秘境【%s】。\n\n"+
-			"档位：`%s`\n"+
-			"当前境界：%s\n"+
-			"当前基线净修为：%s\n"+
-			"秘境结束前继续听书，结算时按 ABS 会话可证明发生在加入后、结束前的听书时长发放奖励。\n"+
-			"前 `%.1f` 小时全额计入，并受护道者和自身境界加成影响。",
-		textfmt.EscapeMarkdown(event.Name),
-		textfmt.EscapeMarkdown(profile.Name),
-		realmText,
-		baseHoursText,
-		profile.PressureFullHours,
-	))
-
-	if refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event); ran && err == nil {
-		ensureSectSecretRealmLiveBoard(bot, refreshed)
-	} else if ran && err != nil {
-		log.Printf("⚠️ 宗门秘境进入后实时刷新失败: realm=%s user=%d err=%s", textfmt.FormatPlainValue(event.RealmID), userID, textfmt.FormatPlainError(err))
-	}
+	submitActivityEntry(bot, msg, model.ActivityEntryRequest{Kind: activityEntryRealm, EventID: event.RealmID, UserID: msg.From.ID,
+		AbsUserID: user.AbsUserID, SectID: member.SectID, MemberID: member.ID, DeadlineAt: event.EndAt})
 }
 
 func sectSecretRealmParticipantOnConflict() clause.OnConflict {
@@ -1330,21 +1233,20 @@ func handleSettleSectSecretRealmCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 		return
 	}
 
-	settleSectSecretRealm(bot, event.RealmID, chatID)
+	result := background.Submit("sect_realm_settle:"+event.RealmID, func() { settleSectSecretRealm(bot, event.RealmID, chatID) })
+	replyBackgroundSubmission(bot, chatID, result, "秘境结算")
 }
 
 func settleExpiredSectSecretRealms(bot *tgbotapi.BotAPI, now time.Time) {
 	recoverStaleSectSecretRealmSettlements(now)
 
 	var events []model.SectSecretRealmEvent
-	if err := storage.DB.Where("status = ? AND end_at <= ?", "active", now).Find(&events).Error; err != nil {
+	if err := storage.DB.Where("status IN ? AND end_at <= ?", []string{"active", "settling"}, now).Find(&events).Error; err != nil {
 		log.Printf("⚠️ 查询到期宗门秘境失败，已跳过本轮结算扫描: now=%s err=%s", textfmt.FormatPlainValue(now.Format(time.RFC3339)), textfmt.FormatPlainError(err))
 		return
 	}
 
-	for _, event := range events {
-		settleSectSecretRealm(bot, event.RealmID, 0)
-	}
+	runActivityEventBatch(len(events), func(i int) { settleSectSecretRealm(bot, events[i].RealmID, 0) })
 }
 
 func recoverStaleSectSecretRealmSettlements(now time.Time) {
@@ -1365,8 +1267,17 @@ func recoverStaleSectSecretRealmSettlements(now time.Time) {
 }
 
 func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID int64) {
+	if !sectSecretRealmLiveRefreshMu.TryRLock() {
+		return
+	}
+	defer sectSecretRealmLiveRefreshMu.RUnlock()
+	release, ok := tryActivityEventTurn("realm:" + realmID)
+	if !ok {
+		return
+	}
+	defer release()
 	res := storage.DB.Model(&model.SectSecretRealmEvent{}).
-		Where("realm_id = ? AND status = ?", realmID, "active").
+		Where("realm_id = ? AND status IN ?", realmID, []string{"active", "settling"}).
 		Update("status", "settling")
 
 	if res.Error != nil || res.RowsAffected == 0 {
@@ -1391,6 +1302,30 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 	}
 
 	settledAt := time.Now()
+	snapshotErrors := captureActivitySnapshotBatch(len(participants), func(i int) error {
+		p := &participants[i]
+		var current model.User
+		if err := storage.DB.Where("telegram_id = ?", p.UserID).First(&current).Error; err != nil {
+			return err
+		}
+		if current.Status != "active" || p.AbsUserID == "" || current.AbsUserID != p.AbsUserID {
+			return nil
+		}
+		var membership int64
+		if err := storage.DB.Model(&model.SectMember{}).Where("sect_id = ? AND user_id = ?", event.SectID, p.UserID).Count(&membership).Error; err != nil {
+			return err
+		}
+		if membership == 0 {
+			return nil
+		}
+		_, _, err := sectSecretRealmListeningSeconds(p, event, p.AbsUserID, time.Now())
+		return err
+	})
+	for _, err := range snapshotErrors {
+		if errors.Is(err, ErrActivitySnapshotPending) {
+			return
+		}
+	}
 	processed := make(map[uint]bool, len(participants))
 	for i := range participants {
 		p := &participants[i]
@@ -1427,25 +1362,18 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 			}
 			continue
 		}
-		finalSnapshot, err := fetchSectSecretRealmListeningSnapshotFromABS(u.AbsUserID)
-		if err != nil {
-			rollbackSectSecretRealmSettlement(realmID, err)
+		if snapshotErrors[i] != nil || !p.ListeningSnapshot.Finalized {
+			rollbackSectSecretRealmSettlement(realmID, fmt.Errorf("SECT_SECRET_REALM_FINAL_SNAPSHOT_FAILED: %v", snapshotErrors[i]))
 			return
 		}
-		seconds, complete, err := sectSecretRealmListeningSeconds(p, event, u.AbsUserID, settledAt)
-		if err != nil {
-			rollbackSectSecretRealmSettlement(realmID, err)
-			return
-		}
-		if !complete {
-			rollbackSectSecretRealmSettlement(realmID, fmt.Errorf("SECT_SECRET_REALM_LISTENING_SCAN_PENDING"))
-			return
-		}
-		updateCultivationAudioHours(p.UserID, finalSnapshot.EffectiveHours)
+		seconds := p.ListeningSnapshot.Seconds
 		p.MajorRealm, p.MinorRealm = sectSecretRealmCultivationSnapshot(p.UserID)
-		p.FinalHours = finalSnapshot.EffectiveHours
-		p.FinalRawSeconds = finalSnapshot.RawSeconds
-		detail := CalculateSectSecretRealmRawDeltaDetail(p.BaseRawSeconds, finalSnapshot.RawSeconds, p.CreatedAt, event.StartAt, event.EndAt, settledAt)
+		p.FinalHours = p.BaseHours
+		if total, ok := secretRealmCultivationTotal(p.UserID); ok {
+			p.FinalHours = total
+		}
+		p.FinalRawSeconds = p.BaseRawSeconds + seconds
+		detail := CalculateSectSecretRealmRawDeltaDetail(p.BaseRawSeconds, p.FinalRawSeconds, p.CreatedAt, event.StartAt, event.EndAt, settledAt)
 		p.ObservedRawDeltaSeconds = detail.ObservedDeltaSeconds
 		p.WallClockCapSeconds = detail.WallClockCapSeconds
 		p.RawDeltaSeconds = seconds
@@ -1471,6 +1399,11 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 		event.GuardianName = guardian.UserName
 		event.GuardianMajorRealm = guardian.MajorRealm
 		event.GuardianMinorRealm = guardian.MinorRealm
+	} else {
+		event.GuardianUserID = 0
+		event.GuardianName = ""
+		event.GuardianMajorRealm = 0
+		event.GuardianMinorRealm = 0
 	}
 
 	rewardParticipants := make([]model.SectSecretRealmParticipant, 0, len(eligibleParticipants))
@@ -1684,6 +1617,25 @@ func grantSectSecretRealmRewards(event model.SectSecretRealmEvent, participants 
 		// Serialize the final membership decision with leave/kick transactions.
 		if err := tx.Exec("UPDATE sects SET id = id WHERE id = ?", event.SectID).Error; err != nil {
 			return err
+		}
+		if event.GuardianUserID != 0 && event.GuardianBonusPercent > 0 {
+			guardianEligible := false
+			for _, p := range participants {
+				if p.UserID != event.GuardianUserID {
+					continue
+				}
+				var err error
+				guardianEligible, err = activityLiveParticipantEligible(tx, p.UserID, p.AbsUserID, event.SectID)
+				if err != nil {
+					return err
+				}
+				break
+			}
+			if !guardianEligible {
+				// All participants' rewards depend on this guardian. Retry the
+				// calculation from frozen snapshots before paying anyone.
+				return fmt.Errorf("SECT_SECRET_REALM_GUARDIAN_CHANGED_BEFORE_REWARD")
+			}
 		}
 		for _, p := range participants {
 			if p.IsRewarded {
@@ -1986,7 +1938,7 @@ func renderSectSecretRealmLiveBoard(event model.SectSecretRealmEvent) string {
 		}
 	}
 
-	b.WriteString("\n每 2 分钟自动刷新；发送 `宗门秘境排行` 可手动刷新。")
+	b.WriteString(sectSecretRealmLiveRefreshNotice(event))
 	return b.String()
 }
 
@@ -2109,15 +2061,6 @@ func handleSectSecretRealmRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	if event.Status == "active" {
-		if refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event); ran && err == nil {
-			event = refreshed
-			ensureSectSecretRealmLiveBoard(bot, event)
-		} else if ran && err != nil {
-			log.Printf("⚠️ 宗门秘境排行实时刷新失败: realm=%s err=%s", textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
-		}
-	}
-
 	participants, err := sectSecretRealmTopParticipants(event.RealmID, 10)
 	if err != nil {
 		log.Printf("⚠️ 宗门秘境排行读取失败: realm=%s err=%s", textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
@@ -2126,7 +2069,7 @@ func handleSectSecretRealmRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if len(participants) == 0 {
-		telegram.ReplyText(bot, chatID, "📜 当前秘境暂无参与者。")
+		telegram.ReplyText(bot, chatID, "📜 当前秘境暂无参与者。"+sectSecretRealmLiveRefreshNotice(event))
 		return
 	}
 
@@ -2154,6 +2097,7 @@ func handleSectSecretRealmRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		))
 	}
 
+	b.WriteString(sectSecretRealmLiveRefreshNotice(event))
 	telegram.ReplyText(bot, chatID, b.String())
 }
 
@@ -2195,6 +2139,10 @@ func handleSectSecretRealmDetail(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, ar
 	var participant model.SectSecretRealmParticipant
 	if err := storage.DB.Where("realm_id = ? AND user_id = ?", event.RealmID, targetUserID).First(&participant).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if status, found, statusErr := activityEntryStatus(activityEntryRealm, event.RealmID, targetUserID); statusErr == nil && found {
+				telegram.ReplyTextToMessage(bot, msg, status)
+				return
+			}
 			telegram.ReplyText(bot, chatID, "📜 未找到该道友在本次秘境中的参与记录。")
 		} else {
 			log.Printf("⚠️ 宗门秘境明细参与记录读取失败: realm=%s user=%d target=%d err=%s", textfmt.FormatPlainValue(event.RealmID), userID, targetUserID, textfmt.FormatPlainError(err))
@@ -2214,14 +2162,17 @@ func handleSectSecretRealmDetail(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, ar
 		capText = "是"
 	}
 	dropText := sectSecretRealmDropMarkdown(participant.RewardDropItem, participant.RewardDropQuantity)
+	baselineText := "旧记录未保存日基线"
+	if participant.ListeningSnapshot.BaselineDay != "" {
+		baselineText = fmt.Sprintf("%s，%.2f 小时", participant.ListeningSnapshot.BaselineDay, participant.ListeningSnapshot.BaselineSeconds/3600)
+	}
 	telegram.ReplyText(bot, chatID, fmt.Sprintf(
 		"📜 **宗门秘境明细 · %s**\n\n"+
 			"道友：`%s`\n"+
 			"境界：%s\n"+
 			"档位：`%s`\n"+
 			"状态：`%s`\n\n"+
-			"进入基线原始听书：`%.2f` 小时\n"+
-			"结算原始听书：`%.2f` 小时\n"+
+			"有效听书基线：%s\n"+
 			"观测增量：`%.2f` 小时\n"+
 			"墙钟上限：`%.2f` 小时\n"+
 			"是否封顶：`%s`\n"+
@@ -2229,14 +2180,13 @@ func handleSectSecretRealmDetail(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, ar
 			"秘境压制后：`%.2f` 小时\n"+
 			"护道加成：`%d%%`\n"+
 			"最终秘境净修为：`%.2f` 小时\n\n"+
-			"积分 +`%d`，贡献 +`%d`，声望 +`%d`，掉落 %s",
+			"积分 +`%d`，贡献 +`%d`，声望 +`%d`，掉落 %s%s",
 		textfmt.EscapeMarkdown(event.Name),
 		textfmt.EscapeMarkdown(participant.UserName),
 		sectSecretRealmRealmMarkdown(participant.MajorRealm, participant.MinorRealm),
 		textfmt.EscapeMarkdown(profile.Name),
 		event.Status,
-		participant.BaseRawSeconds/3600,
-		participant.FinalRawSeconds/3600,
+		baselineText,
 		participant.ObservedRawDeltaSeconds/3600,
 		participant.WallClockCapSeconds/3600,
 		capText,
@@ -2248,6 +2198,7 @@ func handleSectSecretRealmDetail(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, ar
 		participant.RewardContribution,
 		participant.RewardPrestige,
 		dropText,
+		activityListeningSnapshotNotice(participant.ListeningSnapshot)+sectSecretRealmLiveRefreshNotice(event),
 	))
 }
 
@@ -2256,18 +2207,9 @@ func getSectSecretRealmListeningSnapshot(absUserID string) (sectSecretRealmListe
 		return sectSecretRealmListeningSnapshot{}, storage.ErrAbsUserIDEmpty
 	}
 
-	snapshot, err := fetchSectSecretRealmListeningSnapshotFromABS(absUserID)
-	if err == nil {
-		return snapshot, nil
-	}
-
-	// ABS 重启/闪断时进入和实时刷新不应硬失败：本地每日统计仍是 10 分钟内官方数据时降级使用，
-	// 避免把 ABS 短暂抖动放大成用户无法进入秘境。结算路径不走本兜底，读取失败保留活动并等待重试；满 10 分钟或本地无数据时维持原报错。
-	if degraded, ok := freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID); ok {
-		log.Printf("⚠️ 宗门秘境读取 ABS 失败，降级使用本地每日统计: abs=%s err=%s", textfmt.FormatPlainValue(absUserID), textfmt.FormatPlainError(err))
-		return degraded, nil
-	}
-	return sectSecretRealmListeningSnapshot{}, err
+	// Entry requires a current baseline, otherwise playback before joining could
+	// be counted as activity progress. Live/final updates have their own fallback.
+	return fetchSectSecretRealmListeningSnapshotFromABS(absUserID)
 }
 
 // freshSectSecretRealmSnapshotFromLocalDailyStats 复用宗门任务路径的 10 分钟新鲜度口径
@@ -2299,20 +2241,27 @@ func freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID string) (sectSecr
 	}
 	_, okHours := syncCultivationFromDailyListeningStatsAt(u.TelegramID, now)
 	effectiveHours, totalOK := secretRealmCultivationTotal(u.TelegramID)
-	rawSeconds, okRaw := sumDailyListeningRawSeconds(u.TelegramID)
-	if !okHours || !totalOK || !okRaw {
+	if !okHours || !totalOK {
 		return sectSecretRealmListeningSnapshot{}, false
+	}
+	daySeconds := 0.0
+	for _, stat := range stats {
+		if stat.DayKey == SectDayKey(now) {
+			daySeconds = dailyListeningCreditSeconds(stat.DayKey, stat.CappedSeconds, now)
+		}
 	}
 	return sectSecretRealmListeningSnapshot{
 		EffectiveHours: effectiveHours,
-		RawSeconds:     rawSeconds,
+		DayKey:         SectDayKey(now), DaySeconds: daySeconds, FetchedAt: now,
 	}, true
 }
 
 func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretRealmListeningSnapshot, error) {
 	// The statistics request and its validated write form one operation with
 	// respect to full batches; never carry an old response across a batch wait.
-	listeningRefreshMu.RLock()
+	if !listeningRefreshMu.TryRLock() {
+		return sectSecretRealmListeningSnapshot{}, ErrListeningNotFresh
+	}
 	defer listeningRefreshMu.RUnlock()
 	fetchedAt := time.Now()
 	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
@@ -2329,12 +2278,14 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 	}
 
 	effectiveHours := 0.0
-	rawSeconds := sumSectSecretRealmRawListeningSeconds(stats.Days)
+	observedAt := time.Now()
+	day := SectDayKey(observedAt)
 	if storage.DB != nil {
 		var u model.User
 		readErr := storage.DB.Select("telegram_id", "abs_user_id").Where("abs_user_id = ?", absUserID).First(&u).Error
 		if readErr == nil {
-			if err := recordDailyListeningStatsFromABSDaysUnlocked(u.TelegramID, absUserID, stats.Days, fetchedAt); err == nil {
+			credited, err := recordOfficialDailyListeningStats(u.TelegramID, absUserID, stats.Days, fetchedAt)
+			if err == nil {
 				// 秘境基线使用落库的累计净修为。
 				// The official source write already settled all changed days atomically.
 				syncedEffectiveHours, ok := secretRealmCultivationTotal(u.TelegramID)
@@ -2347,7 +2298,7 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 			}
 			return sectSecretRealmListeningSnapshot{
 				EffectiveHours: effectiveHours,
-				RawSeconds:     rawSeconds,
+				DayKey:         day, DaySeconds: credited[day], FetchedAt: observedAt,
 			}, nil
 		}
 		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("read secret realm user: %w", readErr)
@@ -2356,7 +2307,7 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 	effectiveHours = calculateEffectiveCultivationHoursFromABSDays(stats.Days)
 	return sectSecretRealmListeningSnapshot{
 		EffectiveHours: effectiveHours,
-		RawSeconds:     rawSeconds,
+		DayKey:         day, DaySeconds: dailyListeningCreditSeconds(day, stats.Days[day], observedAt), FetchedAt: observedAt,
 	}, nil
 }
 

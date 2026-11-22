@@ -57,7 +57,7 @@ func TestOfficialDailySnapshotReplay(t *testing.T) {
 	}
 	var account model.User
 	contributionMust(t, db.Where("telegram_id = ?", user).First(&account).Error)
-	_, err = recordOfficialDailyListeningStats(user, account.AbsUserID, days, time.Now(), nil)
+	_, err = recordOfficialDailyListeningStats(user, account.AbsUserID, days, time.Now())
 	contributionMust(t, err)
 	contributionMust(t, db.Where("user_id = ?", user).First(&profile).Error)
 	if math.Abs(profile.TotalAudioTime-before) > 1e-9 {
@@ -84,7 +84,7 @@ func TestOfficialDailySnapshotReplay(t *testing.T) {
 	}
 	contributionMust(t, db.Where("user_id = ?", user).First(&profile).Error)
 	after := profile.TotalAudioTime
-	_, err = recordOfficialDailyListeningStats(user, account.AbsUserID, days, time.Now(), nil)
+	_, err = recordOfficialDailyListeningStats(user, account.AbsUserID, days, time.Now())
 	contributionMust(t, err)
 	contributionMust(t, db.Where("user_id = ?", user).First(&profile).Error)
 	if math.Abs(profile.TotalAudioTime-after) > 1e-9 {

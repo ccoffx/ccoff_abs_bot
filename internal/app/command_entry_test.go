@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -279,6 +280,11 @@ func TestMenuEntriesAlwaysReply(t *testing.T) {
 				cb := &tgbotapi.CallbackQuery{ID: "menu", From: msg.From, Message: msg, Data: key}
 				if !handleMenuCallback(bot, cb) && !handleAdminMenuCallback(bot, cb) {
 					t.Fatalf("unhandled menu callback: %s", key)
+				}
+				// Entry receipts are sent by a bounded background queue.
+				deadline := time.Now().Add(time.Second)
+				for len(replies()) == 0 && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
 				}
 				if len(replies()) == 0 {
 					t.Fatal("menu only acknowledged the click without replying or updating its panel")

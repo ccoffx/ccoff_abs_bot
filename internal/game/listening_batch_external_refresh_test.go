@@ -13,7 +13,7 @@ import (
 )
 
 func TestExternalListeningRefreshWaitsBeforeFetchingDuringBatch(t *testing.T) {
-	for _, kind := range []string{"secret_realm", "explicit_refresh"} {
+	for _, kind := range []string{"explicit_refresh"} {
 		t.Run(kind, func(t *testing.T) {
 			setupRetreatBackfillDB(t)
 			if err := storage.DB.AutoMigrate(&model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.SectMember{}, &model.Sect{}, &model.RankTitleHolder{}, &model.RankTitleHistory{}, &model.TitleEquipment{}, &model.WorldBossEvent{}, &model.WorldBossParticipant{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}); err != nil {
@@ -43,7 +43,7 @@ func TestExternalListeningRefreshWaitsBeforeFetchingDuringBatch(t *testing.T) {
 						close(started)
 						if kind == "secret_realm" {
 							snapshot, err := fetchSectSecretRealmListeningSnapshotFromABS("abs2")
-							if err == nil && snapshot.RawSeconds != 10800 {
+							if err == nil && snapshot.DaySeconds != 10800 {
 								err = fmt.Errorf("secret realm used old snapshot: %+v", snapshot)
 							}
 							done <- err

@@ -386,21 +386,6 @@ func PositiveListeningSeconds(seconds float64) float64 {
 	return seconds
 }
 
-func sumPositiveABSListeningDays(days map[string]float64) float64 {
-	var total float64
-	for _, seconds := range days {
-		total += PositiveListeningSeconds(seconds)
-	}
-	return total
-}
-
-func AuthoritativeABSListeningTotalSeconds(totalTime float64, days map[string]float64) float64 {
-	if totalTime > 0 {
-		return totalTime
-	}
-	return sumPositiveABSListeningDays(days)
-}
-
 func (c *AbsClient) GetServerStats() string {
 	startTime := time.Now()
 

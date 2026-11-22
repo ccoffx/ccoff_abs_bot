@@ -40,6 +40,15 @@ func startBackgroundJobs(bot *tgbotapi.BotAPI) {
 	game.StartBreakthroughGuardScheduler(bot)
 	startListeningBackgroundJobs(bot)
 	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			retryAdminStatusChanges(bot)
+			<-ticker.C
+		}
+	}()
+
+	go func() {
 		for {
 			runBackgroundSchedulerTickSafely(bot)
 			time.Sleep(1 * time.Minute)

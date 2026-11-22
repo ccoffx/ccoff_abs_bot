@@ -99,3 +99,14 @@ func ReactivateExpiredAccount(userID int64) error {
 		return storage.WriteAuditLogInTx(tx, userID, "REACTIVATE_EXPIRED_USER", fmt.Sprint(userID), 0, "restore expiry suspension after account extension")
 	})
 }
+
+// TryAccountOperation shares the account's external-operation lock with expiry
+// restoration and abuse release, without waiting behind another network call.
+func TryAccountOperation(userID int64, work func() error) error {
+	lock := &userLocks[uint64(userID)%uint64(len(userLocks))]
+	if !lock.TryLock() {
+		return fmt.Errorf("账号操作正在处理中，请稍后重试")
+	}
+	defer lock.Unlock()
+	return work()
+}

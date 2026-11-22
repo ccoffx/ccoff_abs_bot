@@ -356,7 +356,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"创建宗门抽奖", "宗门抽奖", "参加宗门抽奖", "查看宗门抽奖", "重发宗门抽奖", "提醒宗门抽奖", "补发宗门抽奖提醒", "取消宗门抽奖",
 		"宗门秘境", "开启宗门秘境", "确认开启宗门秘境", "开启普通宗门秘境", "确认开启普通宗门秘境", "开启高阶宗门秘境", "确认开启高阶宗门秘境", "开启限时宗门秘境", "确认开启限时宗门秘境", "进入宗门秘境", "结算宗门秘境", "宗门秘境排行", "宗门秘境明细",
 		"宗门喇叭", "世界喇叭", "确认宗门喇叭", "确认世界喇叭",
-		"世界Boss", "Boss状态", "参加Boss", "Boss排行", "宗门科技", "升级科技", "确认升级科技",
+		"世界Boss", "Boss状态", "参加Boss", "Boss排行", "Boss明细", "宗门科技", "升级科技", "确认升级科技",
 		"流水", "我的流水", "查流水",
 		"刷新我的今日净修为", "刷新宗门今日净修为", "刷新全服今日净修为", "查看每日净修为",
 	}
@@ -445,7 +445,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			userErr := storage.DB.Where("telegram_id = ?", userID).First(&u).Error
 			if userErr == nil {
 				statusText := account.ResolveUserAccountStatusDisplay(u, time.Now(), account.AccountStatusDisplaySelf, false).Text
-				listeningFreshness := game.EnsureListeningFresh(userID)
+				listeningFreshness := game.CachedListeningFreshness(userID)
 
 				cul := game.GetOrCreateCultivation(userID)
 				if cul == nil {
@@ -3296,10 +3296,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if err := game.EnsureABSCrossDaySessionScanCursor(userID, id); err != nil {
-			log.Printf("ABS cross-day history cursor enrollment failed after registration: user=%d abs=%s err=%s", userID, textfmt.FormatPlainValue(id), textfmt.FormatPlainError(err))
-		}
-
 		if referralCode != "" {
 			telegram.ReplyText(bot, chatID, fmt.Sprintf("🎉 新人体验注册成功。\n\n已获得 `%d` 天听书体验权限。体验期内累计听书满 `%.0f` 小时后，系统会**自动**为您延长 `%d` 天体验并私信提醒，无需手动领取。", storage.ReferralTrialDays, storage.ReferralTaskHours, storage.ReferralTrialDays))
 			telegram.ClearSession(userID)
@@ -3406,9 +3402,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		telegram.ReplyText(bot, chatID, "🎉 **数据安全迁移成功！换绑完成。**\n\n原有效期、积分和资产已原样恢复。")
-		if err := game.EnsureABSCrossDaySessionScanCursor(userID, absID); err != nil {
-			log.Printf("ABS cross-day history cursor enrollment failed after rebind: user=%d abs=%s err=%s", userID, textfmt.FormatPlainValue(absID), textfmt.FormatPlainError(err))
-		}
 
 		telegram.ClearSession(userID)
 
@@ -3443,9 +3436,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		telegram.ReplyText(bot, chatID, "🎉 **挂载且安全档案构建成功！资产已同步合并。**")
-		if err := game.EnsureABSCrossDaySessionScanCursor(userID, absID); err != nil {
-			log.Printf("ABS cross-day history cursor enrollment failed after bind: user=%d abs=%s err=%s", userID, textfmt.FormatPlainValue(absID), textfmt.FormatPlainError(err))
-		}
 
 		telegram.ClearSession(userID)
 
@@ -4375,7 +4365,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			auditAction = "UNSUSPEND_USER"
 		}
 
-		if err := changeAdminSuspensionWithAudit(userID, tgtID, tUser.AbsUserID, newSuspendStatus, auditAction, reason); err != nil {
+		if err := prepareAdminStatusChange(userID, tgtID, tUser.AbsUserID, newSuspendStatus, auditAction, reason); err != nil {
 			log.Printf("管理员封禁状态同步失败: actor=%d target=%d err=%s", userID, tgtID, textfmt.FormatPlainError(err))
 			if auditErr := storage.WriteAuditLogInTx(storage.DB, userID, auditAction+"_FAILED", fmt.Sprintf("%d", tgtID), 0,
 				fmt.Sprintf("用户 %s(%d) 执行%s时本地保护或 ABS 同步失败，原因：%s，错误：%s", textfmt.FormatPlainValue(tUser.Username), tgtID, actionText, textfmt.FormatPlainValue(reason), textfmt.FormatPlainError(err))); auditErr != nil {
@@ -4387,7 +4377,8 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("✅ **%s 成功！** 用户 `%d` 的服务端权限已同步更新。", actionText, tgtID))
+		submitAdminStatusChange(bot, tgtID, true)
+		telegram.ReplyText(bot, chatID, fmt.Sprintf("⏳ 用户 `%d` 的%s请求已保存，后台同步完成后会通知您。", tgtID, actionText))
 
 		telegram.ClearSession(userID)
 
