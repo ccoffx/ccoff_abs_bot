@@ -24,6 +24,8 @@ type RedPacket struct {
 	RefType                  string `gorm:"index"`
 	RefID                    string `gorm:"index"`
 	ClaimScope               string `gorm:"index"`
+	// Version 0 preserves legacy Boss participation eligibility.
+	ClaimRuleVersion int `gorm:"not null;default:0"`
 }
 
 // 抢红包明细防刷记录。

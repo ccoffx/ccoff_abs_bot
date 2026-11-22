@@ -85,8 +85,7 @@ const (
 	worldBossLiveRefreshInterval      = 2 * time.Minute
 	worldBossJoinCloseBeforeEnd       = 15 * time.Minute
 	worldBossSettlementStaleAfter     = 30 * time.Minute
-	worldBossRedPacketTotalPoints     = 30
-	worldBossRedPacketCount           = 10
+	worldBossRedPacketPointsPerPerson = 3
 )
 
 func worldBossPointDescriptionName(name string) string {
@@ -208,7 +207,8 @@ func startWorldBossEvent(bot *tgbotapi.BotAPI, chatID int64, now time.Time) {
 			"发送 `参加Boss` 记录当前实际听书时长。\n"+
 			"最后 `%d` 分钟停止新道友加入。\n"+
 			"结算伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技）。\n"+
-			"修为加成：按小境界进度递增，每个完整大境界 `+4%%`，最高 `+25%%`。\n\n"+
+			"修为加成：按小境界进度递增，每个完整大境界 `+4%%`，最高 `+25%%`。\n"+
+			"击杀后积分、贡献、声望按有效伤害占比分配；红包按有效人数每人 1 份、总额每人 3 积分生成。\n\n"+
 			"发送 `Boss状态` 查看进度，`Boss排行` 查看伤害榜，`Boss明细` 查看本人战况。",
 		textfmt.EscapeMarkdown(event.Name),
 		event.CurrentHP,
@@ -754,24 +754,65 @@ func worldBossParticipantRankLess(left model.WorldBossParticipant, right model.W
 	return left.CreatedAt.Before(right.CreatedAt)
 }
 
-func newWorldBossRedPacket(packetID string, event model.WorldBossEvent, now time.Time) model.RedPacket {
+// allocateWorldBossDamagePool uses largest remainders so integer payouts conserve
+// the pool. Equal remainders use user ID, independent of leaderboard order.
+func allocateWorldBossDamagePool(participants []model.WorldBossParticipant, pool int) []int {
+	shares := make([]int, len(participants))
+	total := int64(0)
+	weights := make([]int64, len(participants))
+	indices := []int{}
+	for i, p := range participants {
+		if p.Damage >= worldBossValidDamage {
+			// Stored Boss damage has two decimal places. Integer hundredths keep
+			// mathematically equal remainders equal during payout.
+			weights[i] = int64(math.Round(p.Damage * 100))
+			total += weights[i]
+			indices = append(indices, i)
+		}
+	}
+	if total == 0 || pool <= 0 {
+		return shares
+	}
+	remainders := make([]int64, len(participants))
+	left := pool
+	for _, i := range indices {
+		numerator := int64(pool) * weights[i]
+		shares[i] = int(numerator / total)
+		remainders[i] = numerator % total
+		left -= shares[i]
+	}
+	sort.Slice(indices, func(i, j int) bool {
+		a, b := indices[i], indices[j]
+		if remainders[a] != remainders[b] {
+			return remainders[a] > remainders[b]
+		}
+		return participants[a].UserID < participants[b].UserID
+	})
+	for i := 0; i < left; i++ {
+		shares[indices[i%len(indices)]]++
+	}
+	return shares
+}
+
+func newWorldBossRedPacket(packetID string, event model.WorldBossEvent, validCount int, now time.Time) model.RedPacket {
 	targetChatID := event.ChatID
 	if targetChatID == 0 && config.AppConfig != nil {
 		targetChatID = config.AppConfig.NoticeGroupID
 	}
 	return model.RedPacket{
-		NoticeChatID: targetChatID,
-		ID:           packetID,
-		SenderID:     0,
-		SenderName:   "世界Boss",
-		TotalPoints:  worldBossRedPacketTotalPoints,
-		Count:        worldBossRedPacketCount,
-		LeftCount:    worldBossRedPacketCount,
-		LeftPoints:   worldBossRedPacketTotalPoints,
-		CreatedAt:    now,
-		RefType:      "world_boss",
-		RefID:        event.BossID,
-		ClaimScope:   storage.RedPacketClaimScopeWorldBossParticipant,
+		NoticeChatID:     targetChatID,
+		ID:               packetID,
+		SenderID:         0,
+		SenderName:       "世界Boss",
+		TotalPoints:      validCount * worldBossRedPacketPointsPerPerson,
+		Count:            validCount,
+		LeftCount:        validCount,
+		LeftPoints:       validCount * worldBossRedPacketPointsPerPerson,
+		CreatedAt:        now,
+		RefType:          "world_boss",
+		RefID:            event.BossID,
+		ClaimScope:       storage.RedPacketClaimScopeWorldBossParticipant,
+		ClaimRuleVersion: storage.RedPacketWorldBossEffectiveClaimVersion,
 	}
 }
 
@@ -830,9 +871,19 @@ func grantWorldBossRewards(event *model.WorldBossEvent, participants []model.Wor
 		event.IsKilled, event.CurrentHP = killed, currentHP
 		event.ParticipantCount = len(participants)
 
-		if killed {
+		validCount := 0
+		for _, p := range participants {
+			if p.Damage >= worldBossValidDamage {
+				validCount++
+			}
+		}
+		pointShares := allocateWorldBossDamagePool(participants, validCount+12)
+		contributionShares := allocateWorldBossDamagePool(participants, validCount*3+43)
+		prestigeShares := allocateWorldBossDamagePool(participants, 6)
+
+		if killed && validCount > 0 {
 			packetID := "HB-WB-" + security.GenerateRandomCode(8)
-			packet := newWorldBossRedPacket(packetID, *event, time.Now())
+			packet := newWorldBossRedPacket(packetID, *event, validCount, time.Now())
 			if err := createWorldBossRedPacketInTx(tx, &packet); err != nil {
 				return err
 			}
@@ -848,27 +899,9 @@ func grantWorldBossRewards(event *model.WorldBossEvent, participants []model.Wor
 			prestige := 0
 
 			if killed {
-				points += 1
-				contribution += 3
-
-				switch idx {
-				case 0:
-					points += 6
-					contribution += 10
-					prestige += 3
-				case 1:
-					points += 4
-					contribution += 7
-					prestige += 2
-				case 2:
-					points += 2
-					contribution += 5
-					prestige += 1
-				default:
-					if idx < 10 {
-						contribution += 3
-					}
-				}
+				points = pointShares[idx]
+				contribution = contributionShares[idx]
+				prestige = prestigeShares[idx]
 			} else {
 				contribution += 1
 				if idx == 0 {
@@ -1193,7 +1226,17 @@ func sendWorldBossSettlement(bot *tgbotapi.BotAPI, event model.WorldBossEvent, k
 		resultText = "击杀成功"
 		// 天道奖池 +10 已在 grantWorldBossRewards 的结算事务内完成注入，
 		// 此处不再重复注入，避免重发结算消息时二次注水。
-		rewardText = fmt.Sprintf("击杀奖励：Boss 红包 `%d` 积分 / `%d` 份，仅本期参与修士可抢，发送 `抢` 领取；天道奖池 `+10`；有效参与者积分 +1、宗门贡献 +3。", worldBossRedPacketTotalPoints, worldBossRedPacketCount)
+		var validCount int64
+		if err := storage.DB.Model(&model.WorldBossParticipant{}).
+			Where("boss_id = ? AND damage >= ? AND is_rewarded = ?", event.BossID, worldBossValidDamage, true).
+			Count(&validCount).Error; err != nil {
+			log.Printf("世界Boss有效奖励人数读取失败: %v", err)
+			rewardText = "击杀成功，奖励已结算；发送 `Boss明细` 查看个人奖励。"
+		} else if validCount == 0 {
+			rewardText = "击杀奖励：本期无人达到有效奖励门槛（最终伤害 ≥ 3），不发放个人积分、宗门贡献和声望，不生成 Boss 红包；天道奖池 `+10`。"
+		} else {
+			rewardText = fmt.Sprintf("击杀奖励：有效参与 `%d` 人；积分池 `%d`、贡献池 `%d`、声望池 `6`，按有效伤害占比分配，先取整再按小数余数补齐；Boss 红包 `%d` 积分 / `%d` 份，仅本期有效参与修士可抢，发送 `抢` 领取；天道奖池 `+10`。", validCount, validCount+12, validCount*3+43, validCount*worldBossRedPacketPointsPerPerson, validCount)
+		}
 	}
 
 	notice := fmt.Sprintf(

@@ -16,6 +16,9 @@ import (
 
 const RedPacketClaimScopeWorldBossParticipant = "world_boss_participant"
 
+// New Boss packets require final effective damage and completed settlement.
+const RedPacketWorldBossEffectiveClaimVersion = 1
+
 var DB *gorm.DB
 
 var GoCacheInstance *cache.Cache

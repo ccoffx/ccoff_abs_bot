@@ -24,12 +24,15 @@ const redPacketGrabMaxAttempts = 8
 
 // A Boss participation belongs to the ABS identity recorded when joining.
 // Unbinding or recreating the Telegram user's account does not transfer its
-// packet eligibility to another ABS account.
+// packet eligibility to another ABS account. Version 0 keeps the original
+// participation-only rule for already-issued packets.
 const bossPacketEligibleParticipantSQL = `EXISTS (
 	SELECT 1 FROM world_boss_participants AS p
 	JOIN users AS u ON u.telegram_id = p.user_id AND u.deleted_at IS NULL
 	WHERE p.boss_id = red_packets.ref_id AND p.user_id = ?
 	AND p.deleted_at IS NULL AND p.abs_user_id <> ''
+	AND (COALESCE(red_packets.claim_rule_version, 0) = 0
+	     OR (p.damage >= 3 AND p.is_rewarded = 1))
 	AND u.abs_user_id = p.abs_user_id AND u.status = 'active'
 )`
 
@@ -370,7 +373,7 @@ func HandleGrabRedPacket(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				telegram.SendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 你已经抢过这个红包啦！", safeName))
 			}
 		} else if errors.Is(err, gorm.ErrRecordNotFound) && ineligibleWorldBossPacket {
-			telegram.SendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("⚔️ @%s 这份 Boss 红包仅限本期参加 Boss 的道友领取。", safeName))
+			telegram.SendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("⚔️ @%s 这份 Boss 红包仅限本期最终伤害达标（≥3）的有效参与道友领取。", safeName))
 		} else if errors.Is(err, storage.ErrConcurrentRedPacketGrabRetry) {
 			log.Printf("⚠️ 红包领取并发重试耗尽: user=%d prefix=%s err=%s", userID, textfmt.FormatPlainValue(prefix), textfmt.FormatPlainError(err))
 			if prefix == "FS-" {
