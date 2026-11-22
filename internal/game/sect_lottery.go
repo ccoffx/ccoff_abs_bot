@@ -1126,10 +1126,11 @@ func notifySectLotteryCreatorSummary(bot *tgbotapi.BotAPI, creatorID int64, lot 
 		return
 	}
 	var winners []model.SectLotteryWinner
-	if err := storage.DB.Where("lottery_id = ?", lot.ID).Order("id asc").Find(&winners).Error; err != nil {
+	winnersErr := storage.DB.Where("lottery_id = ?", lot.ID).Order("id asc").Find(&winners).Error
+	if err := winnersErr; err != nil {
 		log.Printf("⚠️ 查询宗门抽奖创建者摘要中奖名单失败: lottery=%d creator=%d err=%s", lot.ID, creatorID, textfmt.FormatPlainError(err))
 	}
-	text := sectLotteryCreatorSummaryText(lot, winners, delivered, failed, unassigned)
+	text := sectLotteryCreatorSummaryText(lot, winners, delivered, failed, unassigned, winnersErr)
 	for _, part := range telegram.SplitMessageText(text) {
 		if err := sendNoAutoDeletePlainText(bot, creatorID, part); err != nil {
 			log.Printf("⚠️ 宗门抽奖创建者摘要发送失败: lottery=%d creator=%d err=%s", lot.ID, creatorID, textfmt.FormatTelegramSendError(err))
@@ -1138,10 +1139,14 @@ func notifySectLotteryCreatorSummary(bot *tgbotapi.BotAPI, creatorID int64, lot 
 	}
 }
 
-func sectLotteryCreatorSummaryText(lot model.SectLottery, winners []model.SectLotteryWinner, delivered int, failed int, unassigned int) string {
+func sectLotteryCreatorSummaryText(lot model.SectLottery, winners []model.SectLotteryWinner, delivered int, failed int, unassigned int, winnersErr error) string {
 	var b strings.Builder
 	b.WriteString("✅ 宗门抽奖已开奖\n\n")
 	b.WriteString(fmt.Sprintf("活动：%s\n参与人数：%d\n奖品数量：%d\n成功发送：%d\n发送失败：%d\n未分配卡密：%d", textfmt.LotteryDisplayText(lot.Title, 80, "-"), lot.EntryCount, lot.PrizeCount, delivered, failed, unassigned))
+	if winnersErr != nil {
+		b.WriteString(fmt.Sprintf("\n\n中奖名单读取失败，请稍后发送「查看宗门抽奖 %d」查看。", lot.ID))
+		return b.String()
+	}
 	if len(winners) == 0 {
 		b.WriteString("\n\n中奖名单：无")
 		return b.String()

@@ -438,6 +438,12 @@ func refreshBreakthroughRitualPanelSync(bot *tgbotapi.BotAPI, id uint, result *B
 		}
 		text = fmt.Sprintf("⚡ 护道突破 #%d 已结算\n道友：%s\n结果：%s\n护道人数：%d\n最终成功率：%.0f%%，掷点：%d/100\n突破记录：#%d", id, ritual.UserName, outcome, result.GuardCount, result.SuccessRate*100, result.Roll, result.AttemptID)
 	}
+	// Keep the persisted participants visible after settlement or cancellation.
+	if ritual.Status != BreakthroughRitualWaiting {
+		for _, guard := range guards {
+			text += "\n🤝 " + guard.UserName
+		}
+	}
 	edit := tgbotapi.NewEditMessageText(ritual.ChatID, ritual.MessageID, text)
 	edit.ReplyMarkup = &markup
 	if _, err := bot.Send(telegram.PrepareCopyable(edit)); err != nil && !telegram.IsTelegramMessageNotModifiedError(err) {

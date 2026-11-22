@@ -130,11 +130,25 @@ func TestBreakthroughGuardTelegramRecruitmentAndSettlement(t *testing.T) {
 			if guardTestBalance(t, 2) != want {
 				t.Fatal("scheduler retry paid twice")
 			}
+			waitBreakthroughPanels(t)
 			mu.Lock()
 			text := lastEdit
 			mu.Unlock()
 			if !strings.Contains(text, "已结算") || !strings.Contains(text, "护道人数：5") {
 				t.Fatalf("final group panel not updated: %s", text)
+			}
+			for _, name := range []string{"护道者", "护道者3", "护道者4", "护道者5", "护道者6"} {
+				if !strings.Contains(text, "🤝 "+name) {
+					t.Errorf("settled panel lost participant %s: %s", name, text)
+				}
+			}
+			refreshBreakthroughRitualPanel(bot, ritual.ID, nil)
+			waitBreakthroughPanels(t)
+			mu.Lock()
+			retriedText := lastEdit
+			mu.Unlock()
+			if retriedText != text {
+				t.Fatalf("panel rebuilt from storage changed participants: %s", retriedText)
 			}
 		})
 	}
