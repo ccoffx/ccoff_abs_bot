@@ -1166,15 +1166,10 @@ func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	err = storage.DB.Where("realm_id = ? AND user_id = ?", event.RealmID, msg.From.ID).First(&existing).Error
 	if err == nil {
 		if existing.AbsUserID != user.AbsUserID {
-			replyActivityEntry(bot, msg, "⚠️ 本次秘境已有参与记录，但账号绑定已变化，无法重新入场。请查看 `宗门秘境明细`。")
+			replyActivityEntry(bot, msg, "⚠️ 本次秘境已有参与记录，但账号绑定已变化，无法重新入场。请发送 `宗门秘境明细` 查看记录。")
 			return
 		}
-		profile, profileErr := sectSecretRealmProfileFromSnapshotChecked(event.ProfileKey, event.ConfigSnapshot)
-		if profileErr != nil {
-			replyActivityEntry(bot, msg, "❌ 秘境规则读取失败，请稍后重试。")
-			return
-		}
-		replyActivityEntry(bot, msg, formatSectSecretRealmEntry(event, existing, profile))
+		replyActivityEntry(bot, msg, activityEntryAlreadyJoinedText(activityEntryRealm))
 		return
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1267,12 +1262,23 @@ func recoverStaleSectSecretRealmSettlements(now time.Time) {
 }
 
 func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID int64) {
+	// Scheduled settlements have no requester. Manual submissions must receive
+	// an outcome even when settlement exits before publishing its announcement.
+	outcome := "❌ 宗门秘境结算未完成，请稍后重试；如持续失败，请联系管理员。"
+	requesterNotified := false
+	defer func() {
+		if fallbackChatID != 0 && !requesterNotified {
+			telegram.ReplyText(bot, fallbackChatID, outcome)
+		}
+	}()
 	if !sectSecretRealmLiveRefreshMu.TryRLock() {
+		outcome = "⏳ 宗门秘境正在刷新，暂时无法结算，请稍后重试。"
 		return
 	}
 	defer sectSecretRealmLiveRefreshMu.RUnlock()
 	release, ok := tryActivityEventTurn("realm:" + realmID)
 	if !ok {
+		outcome = "⏳ 宗门秘境正在处理中，请稍后查看 `宗门秘境排行`。"
 		return
 	}
 	defer release()
@@ -1280,7 +1286,15 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 		Where("realm_id = ? AND status IN ?", realmID, []string{"active", "settling"}).
 		Update("status", "settling")
 
-	if res.Error != nil || res.RowsAffected == 0 {
+	if res.Error != nil {
+		return
+	}
+	if res.RowsAffected == 0 {
+		// A scheduled settlement may finish while a manual request is queued.
+		var current model.SectSecretRealmEvent
+		if err := storage.DB.Where("realm_id = ?", realmID).First(&current).Error; err == nil && current.Status == "settled" {
+			outcome = "✅ 宗门秘境结算完成，请发送 `宗门秘境排行` 查看结果。"
+		}
 		return
 	}
 
@@ -1323,6 +1337,7 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 	})
 	for _, err := range snapshotErrors {
 		if errors.Is(err, ErrActivitySnapshotPending) {
+			outcome = "⏳ 宗门秘境正在等待最终听书同步，后台将继续结算，请稍后查看 `宗门秘境排行`。"
 			return
 		}
 	}
@@ -1464,7 +1479,8 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 		return
 	}
 
-	sendSectSecretRealmSettlement(bot, event, fallbackChatID)
+	outcome = "✅ 宗门秘境结算完成，请发送 `宗门秘境排行` 查看结果。"
+	requesterNotified = sendSectSecretRealmSettlement(bot, event, fallbackChatID) == fallbackChatID
 }
 
 func clearSectSecretRealmParticipantComputedReward(p model.SectSecretRealmParticipant, reason string) error {
@@ -1792,7 +1808,8 @@ func grantSectSecretRealmRewards(event model.SectSecretRealmEvent, participants 
 	})
 }
 
-func sendSectSecretRealmSettlement(bot *tgbotapi.BotAPI, event model.SectSecretRealmEvent, fallbackChatID int64) {
+// sendSectSecretRealmSettlement returns the chat notified successfully, or zero.
+func sendSectSecretRealmSettlement(bot *tgbotapi.BotAPI, event model.SectSecretRealmEvent, fallbackChatID int64) int64 {
 	var sect model.Sect
 	if err := storage.DB.Where("id = ?", event.SectID).First(&sect).Error; err != nil {
 		log.Printf("⚠️ 宗门秘境结算公告读取宗门失败: realm=%s sect=%d err=%s", textfmt.FormatPlainValue(event.RealmID), event.SectID, textfmt.FormatPlainError(err))
@@ -1837,7 +1854,7 @@ func sendSectSecretRealmSettlement(bot *tgbotapi.BotAPI, event model.SectSecretR
 	profile, err := sectSecretRealmProfileFromSnapshotChecked(updatedEvent.ProfileKey, updatedEvent.ConfigSnapshot)
 	if err != nil {
 		log.Printf("宗门秘境结算公告配置快照读取失败: realm=%s err=%s", textfmt.FormatPlainValue(event.RealmID), textfmt.FormatPlainError(err))
-		return
+		return 0
 	}
 	guardianText := sectSecretRealmGuardianSummaryMarkdown(updatedEvent)
 
@@ -1872,8 +1889,15 @@ func sendSectSecretRealmSettlement(bot *tgbotapi.BotAPI, event model.SectSecretR
 		targetChatID = fallbackChatID
 	}
 	if targetChatID != 0 {
-		telegram.SendGroupAutoDeleteMessage(bot, targetChatID, notice)
+		msg := tgbotapi.NewMessage(targetChatID, notice)
+		msg.ParseMode = "Markdown"
+		if _, err := telegram.SendAutoDelete(bot, msg); err != nil {
+			log.Printf("宗门秘境结算公告发送失败: realm=%s err=%s", textfmt.FormatPlainValue(event.RealmID), textfmt.FormatTelegramSendError(err))
+			return 0
+		}
+		return targetChatID
 	}
+	return 0
 }
 
 func renderSectSecretRealmLiveBoard(event model.SectSecretRealmEvent) string {

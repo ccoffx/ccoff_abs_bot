@@ -1100,7 +1100,7 @@ func handleJoinWorldBoss(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			replyActivityEntry(bot, msg, "⚠️ 本期已有参与记录，但账号绑定已变化，无法重新入场。请发送 `Boss明细` 查看记录。")
 			return
 		}
-		replyActivityEntry(bot, msg, formatWorldBossEntry(event, existing))
+		replyActivityEntry(bot, msg, activityEntryAlreadyJoinedText(activityEntryBoss))
 		return
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {

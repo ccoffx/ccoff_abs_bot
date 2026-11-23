@@ -42,7 +42,7 @@ var (
 	ErrBreakthroughGuardIneligible   = errors.New("护道需要有效且未暂停的正式听书账号")
 	ErrBreakthroughGuardSelf         = errors.New("不能为自己的突破护道")
 	ErrBreakthroughGuardFull         = errors.New("本次护道人数已满")
-	ErrBreakthroughGuardJoined       = errors.New("您已参加本次护道，请勿重复点击")
+	ErrBreakthroughGuardJoined       = errors.New("你当前已经参与过本次护道，请查看当前护道面板了解进度")
 	ErrBreakthroughGuardDailyLimit   = errors.New("您今天已参加三次护道，请明天再来")
 	ErrBreakthroughGuardRulesInvalid = errors.New("护道规则快照异常，本次突破取消")
 	breakthroughGuardSweepMu         sync.Mutex

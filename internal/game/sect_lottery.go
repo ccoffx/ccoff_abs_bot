@@ -466,6 +466,12 @@ func handleJoinSectLotteryCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, r
 	}
 	joined, target, shouldDraw, err := joinSectLottery(uint(id), msg.From)
 	if err != nil {
+		if errors.Is(err, storage.ErrLotteryAlreadyJoined) {
+			if member, _, cErr := sectLotteryCreatorContext(msg.From.ID); cErr == nil && canUpgradeSectAsset(member.Role) {
+				telegram.SendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 你当前已经参与过本次宗门抽奖，请发送「查看宗门抽奖 %d」查看详情。", id))
+				return
+			}
+		}
 		telegram.SendPlainText(bot, msg.Chat.ID, sectLotteryActionErrorText(err))
 		return
 	}
@@ -1286,7 +1292,7 @@ func sectLotteryActionErrorText(err error) string {
 	case errors.Is(err, storage.ErrLotteryWaitingDraw):
 		return "⏳ 该宗门抽奖已到开奖时间，正在等待系统开奖。"
 	case errors.Is(err, storage.ErrLotteryAlreadyJoined):
-		return "❌ 您已经参与过该宗门抽奖。"
+		return "✅ 你当前已经参与过该宗门抽奖，请发送「宗门抽奖」查看活动列表。"
 	case errors.Is(err, storage.ErrSectLotteryContributionTooLow):
 		return fmt.Sprintf("❌ 宗门历史贡献需达到 %d 才可参与。", sectLotteryMinContribution)
 	case errors.Is(err, storage.ErrSectLotteryUserIneligible):

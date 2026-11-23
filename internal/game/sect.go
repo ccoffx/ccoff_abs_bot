@@ -680,7 +680,7 @@ func handleConfirmCreateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawNam
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrAlreadyInSect):
-			telegram.ReplyText(bot, chatID, "你已经加入宗门，不能重复创建。")
+			telegram.ReplyText(bot, chatID, "你当前已经加入过宗门，请发送 `我的宗门` 查看详情。")
 		case errors.Is(err, storage.ErrUserNotFound):
 			telegram.ReplyText(bot, chatID, "未找到你的本地档案，请先完成注册。")
 		case errors.Is(err, storage.ErrPointsNotEnough):
@@ -931,7 +931,7 @@ func handleConfirmJoinSect(bot *tgbotapi.BotAPI, message *tgbotapi.Message, args
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrAlreadyInSect):
-			telegram.ReplyTextToMessage(bot, message, "你已经加入宗门，不能重复加入。")
+			telegram.ReplyTextToMessage(bot, message, "你当前已经加入过宗门，请发送 `我的宗门` 查看详情。")
 		case errors.Is(err, storage.ErrSectNotFound):
 			telegram.ReplyTextToMessage(bot, message, "未找到该宗门。")
 		case errors.Is(err, storage.ErrSectFull):
@@ -2647,7 +2647,7 @@ func handleStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 		telegram.ReplyText(bot, chatID, "闭关状态读取失败，请稍后重试。")
 		return
 	} else if ok {
-		telegram.ReplyText(bot, chatID, fmt.Sprintf("你当前已有闭关，到 `%s` 结束。", sectCaveRetreatEndText(retreat.EndAt)))
+		telegram.ReplyText(bot, chatID, fmt.Sprintf("你当前已经在闭关中，到 `%s` 结束，请发送 `洞府` 查看详情。", sectCaveRetreatEndText(retreat.EndAt)))
 		return
 	}
 	if !confirmed {
@@ -2761,7 +2761,7 @@ func finishStartPersonalSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Mess
 		case "PERSONAL_PRESTIGE_NOT_ENOUGH":
 			telegram.ReplyText(bot, chatID, fmt.Sprintf("个人声望不足，闭关需要 `%d` 声望。", sectCavePersonalRetreatCost))
 		case "SECT_RETREAT_ACTIVE":
-			telegram.ReplyText(bot, chatID, "你当前已有闭关，结束后才能再次闭关。")
+			telegram.ReplyText(bot, chatID, "你当前已经在闭关中，请发送 `洞府` 查看详情，结束后可再次闭关。")
 		case "NOT_IN_SECT":
 			telegram.ReplyTextToMessage(bot, msg, "❌ 宗门身份已变化，请重新提交闭关。")
 		case "SECT_CAVE_LOCKED":

@@ -9,7 +9,8 @@ import (
 func replyBackgroundSubmission(bot *tgbotapi.BotAPI, chatID int64, result background.Result, name string) {
 	switch result {
 	case background.Accepted:
-		telegram.ReplyText(bot, chatID, "⏳ "+name+"已提交，完成后会通知您，可继续使用其他指令。")
+		// Accepted tasks report their final result from the worker.
+		return
 	case background.Pending:
 		telegram.ReplyText(bot, chatID, "⏳ "+name+"已在处理中，请勿重复提交。")
 	default:

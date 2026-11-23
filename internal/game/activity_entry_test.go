@@ -96,6 +96,9 @@ func TestActivityEntryReturnsBeforeABSAndDeduplicatesPendingAndJoined(t *testing
 			case <-time.After(2 * time.Second):
 				t.Fatal("entry was not sampled")
 			}
+			if got := replies(); got != "" {
+				t.Fatalf("first entry sent a preliminary receipt: %s", got)
+			}
 			var duplicates sync.WaitGroup
 			for range 10 {
 				duplicates.Go(func() { submit(bot) })
@@ -157,6 +160,9 @@ func TestActivityEntryReturnsBeforeABSAndDeduplicatesPendingAndJoined(t *testing
 			}
 			submit(bot)
 			waitActivityEntries(t)
+			if !strings.Contains(replies(), "你当前已经加入过") {
+				t.Fatal("duplicate entry did not say already joined")
+			}
 			if calls.Load() != 1 {
 				t.Fatal("already-joined participant fetched another baseline")
 			}

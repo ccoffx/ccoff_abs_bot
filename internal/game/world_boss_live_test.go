@@ -291,7 +291,7 @@ func TestWorldBossRepeatedJoinDoesNotFetchABSOrWaitForRefresh(t *testing.T) {
 	bot, replies := secretRealmQueryBot(t)
 	HandleWorldBossCommand(bot, &tgbotapi.Message{From: &tgbotapi.User{ID: 1}, Chat: &tgbotapi.Chat{ID: 1, Type: "private"}}, "参加Boss")
 	waitActivityEntries(t)
-	if requests.Load() != 0 || !strings.Contains(replies(), "已加入世界Boss讨伐") {
+	if requests.Load() != 0 || !strings.Contains(replies(), "你当前已经加入过本期世界Boss讨伐") {
 		t.Fatalf("repeat join made a remote call or lost eligibility: requests=%d %s", requests.Load(), replies())
 	}
 }
@@ -320,7 +320,7 @@ func TestWorldBossFirstJoinOnlyFetchesOwnBaselineOnce(t *testing.T) {
 	contributionMust(t, storage.DB.First(&p, "boss_id = ? AND user_id = ?", event.BossID, 2).Error)
 	var count int64
 	contributionMust(t, storage.DB.Model(&model.WorldBossParticipant{}).Where("boss_id = ? AND user_id = ?", event.BossID, 2).Count(&count).Error)
-	if requests.Load() != 1 || count != 1 || p.ListeningSnapshot.BaselineSeconds != 0 || strings.Count(replies(), "已加入世界Boss讨伐") != 2 {
+	if requests.Load() != 1 || count != 1 || p.ListeningSnapshot.BaselineSeconds != 0 || strings.Count(replies(), "已加入世界Boss讨伐") != 1 || strings.Count(replies(), "你当前已经加入过本期世界Boss讨伐") != 1 {
 		t.Fatalf("join duplicated requests/entries or changed the baseline: requests=%d count=%d p=%+v replies=%s", requests.Load(), count, p, replies())
 	}
 }

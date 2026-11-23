@@ -225,23 +225,23 @@ func submitActivityEntry(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, request mo
 	})
 	if err != nil {
 		log.Printf("入场申请登记失败: kind=%s event=%s user=%d err=%s", request.Kind, textfmt.FormatPlainValue(request.EventID), request.UserID, textfmt.FormatPlainError(err))
-		reason := "暂时无法登记，请稍后重试"
+		reason := "暂时无法入场，请稍后重试"
 		var invalid *activityEntryIneligible
 		if errors.As(err, &invalid) {
 			reason = invalid.reason
 		}
-		replyActivityEntry(bot, msg, "⏳ 入场申请未登记："+textfmt.EscapeMarkdown(reason))
+		replyActivityEntry(bot, msg, "❌ 入场失败："+textfmt.EscapeMarkdown(reason))
 		return
 	}
 	if duplicate && request.Status == "joined" {
-		replyActivityEntry(bot, msg, request.ResultText)
+		replyActivityEntry(bot, msg, activityEntryAlreadyJoinedText(request.Kind))
 		return
 	}
-	text := "⏳ 报名已登记，后台正在准备入场，完成后通知。正式入场以成功通知为准，可继续使用其他指令。"
 	if duplicate {
-		text = "⏳ 你的入场申请已在处理中，请勿重复提交。"
+		replyActivityEntry(bot, msg, "⏳ 你的入场申请已在处理中，请勿重复提交。")
+		kickActivityEntries(bot)
+		return
 	}
-	replyActivityEntry(bot, msg, text)
 	kickActivityEntries(bot)
 }
 
@@ -394,7 +394,14 @@ func activityEntryStatus(kind, eventID string, userID int64) (string, bool, erro
 		return "", false, err
 	}
 	if r.Status == "pending" {
-		return "⏳ 道友：`" + textfmt.EscapeMarkdown(r.UserName) + "`\n入场申请已登记，正在等待基线采样与资格确认；尚未正式入场，完成后会通知。", true, nil
+		return "⏳ 道友：`" + textfmt.EscapeMarkdown(r.UserName) + "`\n入场正在处理中，尚未正式入场；完成后会通知成功或失败。", true, nil
 	}
 	return r.ResultText, true, nil
+}
+
+func activityEntryAlreadyJoinedText(kind string) string {
+	if kind == activityEntryRealm {
+		return "✅ 你当前已经加入过本次宗门秘境，请发送 `宗门秘境明细` 查看个人记录。"
+	}
+	return "✅ 你当前已经加入过本期世界Boss讨伐，请发送 `Boss明细` 查看个人战况。"
 }

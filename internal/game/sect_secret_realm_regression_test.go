@@ -333,3 +333,82 @@ func TestSecretRealmRechecksUnbindingBeforePayout(t *testing.T) {
 		t.Fatalf("unbound account received points: %+v %v", u, err)
 	}
 }
+
+func TestManualSecretRealmSettlementAlwaysReportsOutcome(t *testing.T) {
+	for _, scenario := range []string{"refresh_busy", "event_busy", "invalid_rules", "database_error", "snapshot_pending", "success"} {
+		t.Run(scenario, func(t *testing.T) {
+			users := 0
+			if scenario == "snapshot_pending" {
+				users = 1
+			}
+			event := secretRealmSettlementFixture(t, users)
+			bot, replies := secretRealmQueryBot(t)
+			want := "结算未完成"
+			switch scenario {
+			case "refresh_busy":
+				sectSecretRealmLiveRefreshMu.Lock()
+				t.Cleanup(sectSecretRealmLiveRefreshMu.Unlock)
+				want = "正在刷新"
+			case "event_busy":
+				release, ok := tryActivityEventTurn("realm:" + event.RealmID)
+				if !ok {
+					t.Fatal("could not acquire event turn")
+				}
+				t.Cleanup(release)
+				want = "正在处理中"
+			case "invalid_rules":
+				contributionMust(t, storage.DB.Model(&event).Update("config_snapshot", "invalid").Error)
+			case "database_error":
+				contributionMust(t, storage.DB.Migrator().DropTable(&model.SectSecretRealmEvent{}))
+			case "snapshot_pending":
+				contributionMust(t, storage.DB.Model(&model.User{}).Where("telegram_id = ?", 1).Update("status", "active").Error)
+				bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) })
+				want = "正在等待最终听书同步"
+			case "success":
+				want = "【宗门秘境结算】"
+			}
+			settleSectSecretRealm(bot, event.RealmID, 123)
+			if got := replies(); !strings.Contains(got, want) {
+				t.Fatalf("expected %q in settlement outcome, got %q", want, got)
+			}
+		})
+	}
+}
+
+func TestManualSecretRealmSettlementReportsSuccessAfterScheduledSettlement(t *testing.T) {
+	event := secretRealmSettlementFixture(t, 0)
+	// The scheduled pass finishes before the queued manual request runs.
+	settleSectSecretRealm(nil, event.RealmID, 0)
+	contributionMust(t, storage.DB.First(&event, event.ID).Error)
+	if event.Status != "settled" {
+		t.Fatalf("scheduled settlement did not finish: %+v", event)
+	}
+	bot, replies := secretRealmQueryBot(t)
+	settleSectSecretRealm(bot, event.RealmID, 123)
+	want := "✅ 宗门秘境结算完成，请发送 `宗门秘境排行` 查看结果。"
+	if got := replies(); got != want {
+		t.Fatalf("expected only success outcome %q, got %q", want, got)
+	}
+}
+
+func TestManualSecretRealmSettlementAvoidsDuplicateSuccess(t *testing.T) {
+	for _, noticeChatID := range []int64{0, 123, 456} {
+		t.Run(fmt.Sprint(noticeChatID), func(t *testing.T) {
+			event := secretRealmSettlementFixture(t, 0)
+			config.AppConfig.NoticeGroupID = noticeChatID
+			bot, replies := secretRealmQueryBot(t)
+			settleSectSecretRealm(bot, event.RealmID, 123)
+			got := replies()
+			if strings.Count(got, "【宗门秘境结算】") != 1 {
+				t.Fatalf("expected one announcement: %s", got)
+			}
+			wantOutcome := 0
+			if noticeChatID == 456 {
+				wantOutcome = 1
+			}
+			if strings.Count(got, "✅ 宗门秘境结算完成") != wantOutcome {
+				t.Fatalf("unexpected requester outcome: %s", got)
+			}
+		})
+	}
+}
