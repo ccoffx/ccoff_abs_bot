@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,7 +55,7 @@ func secretRealmSettlementFixture(t *testing.T, users int) model.SectSecretRealm
 
 func secretRealmSessionResponse(w http.ResponseWriter, r *http.Request, event model.SectSecretRealmEvent, after bool) {
 	if strings.HasSuffix(r.URL.Path, "listening-stats") {
-		_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{event.StartAt.Format("2006-01-02"): 3600}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{SectDayKey(event.StartAt): 3600}})
 		return
 	}
 	start, end := event.StartAt, event.EndAt
@@ -65,6 +66,28 @@ func secretRealmSessionResponse(w http.ResponseWriter, r *http.Request, event mo
 	session := bossSession("session-"+id, start, end, 3600)
 	session["userId"] = id
 	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{session}})
+}
+
+func TestSecretRealmMockUsesBusinessDayAcrossTimeZones(t *testing.T) {
+	// The Linux runner loads timestamps in UTC; local development uses CST.
+	// Both representations must return playback on the same business date.
+	at := time.Date(2026, time.November, 25, 17, 30, 0, 0, time.UTC)
+	for _, start := range []time.Time{at, at.In(storage.DailyOperationsLocation)} {
+		t.Run(start.Location().String(), func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/api/users/abs1/listening-stats", nil)
+			secretRealmSessionResponse(response, request, model.SectSecretRealmEvent{StartAt: start}, false)
+			var stats struct {
+				Days map[string]float64 `json:"days"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &stats); err != nil {
+				t.Fatal(err)
+			}
+			if len(stats.Days) != 1 || stats.Days["2026-11-26"] != 3600 {
+				t.Fatalf("mock playback used the wrong business day: %s", response.Body.String())
+			}
+		})
+	}
 }
 
 func TestSecretRealmABSFailureFreezesSavedProgressAndPaysOnce(t *testing.T) {

@@ -74,7 +74,12 @@ def fake_gh():
         name = args[args.index("--pattern") + 1]
         if name not in state["assets"]:
             return 1
-        (Path(args[args.index("--dir") + 1]) / name).write_text(state["assets"][name])
+        target = Path(args[args.index("--dir") + 1]) / name
+        # Match gh: downloads refuse an existing local file without --clobber.
+        if target.exists():
+            print("file already exists: " + str(target), file=sys.stderr)
+            return 1
+        target.write_text(state["assets"][name])
     elif action == "edit":
         state["draft"] = False
     else:

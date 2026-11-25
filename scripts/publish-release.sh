@@ -4,7 +4,7 @@ set -euo pipefail
 : "${VERSION:?}" "${REPO:?}" "${SHA:?}"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-view() { gh release view "$VERSION" --repo "$REPO" --json isDraft,assets > "$work/release.json"; }
+view() { gh release view "$VERSION" --repo "$REPO" --json isDraft,assets > "$work/state.json"; }
 if ! view 2> "$work/error"; then
   if ! grep -q '^release not found$' "$work/error"; then
     cat "$work/error" >&2
@@ -14,10 +14,10 @@ if ! view 2> "$work/error"; then
     --title "$VERSION" --notes-file dist/notes.md --draft
   view
 fi
-draft=$(jq -r .isDraft "$work/release.json")
+draft=$(jq -r .isDraft "$work/state.json")
 for file in dist/deployment.tar.gz dist/deployment.tar.gz.sha256 dist/release.json; do
   name=${file##*/}
-  if ! jq -e --arg name "$name" '.assets | any(.name == $name)' "$work/release.json" > /dev/null; then
+  if ! jq -e --arg name "$name" '.assets | any(.name == $name)' "$work/state.json" > /dev/null; then
     if [[ "$draft" != true ]]; then
       echo "Published release is missing asset: $name; refusing to modify it" >&2
       exit 1
