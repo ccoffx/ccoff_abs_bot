@@ -3,6 +3,7 @@ package activity
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"ccoff-abs-bot/internal/model"
 	"ccoff-abs-bot/internal/storage"
@@ -88,8 +89,8 @@ func TestLegacyWorldBossPacketKeepsEligibilityAfterMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Exec(`INSERT INTO red_packets
- (id, sender_id, ref_id, claim_scope, count, left_count, total_points, left_points, is_finished)
- VALUES ('HB-WB-old', 0, 'legacy-boss', ?, 10, 10, 30, 30, 0)`, storage.RedPacketClaimScopeWorldBossParticipant).Error; err != nil {
+ (id, sender_id, ref_id, claim_scope, count, left_count, total_points, left_points, is_finished, created_at)
+ VALUES ('HB-WB-old', 0, 'legacy-boss', ?, 10, 10, 30, 30, 0, ?)`, storage.RedPacketClaimScopeWorldBossParticipant, time.Now()).Error; err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -120,5 +121,27 @@ func TestLegacyWorldBossPacketKeepsEligibilityAfterMigration(t *testing.T) {
 	}
 	if _, points, err := grabRedPacketInTx(db, 21, "legacy", "HB-"); err != nil || points < 1 {
 		t.Fatalf("legacy participant lost existing eligibility: points=%d err=%v", points, err)
+	}
+}
+
+func TestExpiredRedPacketsCannotBeClaimedBeforeSweep(t *testing.T) {
+	db := setupLotteryDB(t)
+	if err := db.AutoMigrate(&model.RedPacket{}, &model.RedPacketGrab{}, &model.WorldBossParticipant{}); err != nil {
+		t.Fatal(err)
+	}
+	packets := []model.RedPacket{
+		{ID: "HB-expired", LeftCount: 3, LeftPoints: 30, CreatedAt: time.Now().Add(-25 * time.Hour)},
+		{ID: "FS-expired", LeftCount: 3, LeftPoints: 30, CreatedAt: time.Now().Add(-25 * time.Hour)},
+	}
+	if err := db.Create(&packets).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"HB-", "FS-"} {
+		if _, _, err := grabRedPacketInTx(db, 11, "user", prefix); !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("expired packet claim: %v", err)
+		}
+		if already, err := userAlreadyGrabbedAllActiveRedPackets(11, prefix); err != nil || already {
+			t.Fatalf("expired packet treated as active: %t %v", already, err)
+		}
 	}
 }

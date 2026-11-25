@@ -97,7 +97,7 @@ func retainRedPacketNotice(record model.AutoDeleteMsg, now time.Time) (bool, err
 		return false, nil
 	}
 	var count int64
-	err := storage.DB.Model(&model.RedPacket{}).Where("id = ? AND notice_chat_id = ? AND notice_message_id = ? AND is_finished = ? AND left_count > 0 AND left_points > 0", record.PacketID, record.ChatID, record.MessageID, false).Count(&count).Error
+	err := storage.DB.Model(&model.RedPacket{}).Where("id = ? AND notice_chat_id = ? AND notice_message_id = ? AND is_finished = ? AND left_count > 0 AND left_points > 0", record.PacketID, record.ChatID, record.MessageID, false).Where("created_at > ?", now.Add(-storage.RedPacketLifetime)).Count(&count).Error
 	return count > 0, err
 }
 
@@ -117,7 +117,7 @@ func completeRedPacketNoticeCleanup(record model.AutoDeleteMsg) error {
 
 func redPacketNoticeActive(packetID string) (bool, error) {
 	var count int64
-	err := storage.DB.Model(&model.RedPacket{}).Where("id = ? AND is_finished = ? AND left_count > 0 AND left_points > 0", packetID, false).Count(&count).Error
+	err := storage.DB.Model(&model.RedPacket{}).Where("id = ? AND is_finished = ? AND left_count > 0 AND left_points > 0", packetID, false).Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)).Count(&count).Error
 	return count > 0, err
 }
 
@@ -149,7 +149,7 @@ func SyncRedPacketNotices(bot *tgbotapi.BotAPI, chatID int64) {
 		compensateRedPacketNotice(bot, record)
 	}
 	var packets []model.RedPacket
-	if err := storage.DB.Where("COALESCE(notice_message_id, 0) = 0 AND COALESCE(notice_send_state, '') IN ('', 'rejected', 'rate_limited') AND is_finished = ? AND left_count > 0 AND left_points > 0", false).Where("NOT EXISTS (SELECT 1 FROM auto_delete_msgs WHERE auto_delete_msgs.packet_id = red_packets.id)").Where("notice_retry_at IS NULL OR notice_retry_at <= ?", time.Now()).Where(redPacketLegacyCleanupCompleteSQL).Order("created_at asc").Find(&packets).Error; err != nil {
+	if err := storage.DB.Where("COALESCE(notice_message_id, 0) = 0 AND COALESCE(notice_send_state, '') IN ('', 'rejected', 'rate_limited') AND is_finished = ? AND left_count > 0 AND left_points > 0", false).Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)).Where("NOT EXISTS (SELECT 1 FROM auto_delete_msgs WHERE auto_delete_msgs.packet_id = red_packets.id)").Where("notice_retry_at IS NULL OR notice_retry_at <= ?", time.Now()).Where(redPacketLegacyCleanupCompleteSQL).Order("created_at asc").Find(&packets).Error; err != nil {
 		log.Printf("红包公告待发送队列读取失败: %s", textfmt.FormatPlainError(err))
 		return
 	}
@@ -163,7 +163,7 @@ func SyncRedPacketNotices(bot *tgbotapi.BotAPI, chatID int64) {
 		}
 		// Persist uncertainty BEFORE making the external call. A crash or a lost
 		// response must never turn into an automatic duplicate publication.
-		reservation := storage.DB.Model(&model.RedPacket{}).Where("id = ? AND notice_chat_id = ? AND COALESCE(notice_message_id, 0) = 0 AND COALESCE(notice_send_state, '') IN ('', 'rejected', 'rate_limited') AND is_finished = ? AND left_count > 0 AND left_points > 0", packet.ID, targetChatID, false).Where("notice_retry_at IS NULL OR notice_retry_at <= ?", time.Now()).Where(redPacketLegacyCleanupCompleteSQL).Updates(map[string]any{"notice_chat_id": targetChatID, "notice_send_state": "uncertain"})
+		reservation := storage.DB.Model(&model.RedPacket{}).Where("id = ? AND notice_chat_id = ? AND COALESCE(notice_message_id, 0) = 0 AND COALESCE(notice_send_state, '') IN ('', 'rejected', 'rate_limited') AND is_finished = ? AND left_count > 0 AND left_points > 0", packet.ID, targetChatID, false).Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)).Where("notice_retry_at IS NULL OR notice_retry_at <= ?", time.Now()).Where(redPacketLegacyCleanupCompleteSQL).Updates(map[string]any{"notice_chat_id": targetChatID, "notice_send_state": "uncertain"})
 		if reservation.Error != nil {
 			log.Printf("红包公告发送预登记失败: packet=%s err=%v", packet.ID, reservation.Error)
 			continue
@@ -179,7 +179,7 @@ func SyncRedPacketNotices(bot *tgbotapi.BotAPI, chatID int64) {
 		if packet.ClaimScope == storage.RedPacketClaimScopeWorldBossParticipant {
 			scope = "\n仅限本期参加 Boss 的道友领取。"
 		}
-		text := fmt.Sprintf("%s\n\n💰 总额：%d 积分\n📦 总份数：%d 份\n📦 发布时剩余：%d 份%s\n\n请在群内发送「%s」领取。\n红包编号：%s", title, packet.TotalPoints, packet.Count, packet.LeftCount, scope, command, packet.ID)
+		text := fmt.Sprintf("%s\n\n💰 总额：%d 积分\n📦 总份数：%d 份\n📦 发布时剩余：%d 份%s\n\n请在群内发送「%s」领取。\n红包自发放起 24 小时有效，超时剩余积分回归天道奖池。\n红包编号：%s", title, packet.TotalPoints, packet.Count, packet.LeftCount, scope, command, packet.ID)
 		sent, err := SendNoAutoDelete(bot, tgbotapi.NewMessage(targetChatID, text))
 		if err == nil && sent.MessageID <= 0 {
 			err = fmt.Errorf("Telegram returned no message ID")
@@ -198,12 +198,19 @@ func SyncRedPacketNotices(bot *tgbotapi.BotAPI, chatID int64) {
 			log.Printf("红包公告发送失败: packet=%s err=%s", packet.ID, textfmt.FormatTelegramSendError(err))
 			continue
 		}
+		receipt := model.AutoDeleteMsg{ChatID: targetChatID, MessageID: sent.MessageID, PacketID: packet.ID, DeleteAt: time.Now().Add(botMessageAutoDeleteDelay)}
 		err = storage.DB.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Model(&model.RedPacket{}).Where("id = ?", packet.ID).Updates(map[string]any{"notice_chat_id": targetChatID, "notice_message_id": sent.MessageID, "notice_send_state": "sent", "notice_retry_at": nil}).Error; err != nil {
 				return err
 			}
-			return tx.Create(&model.AutoDeleteMsg{ChatID: targetChatID, MessageID: sent.MessageID, PacketID: packet.ID, DeleteAt: time.Now().Add(botMessageAutoDeleteDelay)}).Error
+			return tx.Create(&receipt).Error
 		})
+		if err == nil {
+			active, checkErr := redPacketNoticeActive(packet.ID)
+			if checkErr == nil && !active {
+				compensateRedPacketNotice(bot, receipt)
+			}
+		}
 		if err != nil {
 			compensateRedPacketNotice(bot, model.AutoDeleteMsg{ChatID: targetChatID, MessageID: sent.MessageID, PacketID: packet.ID, DeleteAt: time.Now()})
 			log.Printf("红包公告登记失败: packet=%s err=%s", packet.ID, textfmt.FormatPlainError(err))

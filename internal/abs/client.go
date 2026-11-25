@@ -84,7 +84,11 @@ func AbsUserListeningSessionsPath(absUserID string, page int, itemsPerPage int) 
 }
 
 func (c *AbsClient) SendRequest(method, path string, body []byte) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return c.SendRequestWithTimeout(method, path, body, 5*time.Second)
+}
+
+func (c *AbsClient) SendRequestWithTimeout(method, path string, body []byte, timeout time.Duration) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if c == nil {

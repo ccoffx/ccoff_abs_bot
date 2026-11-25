@@ -13,16 +13,27 @@ import (
 	"ccoff-abs-bot/internal/textfmt"
 )
 
+const redPacketSettlementInterval = 5 * time.Minute
+
 // 🛡️ 核心重构：后台巡警协程，集成了消息安全清理与内存垃圾回收
 func StartMessageSweeper(bot *tgbotapi.BotAPI) {
 	// 1. Cron 定时清理消息任务
 	go func() {
+		// A zero deadline settles historical packets on the first sweep after startup.
+		var nextRedPacketSettlement time.Time
 		for {
 			time.Sleep(30 * time.Second)
 
 			defaultChatID := int64(0)
 			if config.AppConfig != nil {
 				defaultChatID = config.AppConfig.NoticeGroupID
+			}
+			now := time.Now()
+			if !now.Before(nextRedPacketSettlement) {
+				if err := storage.SettleExpiredRedPackets(now); err != nil {
+					log.Printf("红包超时结算失败，将在下次结算检查时重试: %s", textfmt.FormatPlainError(err))
+				}
+				nextRedPacketSettlement = time.Now().Add(redPacketSettlementInterval)
 			}
 			SyncRedPacketNotices(bot, defaultChatID)
 

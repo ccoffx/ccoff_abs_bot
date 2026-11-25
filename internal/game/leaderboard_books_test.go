@@ -46,12 +46,12 @@ func TestLeaderboardBooksScansBeyondRecentAndFivePageLimits(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions[start:min(start+100, len(sessions))]})
 			})
-			books, err := fetchLeaderboardBookStats("abs1", period, map[string]bool{"2026-11-13": true}, "2026-11")
+			books, invalid, err := fetchLeaderboardBookStats("abs1", period, map[string]bool{"2026-11-13": true}, "2026-11")
 			if err != nil {
 				t.Fatal(err)
 			}
 			book := books["older book"]
-			if len(books) != 1 || book == nil || book.ListenCount != 12 || book.TotalTime != 7200 || requests.Load() != 7 {
+			if invalid != 0 || len(books) != 1 || book == nil || book.ListenCount != 12 || book.TotalTime != 7200 || requests.Load() != 7 {
 				t.Fatalf("history missing or duplicated: books=%+v book=%+v requests=%d", books, book, requests.Load())
 			}
 		})
@@ -59,7 +59,7 @@ func TestLeaderboardBooksScansBeyondRecentAndFivePageLimits(t *testing.T) {
 }
 
 func TestLeaderboardBooksDiscardsPartialOrStalledHistory(t *testing.T) {
-	for _, failure := range []string{"later_page_fails", "repeated_page", "missing_sessions", "invalid_seconds"} {
+	for _, failure := range []string{"later_page_fails", "repeated_page", "missing_sessions"} {
 		t.Run(failure, func(t *testing.T) {
 			var requests atomic.Int64
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -69,16 +69,12 @@ func TestLeaderboardBooksDiscardsPartialOrStalledHistory(t *testing.T) {
 					w.WriteHeader(500)
 					return
 				}
-				if failure == "later_page_fails" && page == 1 {
+				if failure == "later_page_fails" && page >= 1 {
 					w.WriteHeader(503)
 					return
 				}
 				if failure == "missing_sessions" {
 					fmt.Fprint(w, `{}`)
-					return
-				}
-				if failure == "invalid_seconds" {
-					fmt.Fprint(w, `{"sessions":[{"id":"bad","date":"2026-11-13","timeListening":-10}]}`)
 					return
 				}
 				sessions := make([]map[string]any, 100)
@@ -87,10 +83,37 @@ func TestLeaderboardBooksDiscardsPartialOrStalledHistory(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 			})
-			books, err := fetchLeaderboardBookStats("abs1", "monthly", nil, "2026-11")
-			if err == nil || books != nil {
+			books, invalid, err := fetchLeaderboardBookStats("abs1", "monthly", nil, "2026-11")
+			if err == nil || books != nil || invalid != 0 {
 				t.Fatalf("incomplete history escaped: books=%+v err=%v", books, err)
 			}
 		})
+	}
+}
+
+func TestDailyLeaderboardFiltersDatesBeforeValidatingSeconds(t *testing.T) {
+	var requests atomic.Int64
+	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprint(w, `{"sessions":[
+			{"id":"old-negative","date":"2026-11-16","timeListening":-118.799,"mediaMetadata":{"title":"older book"}},
+			{"id":"old-malformed","date":"2026-11-23","timeListening":{},"mediaMetadata":{"title":"older book"}},
+			{"id":"today","date":"2026-11-25","timeListening":7200,"mediaMetadata":{"title":"today's book"}},
+			{"id":"invalid","date":"2026-11-24","timeListening":-10,"mediaMetadata":{"title":"yesterday's book"}},
+			{"id":"invalid","date":"2026-11-24","timeListening":-10,"mediaMetadata":{"title":"yesterday's book"}},
+			{"id":"valid","date":"2026-11-24","timeListening":600,"mediaMetadata":{"title":"yesterday's book"}}
+		]}`)
+	})
+
+	books, invalid, err := fetchLeaderboardBookStats("abs1", "daily", map[string]bool{"2026-11-24": true}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := books["yesterday's book"]
+	if len(books) != 1 || book == nil || book.ListenCount != 1 || book.TotalTime != 600 || invalid != 1 || requests.Load() != 2 {
+		t.Fatalf("wrong daily book totals or retry: books=%v yesterday=%+v invalid=%d requests=%d", books, book, invalid, requests.Load())
 	}
 }

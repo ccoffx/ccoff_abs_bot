@@ -903,3 +903,61 @@ func TestBarrierReleaseCommandRequiresPrivateSuperAdminAndReview(t *testing.T) {
 		t.Fatal("reviewed admin release failed")
 	}
 }
+
+func TestExpiredRedPacketNoticeStopsBeforeSettlement(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "expiry.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := storage.DB
+	storage.DB = db
+	conn, _ := db.DB()
+	t.Cleanup(func() { storage.DB = previous; conn.Close() })
+	if err := db.AutoMigrate(&model.RedPacket{}, &model.AutoDeleteMsg{}, &model.SystemConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	packets := []model.RedPacket{
+		{ID: "FS-expired-published", NoticeChatID: -100, NoticeMessageID: 42, NoticeSendState: "sent", LeftCount: 3, LeftPoints: 30, CreatedAt: now.Add(-25 * time.Hour)},
+		{ID: "HB-expired-unsent", NoticeChatID: -100, LeftCount: 3, LeftPoints: 30, CreatedAt: now.Add(-25 * time.Hour)},
+	}
+	if err := db.Create(&packets).Error; err != nil {
+		t.Fatal(err)
+	}
+	receipt := model.AutoDeleteMsg{PacketID: packets[0].ID, ChatID: -100, MessageID: 42, DeleteAt: now.Add(-time.Hour)}
+	if err := db.Create(&receipt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retain, err := retainRedPacketNotice(receipt, now); err != nil || retain {
+		t.Fatalf("expired notice retained: %t %v", retain, err)
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			fmt.Fprint(w, `{"ok":true,"result":{"id":99,"is_bot":true,"first_name":"test"}}`)
+			return
+		}
+		calls++
+		if !strings.HasSuffix(r.URL.Path, "/deleteMessage") {
+			t.Errorf("expired notice republished: %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	}))
+	defer server.Close()
+	bot, err := tgbotapi.NewBotAPIWithClient("test", server.URL+"/bot%s/%s", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	SyncRedPacketNotices(bot, 0)
+	if calls != 0 {
+		t.Fatal("expired notice sent before cleanup")
+	}
+	if err := deleteAutoDeleteMessage(bot, receipt); err != nil {
+		t.Fatal(err)
+	}
+	SyncRedPacketNotices(bot, 0)
+	if calls != 1 {
+		t.Fatal("expired notice republished after cleanup")
+	}
+}

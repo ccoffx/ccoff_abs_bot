@@ -2,8 +2,11 @@ package game
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,6 +124,7 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 	bookStatsMap := make(map[string]*BookStat)
 	statsSuccess := 0
 	bookStatsFailures := 0
+	invalidBookSessions := 0
 	cultivationReadFailures := 0
 
 	var wg sync.WaitGroup
@@ -152,7 +156,7 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 				dataMu.Unlock()
 			}
 
-			localBookMap, err := fetchLeaderboardBookStats(user.AbsUserID, timeframe, validDates, monthPrefix)
+			localBookMap, invalidSessions, err := fetchLeaderboardBookStats(user.AbsUserID, timeframe, validDates, monthPrefix)
 			if err != nil {
 				dataMu.Lock()
 				bookStatsFailures++
@@ -163,6 +167,7 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 
 			dataMu.Lock()
 			statsSuccess++
+			invalidBookSessions += invalidSessions
 			// 🚨 升级3：合并用户的局部书籍数据到全局
 			for book, stat := range localBookMap {
 				if _, exists := bookStatsMap[book]; !exists {
@@ -240,58 +245,71 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 		finalMsg += "📚 **万界风云书单**\n🫙 暂无热门书籍上榜...\n"
 	}
 
+	if invalidBookSessions > 0 {
+		log.Printf("榜单已排除时长异常的书籍会话: timeframe=%s count=%d", textfmt.FormatPlainValue(timeframe), invalidBookSessions)
+	}
+	if bookStatsFailures == 0 && invalidBookSessions > 0 {
+		finalMsg += fmt.Sprintf("⚠️ 本期书单已排除 %d 条时长异常的会话。\n", invalidBookSessions)
+	}
+
 	if config.AppConfig.NoticeGroupID != 0 {
 		sendAndManageLeaderboardPin(bot, config.AppConfig.NoticeGroupID, finalMsg, timeframe)
 	}
 }
 
-// Book popularity needs complete session history: listening-stats.recentSessions
-// contains only ten entries. Aggregate each page locally, deduplicating IDs;
-// return nothing on failure so a partial history cannot become a full ranking.
-func fetchLeaderboardBookStats(absUserID, timeframe string, validDates map[string]bool, monthPrefix string) (map[string]*BookStat, error) {
+// ABS only offers pagination sorted by update time. A session updated recently
+// may belong to an older date, so use the session date to select the reporting period.
+func fetchLeaderboardBookStats(absUserID, timeframe string, validDates map[string]bool, monthPrefix string) (map[string]*BookStat, int, error) {
 	books := make(map[string]*BookStat)
 	seen := make(map[string]bool)
+	invalidSessions := 0
 	for page := 0; ; page++ {
-		body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningSessionsPath(absUserID, page, dailyListeningSessionPageSize), nil)
+		body, err := fetchLeaderboardSessionPage(absUserID, page)
 		if err != nil {
-			return nil, err
-		}
-		if code != 200 {
-			return nil, fmt.Errorf("ABS_BOOK_SESSIONS_STATUS_%d", code)
+			return nil, 0, fmt.Errorf("book sessions page %d: %w", page, err)
 		}
 		var payload struct {
 			Sessions []struct {
-				ID            string   `json:"id"`
-				Date          string   `json:"date"`
-				TimeListening *float64 `json:"timeListening"`
+				ID            string          `json:"id"`
+				Date          string          `json:"date"`
+				TimeListening json.RawMessage `json:"timeListening"`
 				MediaMetadata struct {
 					Title string `json:"title"`
 				} `json:"mediaMetadata"`
 			} `json:"sessions"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, err
+			return nil, 0, fmt.Errorf("decode book sessions page %d: %w", page, err)
 		}
 		if payload.Sessions == nil {
-			return nil, fmt.Errorf("ABS_SESSIONS_FIELD_MISSING")
+			return nil, 0, fmt.Errorf("ABS_SESSIONS_FIELD_MISSING")
 		}
 		added := 0
 		for _, session := range payload.Sessions {
 			if strings.TrimSpace(session.ID) == "" {
-				return nil, fmt.Errorf("ABS_BOOK_SESSION_ID_MISSING")
+				return nil, 0, fmt.Errorf("ABS_BOOK_SESSION_ID_MISSING")
 			}
 			if seen[session.ID] {
 				continue
 			}
 			seen[session.ID] = true
 			added++
-			if session.TimeListening == nil || *session.TimeListening == 0 {
+			if !isLeaderboardDateValid(session.Date, timeframe, validDates, monthPrefix) || session.MediaMetadata.Title == "" {
 				continue
 			}
-			if !finitePositiveListeningSeconds(*session.TimeListening) {
-				return nil, fmt.Errorf("ABS_BOOK_SESSION_INVALID_SECONDS")
+
+			var seconds float64
+			if len(session.TimeListening) > 0 {
+				if err := json.Unmarshal(session.TimeListening, &seconds); err != nil {
+					invalidSessions++
+					continue
+				}
 			}
-			if !isLeaderboardDateValid(session.Date, timeframe, validDates, monthPrefix) || session.MediaMetadata.Title == "" {
+			if seconds == 0 {
+				continue
+			}
+			if !finitePositiveListeningSeconds(seconds) {
+				invalidSessions++
 				continue
 			}
 			title := session.MediaMetadata.Title
@@ -299,15 +317,33 @@ func fetchLeaderboardBookStats(absUserID, timeframe string, validDates map[strin
 				books[title] = &BookStat{}
 			}
 			books[title].ListenCount++
-			books[title].TotalTime += *session.TimeListening
+			books[title].TotalTime += seconds
 		}
 		if len(payload.Sessions) < dailyListeningSessionPageSize {
-			return books, nil
+			return books, invalidSessions, nil
 		}
 		if added == 0 {
-			return nil, fmt.Errorf("ABS_BOOK_SESSIONS_PAGINATION_STALLED")
+			return nil, 0, fmt.Errorf("ABS_BOOK_SESSIONS_PAGINATION_STALLED")
 		}
 	}
+}
+
+func fetchLeaderboardSessionPage(absUserID string, page int) ([]byte, error) {
+	const timeout = 15 * time.Second
+	path := abs.AbsUserListeningSessionsPath(absUserID, page, dailyListeningSessionPageSize)
+	body, code, err := abs.DefaultClient.SendRequestWithTimeout(http.MethodGet, path, nil, timeout)
+	var networkErr net.Error
+	if (errors.As(err, &networkErr) && networkErr.Timeout()) || (code >= 500 && code <= 599) {
+		time.Sleep(500 * time.Millisecond)
+		body, code, err = abs.DefaultClient.SendRequestWithTimeout(http.MethodGet, path, nil, timeout)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("ABS_BOOK_SESSIONS_STATUS_%d", code)
+	}
+	return body, nil
 }
 
 func normalizeLeaderboardDateKey(date string) string {

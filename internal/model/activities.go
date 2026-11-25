@@ -20,6 +20,8 @@ type RedPacket struct {
 	LeftCount                int  `gorm:"not null"`
 	LeftPoints               int  `gorm:"not null"`
 	IsFinished               bool `gorm:"default:false;index"`
+	ExpiredAt                *time.Time
+	ReturnedPoints           int
 	CreatedAt                time.Time
 	RefType                  string `gorm:"index"`
 	RefID                    string `gorm:"index"`

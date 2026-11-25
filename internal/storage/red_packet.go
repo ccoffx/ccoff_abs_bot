@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -34,4 +35,39 @@ func CreateRedPacketInTx(tx *gorm.DB, packet *model.RedPacket) error {
 	}
 	*packet = entry
 	return nil
+}
+
+// RedPacketLifetime is measured from creation, never from notice publication or retry.
+const RedPacketLifetime = 24 * time.Hour
+
+// SettleExpiredRedPackets atomically closes packets and recycles their remainder.
+// The CAS and pool write share a transaction, so claims, retries and restarts
+// cannot spend or return the same points twice. Announcement receipts are kept
+// until Telegram confirms deletion.
+func SettleExpiredRedPackets(now time.Time) error {
+	return RunFusionPoolLockedTransaction(func(tx *gorm.DB) error {
+		var packets []model.RedPacket
+		if err := tx.Where("is_finished = ? AND created_at <= ?", false, now.Add(-RedPacketLifetime)).Order("created_at asc, id asc").Find(&packets).Error; err != nil {
+			return err
+		}
+		for _, packet := range packets {
+			if packet.LeftPoints < 0 {
+				return fmt.Errorf("negative red packet balance: %s", packet.ID)
+			}
+			res := tx.Model(&model.RedPacket{}).Where("id = ? AND is_finished = ? AND left_count = ? AND left_points = ?", packet.ID, false, packet.LeftCount, packet.LeftPoints).Updates(map[string]any{
+				"is_finished": true, "left_count": 0, "left_points": 0,
+				"expired_at": now, "returned_points": packet.LeftPoints, "notice_retry_at": nil,
+			})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected != 1 {
+				return ErrConcurrentRedPacketGrabRetry
+			}
+			if _, _, err := AddPointsToFusionPoolInTx(tx, packet.LeftPoints, packet.NoticeChatID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

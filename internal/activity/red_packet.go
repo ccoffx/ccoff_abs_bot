@@ -64,6 +64,7 @@ func hasActiveIneligibleWorldBossRedPacketTx(tx *gorm.DB, userID int64, prefix s
 	var count int64
 	err := tx.Model(&model.RedPacket{}).
 		Where("left_count > ? AND is_finished = ? AND id LIKE ?", 0, false, prefix+"%").
+		Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)).
 		Where("claim_scope = ?", storage.RedPacketClaimScopeWorldBossParticipant).
 		Where("id NOT IN (?)", tx.Model(&model.RedPacketGrab{}).
 			Select("packet_id").
@@ -86,6 +87,7 @@ func claimableRedPacketQuery(tx *gorm.DB, userID int64, prefix string) *gorm.DB 
 	}
 	query := tx.
 		Where("left_count > ? AND is_finished = ? AND id LIKE ?", 0, false, prefix+"%").
+		Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)).
 		Where("id NOT IN (?)", tx.Model(&model.RedPacketGrab{}).
 			Select("packet_id").
 			Where("user_id = ?", userID)).
@@ -208,6 +210,7 @@ func grabRedPacketInTx(tx *gorm.DB, userID int64, safeName string, prefix string
 	// 只要红包状态被其他并发请求改过，本次事务回滚，由外层重新选包重试。
 	res := tx.Model(&model.RedPacket{}).
 		Where("id = ? AND left_count = ? AND left_points = ? AND is_finished = ?", packet.ID, packet.LeftCount, packet.LeftPoints, false).
+		Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)).
 		Updates(updateData)
 
 	if res.Error != nil {
@@ -280,7 +283,8 @@ func userAlreadyGrabbedAllActiveRedPackets(userID int64, prefix string) (bool, e
 	}
 
 	activeQuery := applyRedPacketClaimScopeFilter(storage.DB.Model(&model.RedPacket{}).
-		Where("left_count > ? AND is_finished = ? AND id LIKE ?", 0, false, prefix+"%"), userID)
+		Where("left_count > ? AND is_finished = ? AND id LIKE ?", 0, false, prefix+"%").
+		Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)), userID)
 
 	var activeCount int64
 	if err := activeQuery.Count(&activeCount).Error; err != nil {
@@ -293,6 +297,7 @@ func userAlreadyGrabbedAllActiveRedPackets(userID int64, prefix string) (bool, e
 	var eligibleCount int64
 	eligibleQuery := applyRedPacketClaimScopeFilter(storage.DB.Model(&model.RedPacket{}).
 		Where("left_count > ? AND is_finished = ? AND id LIKE ?", 0, false, prefix+"%").
+		Where("created_at > ?", time.Now().Add(-storage.RedPacketLifetime)).
 		Where("id NOT IN (?)", storage.DB.Model(&model.RedPacketGrab{}).
 			Select("packet_id").
 			Where("user_id = ?", userID)), userID)
