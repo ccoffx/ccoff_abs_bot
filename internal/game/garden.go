@@ -421,6 +421,25 @@ func HandleGardenCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		}
 		text, markup := renderGardenFields(userID)
 		editGardenScreen(bot, chatID, messageID, text, markup)
+	case "plantalllist":
+		telegram.AnswerCallback(bot, cb.ID, "请选择批量种植的种子")
+		text, markup := renderGardenPlantAllList(userID)
+		editGardenScreen(bot, chatID, messageID, text, markup)
+	case "plantall":
+		if len(parts) != 3 || parts[2] == "" {
+			telegram.AnswerCallback(bot, cb.ID, "种植参数异常")
+			return true
+		}
+		result, err := gardenPlantAll(userID, parts[2])
+		if err != nil {
+			telegram.AnswerCallback(bot, cb.ID, GardenActionErrorText(err))
+			text, markup := renderGardenPlantAllList(userID)
+			editGardenScreen(bot, chatID, messageID, text, markup)
+		} else {
+			telegram.AnswerCallback(bot, cb.ID, "批量种植成功")
+			text, markup := renderGardenFields(userID)
+			editGardenScreen(bot, chatID, messageID, result.text()+"\n\n"+text, markup)
+		}
 	case "plantlist":
 		if len(parts) < 3 {
 			telegram.AnswerCallback(bot, cb.ID, "灵田编号异常")
@@ -705,6 +724,11 @@ func renderGardenFields(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 			))
 		}
 
+		if len(plots) > len(active) {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🌱 一键种植", "garden:plantalllist"),
+			))
+		}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("一键收获成熟", "garden:harvestall"),
 		))
@@ -811,6 +835,10 @@ func renderGardenSeedShop(userID int64) (string, tgbotapi.InlineKeyboardMarkup) 
 			))
 		}
 	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🌱 去种植", "garden:plantalllist"),
+		tgbotapi.NewInlineKeyboardButtonData("灵田管理", "garden:fields"),
+	))
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("返回药园", "garden:home"),
 	))
@@ -1173,7 +1201,7 @@ func gardenPlantSeed(userID int64, plotNo int, seedKey string) error {
 	if !ok {
 		return storage.ErrGardenSeedUnknown
 	}
-	return storage.DB.Transaction(func(tx *gorm.DB) error {
+	return gardenPlantTransaction(func(tx *gorm.DB) error {
 		var plot model.GardenPlot
 		if err := tx.Where("user_id = ? AND plot_no = ?", userID, plotNo).First(&plot).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1203,21 +1231,7 @@ func gardenPlantSeed(userID int64, plotNo int, seedKey string) error {
 		}
 		level := gardenLevels[gardenLevel(experience)-1]
 		now := time.Now()
-		planting := model.GardenPlanting{
-			UserID:          userID,
-			PlotID:          plot.ID,
-			PlotNo:          plot.PlotNo,
-			SeedKey:         cfg.Key,
-			SeedName:        cfg.SeedName,
-			HerbName:        cfg.HerbName,
-			PlantedAt:       now,
-			MaturesAt:       now.Add(gardenGrowDuration(cfg.GrowDuration, level.GrowthReduction)),
-			Experience:      int(cfg.GrowDuration / time.Hour),
-			GrowthReduction: level.GrowthReduction,
-			OverflowChance:  level.OverflowChance,
-			OverflowReward:  gardenOverflowReward(cfg),
-			Status:          gardenStatusGrowing,
-		}
+		planting := newGardenPlanting(userID, plot, cfg, level, now)
 		if err := createGardenPlantingInTx(tx, &planting); err != nil {
 			return err
 		}
