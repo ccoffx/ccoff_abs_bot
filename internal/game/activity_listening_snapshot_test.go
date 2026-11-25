@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -31,12 +32,12 @@ func TestBossSnapshotUsesCurrentDayDeltaAndFreezesFinalInput(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 9999999, "days": map[string]float64{SectDayKey(event.StartAt): baseline + 1800, "2000-01-01": 999999}})
 	})
 	hours, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
-	if err != nil || !complete || hours != .5 {
+	if err != nil || !complete || math.Abs(hours-.5) > 1e-9 {
 		t.Fatalf("hours=%v complete=%v err=%v", hours, complete, err)
 	}
 	contributionMust(t, storage.DB.First(&p, p.ID).Error)
 	hours, complete, err = worldBossListeningHours(&p, event, p.AbsUserID, time.Now().Add(time.Hour))
-	if err != nil || !complete || hours != .5 || calls.Load() != 1 {
+	if err != nil || !complete || math.Abs(hours-.5) > 1e-9 || calls.Load() != 1 {
 		t.Fatalf("final replay changed input: hours=%v calls=%d err=%v", hours, calls.Load(), err)
 	}
 	if _, _, err = worldBossListeningHours(&p, event, "another-account", time.Now()); err == nil {
@@ -67,7 +68,7 @@ func TestActivityFinalFailureOrLateRestartUsesSavedProgress(t *testing.T) {
 				contributionMust(t, storage.DB.First(&p, p.ID).Error)
 				hours, complete, err = worldBossListeningHours(&p, event, p.AbsUserID, event.EndAt.Add(activityFinalSnapshotGrace))
 			}
-			if err != nil || !complete || hours != .25 || !p.ListeningSnapshot.Finalized || p.ListeningSnapshot.FinalFallbackReason == "" {
+			if err != nil || !complete || math.Abs(hours-.25) > 1e-9 || !p.ListeningSnapshot.Finalized || p.ListeningSnapshot.FinalFallbackReason == "" {
 				t.Fatalf("saved progress lost: %v %v %v", hours, complete, err)
 			}
 			if late && calls.Load() != 0 {
@@ -88,14 +89,15 @@ func TestActivityFinalMissingObservedDayRetriesInsteadOfFreezing(t *testing.T) {
 			event.Status = "settling"
 			day := SectDayKey(event.StartAt)
 			p.DeltaHours = .1
-			p.ListeningSnapshot = model.ActivityListeningSnapshot{BaselineDay: day, BaselineSeconds: 7200}
+			baseline := dailyListeningCreditSeconds(day, 7200, event.StartAt)
+			p.ListeningSnapshot = model.ActivityListeningSnapshot{BaselineDay: day, BaselineSeconds: baseline}
 			contributionMust(t, storage.DB.Save(&event).Error)
 			contributionMust(t, storage.DB.Save(&p).Error)
 			var healthy atomic.Bool
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 				days := map[string]float64{}
 				if healthy.Load() {
-					days[day] = 7800
+					days[day] = baseline + 600
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"days": days})
 			})
@@ -106,7 +108,7 @@ func TestActivityFinalMissingObservedDayRetriesInsteadOfFreezing(t *testing.T) {
 			healthy.Store(true)
 			p.ListeningSnapshot.FinalNextRetryAt = nil
 			hours, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
-			if err != nil || !complete || hours != 600.0/3600 {
+			if err != nil || !complete || math.Abs(hours-600.0/3600) > 1e-9 {
 				t.Fatalf("complete retry lost growth: hours=%v complete=%v err=%v", hours, complete, err)
 			}
 		})
@@ -139,7 +141,7 @@ func TestBossLiveSnapshotPersistsWithoutAwardingAndFinalOnlyAddsDelta(t *testing
 		t.Fatal(err)
 	}
 	contributionMust(t, storage.DB.First(&p, p.ID).Error)
-	if p.DeltaHours != 600.0/3600 || p.IsRewarded || p.ListeningSnapshot.Seconds != 600 {
+	if math.Abs(p.DeltaHours-600.0/3600) > 1e-9 || p.IsRewarded || p.ListeningSnapshot.Seconds != 600 {
 		t.Fatalf("live snapshot=%+v", p)
 	}
 	amount.Store(baseline + 900)
@@ -148,7 +150,7 @@ func TestBossLiveSnapshotPersistsWithoutAwardingAndFinalOnlyAddsDelta(t *testing
 	event.ListeningCutoffAt = &cutoff
 	contributionMust(t, storage.DB.Save(&event).Error)
 	hours, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
-	if err != nil || !complete || hours != .25 {
+	if err != nil || !complete || math.Abs(hours-.25) > 1e-9 {
 		t.Fatalf("final delta=%v complete=%v err=%v", hours, complete, err)
 	}
 }
@@ -169,8 +171,33 @@ func TestActivitySnapshotSpansMidnightWithoutImportingOtherHistory(t *testing.T)
 		}})
 	})
 	hours, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
-	if err != nil || !complete || hours != .25 {
+	if err != nil || !complete || math.Abs(hours-.25) > 1e-9 {
 		t.Fatalf("cross-midnight snapshot=%v complete=%v err=%v", hours, complete, err)
+	}
+}
+
+// A fractional elapsed-day baseline reproduces the release failure at any
+// wall-clock time. Arithmetic over float64 seconds can leave sub-nanosecond
+// rounding differences after subtracting the baseline and converting to hours.
+func TestActivitySnapshotFractionalBaselineAcrossMidnight(t *testing.T) {
+	start := time.Date(2026, time.November, 25, 0, 55, 18, 123456789, storage.DailyOperationsLocation)
+	cutoff := start.Add(24 * time.Hour)
+	snapshot := newActivityListeningSnapshot(map[string]float64{SectDayKey(start): 7200}, start)
+	days := map[string]float64{
+		SectDayKey(start):                   snapshot.BaselineSeconds + 600,
+		SectDayKey(cutoff):                  300,
+		SectDayKey(start.AddDate(0, 0, -1)): 86400,
+		SectDayKey(cutoff.AddDate(0, 0, 1)): 86400,
+	}
+	seconds, err := advanceActivityListeningDays(days, cutoff, cutoff, start, 0, &snapshot)
+	if err != nil || math.Abs(seconds-900) > 1e-9 {
+		t.Fatalf("cross-midnight seconds=%v err=%v", seconds, err)
+	}
+	if math.Abs(seconds/3600-.25) > 1e-9 {
+		t.Fatalf("cross-midnight hours=%v", seconds/3600)
+	}
+	if err := validateActivityFinalDailyInput(days, snapshot); err != nil {
+		t.Fatal(err)
 	}
 }
 
