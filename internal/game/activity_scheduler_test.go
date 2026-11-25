@@ -128,9 +128,23 @@ func TestActivitySettlementRetriesDurablePendingInputBeforePaying(t *testing.T) 
 }
 
 func TestBossAndRealmRefreshConcurrentlyWithoutMixingBaselines(t *testing.T) {
-	for _, phase := range []string{"live", "final"} {
-		t.Run(phase, func(t *testing.T) {
+	for _, scenario := range []struct {
+		phase    string
+		crossDay bool
+	}{{"live", false}, {"final", false}, {"live", true}, {"final", true}} {
+		t.Run(fmt.Sprintf("%s/crossDay=%t", scenario.phase, scenario.crossDay), func(t *testing.T) {
+			phase := scenario.phase
 			realm := secretRealmLiveFixture(t, 7)
+			// Entry must allow the full 600-second baseline even near 01:00,
+			// when a one-hour-old fixture starts just after midnight.
+			if scenario.crossDay || realm.StartAt.Sub(sectStartOfDay(realm.StartAt)) < 30*time.Minute {
+				realm.StartAt = sectStartOfDay(time.Now()).Add(-30 * time.Minute)
+				contributionMust(t, storage.DB.Save(&realm).Error)
+				contributionMust(t, storage.DB.Model(&model.SectSecretRealmParticipant{}).Where("realm_id = ?", realm.RealmID).Updates(map[string]any{
+					"created_at":                      realm.StartAt,
+					"listening_snapshot_baseline_day": SectDayKey(realm.StartAt),
+				}).Error)
+			}
 			if phase == "final" {
 				realm.EndAt = time.Now().Add(-time.Second)
 				contributionMust(t, storage.DB.Model(&realm).Update("end_at", realm.EndAt).Error)
@@ -150,7 +164,9 @@ func TestBossAndRealmRefreshConcurrentlyWithoutMixingBaselines(t *testing.T) {
 				for old := maximum.Load(); n > old && !maximum.CompareAndSwap(old, n); old = maximum.Load() {
 				}
 				time.Sleep(20 * time.Millisecond)
-				_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{SectDayKey(time.Now()): 1800}})
+				// Keep the listening input on the entry day, including after midnight.
+				// The realm subtracts its 600-second baseline; the Boss starts at zero.
+				_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{SectDayKey(realm.StartAt): 1800}})
 			})
 			results := make(chan error, 2)
 			go func() {

@@ -50,6 +50,7 @@ jobs:
       REPO: ${{ github.repository }}
       SHA: ${{ needs.validate.outputs.sha }}
     steps:
+      - uses: actions/checkout@v4
       - name: Download verified candidate from this release run
         id: candidate
         shell: bash
@@ -112,4 +113,4 @@ jobs:
 
           Download deployment.tar.gz and its checksum; no application source or Go compiler is needed on the deployment device. See docs/deployment.md inside the archive.
           EOF
-          gh release create "$VERSION" --repo "$REPO" --target "$SHA" --title "$VERSION" --notes-file dist/notes.md dist/deployment.tar.gz dist/deployment.tar.gz.sha256 dist/release.json
+          ./scripts/publish-release.sh

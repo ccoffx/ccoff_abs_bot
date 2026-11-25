@@ -44,6 +44,113 @@ def fake_docker():
     raise RuntimeError("Unexpected Docker command: " + repr(args))
 
 
+def fake_gh():
+    path = Path("github.json")
+    state = json.loads(path.read_text())
+    args = sys.argv[2:]
+    state["calls"].append(args)
+    path.write_text(json.dumps(state))
+    action = args[1]
+    if action == "view":
+        if state.get("view_error"):
+            print(state["view_error"], file=sys.stderr)
+            return 1
+        if not state.get("exists"):
+            print("release not found", file=sys.stderr)
+            return 1
+        print(json.dumps({"isDraft": state["draft"],
+                          "assets": [{"name": name} for name in state["assets"]]}))
+    elif action == "create":
+        state.update(exists=True, draft=True)
+    elif action == "upload":
+        file = Path(args[-1])
+        if state.get("upload_failure"):
+            return 1
+        state["assets"][file.name] = file.read_text()
+        path.write_text(json.dumps(state))
+        if state.get("response_failure"):
+            return 1
+    elif action == "download":
+        name = args[args.index("--pattern") + 1]
+        if name not in state["assets"]:
+            return 1
+        (Path(args[args.index("--dir") + 1]) / name).write_text(state["assets"][name])
+    elif action == "edit":
+        state["draft"] = False
+    else:
+        raise RuntimeError("Unexpected GitHub command: " + repr(args))
+    path.write_text(json.dumps(state))
+    return 0
+
+
+class ReleasePublicationTests(unittest.TestCase):
+    def run_publication(self, **state):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dist").mkdir()
+            for name in ("deployment.tar.gz", "deployment.tar.gz.sha256", "release.json", "notes.md"):
+                (root / "dist" / name).write_text(name + " content")
+            state = dict({"calls": [], "assets": {}}, **state)
+            (root / "github.json").write_text(json.dumps(state))
+            gh = root / "gh"
+            gh.write_text("#!/bin/sh\nexec " + shlex.join([
+                sys.executable, str(Path(__file__).resolve()), "--fake-gh"
+            ]) + ' "$@"\n')
+            gh.chmod(0o755)
+            env = dict(os.environ, VERSION="v1.0.1", REPO="example/bot", SHA="c" * 40)
+            env["PATH"] = str(root) + os.pathsep + env["PATH"]
+            result = subprocess.run(["bash", str(ROOT / "scripts/publish-release.sh")],
+                                    cwd=root, env=env, capture_output=True, text=True, timeout=15)
+            state = json.loads((root / "github.json").read_text())
+        return result, state
+
+    def test_new_release_uploads_then_verifies_before_publication(self):
+        result, state = self.run_publication()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(state["draft"])
+        actions = [call[1] for call in state["calls"]]
+        self.assertEqual(actions, ["view", "create", "view", "upload", "download",
+                                   "upload", "download", "upload", "download", "edit"])
+        self.assertIn("--draft", state["calls"][1])
+        self.assertIn("--verify-tag", state["calls"][1])
+
+    def test_partial_draft_resumes_without_duplicate_upload(self):
+        result, state = self.run_publication(exists=True, draft=True,
+            assets={"deployment.tar.gz.sha256": "deployment.tar.gz.sha256 content"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(state["draft"])
+        uploads = [call[-1] for call in state["calls"] if call[1] == "upload"]
+        self.assertEqual(uploads, ["dist/deployment.tar.gz", "dist/release.json"])
+
+    def test_published_release_is_verified_without_writes(self):
+        assets = {name: name + " content" for name in
+                  ("deployment.tar.gz", "deployment.tar.gz.sha256", "release.json")}
+        result, state = self.run_publication(exists=True, draft=False, assets=assets)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(call[1] in ("view", "download") for call in state["calls"]))
+
+    def test_uncertain_upload_response_recovers_from_stored_bytes(self):
+        result, state = self.run_publication(response_failure=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(state["draft"])
+
+    def test_mismatched_or_missing_assets_do_not_publish(self):
+        for options in ({"upload_failure": True},
+                        {"exists": True, "draft": True, "assets": {"deployment.tar.gz": "different"}},
+                        {"exists": True, "draft": False}):
+            with self.subTest(options=options):
+                result, state = self.run_publication(**options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(all(call[1] != "edit" for call in state["calls"]))
+                if options.get("draft") is False:
+                    self.assertTrue(all(call[1] != "upload" for call in state["calls"]))
+
+    def test_api_failure_is_not_treated_as_missing_release(self):
+        result, state = self.run_publication(view_error="HTTP 403: Forbidden")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(state["calls"]), 1)
+
+
 class PromotionTests(unittest.TestCase):
     def run_promotion(self, **state):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
@@ -221,4 +328,6 @@ class CandidateMergeTests(unittest.TestCase):
 if __name__ == "__main__":
     if sys.argv[1:] and sys.argv[1] == "--fake-docker":
         sys.exit(fake_docker())
+    if sys.argv[1:] and sys.argv[1] == "--fake-gh":
+        sys.exit(fake_gh())
     unittest.main()

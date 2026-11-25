@@ -22,7 +22,7 @@ git push origin main
 
 版本号就是 tag 名；可用 `git tag --sort=-version:refname | head` 查看最近版本，正式设备用 `./deploy.sh status` 查看当前部署版本。保护发布版本时，请在 GitHub 仓库规则中禁止改写或删除 `v*` tag。
 
-发布工作流只接受指向主分支提交的 `vX.Y.Z` tag，检查和构建全部成功后，从同一次发布流程下载 digest 和部署包，复用已验证的镜像 manifest 创建版本镜像，并创建 GitHub Release。任何检查失败都会阻止创建 Release；可在 Actions 中重跑失败任务。已有不同 digest 的镜像版本拒绝覆盖。Release 附件包括：
+发布工作流只接受指向主分支提交的 `vX.Y.Z` tag，检查和构建全部成功后，从同一次发布流程下载 digest 和部署包，复用已验证的镜像 manifest 创建版本镜像，并创建 GitHub Release。任何检查失败都会阻止创建 Release；可在 Actions 中重跑失败任务。已有不同 digest 的镜像版本拒绝覆盖。Release 先创建草稿，逐个上传并下载核对附件后再发布；重试会复用内容一致的已有附件，遇到内容不同的附件则停止，不覆盖已发布内容。旧 tag 的重跑仍使用旧提交中的工作流；修复代码后须将修复提交推送到 main，再创建新 tag。Release 附件包括：
 
 - `deployment.tar.gz`：部署脚本、Compose、配置模板和操作文档，不含应用源码。
 - `deployment.tar.gz.sha256`：部署包校验值。
