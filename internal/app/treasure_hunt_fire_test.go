@@ -141,7 +141,7 @@ type treasureMissingEntropy struct{}
 func (treasureMissingEntropy) Read(p []byte) (int, error) {
 	clear(p)
 	if len(p) > 0 {
-		p[len(p)-1] = 1 // The 1..10000 draw returns 2, a nonwinning outcome.
+		p[len(p)-1] = 1 // The 1..100 draw returns 2, a nonwinning outcome.
 	}
 	return len(p), nil
 }

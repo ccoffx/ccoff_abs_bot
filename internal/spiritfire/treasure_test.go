@@ -10,8 +10,8 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestTreasureFireOneInTenThousand(t *testing.T) {
-	for _, draw := range []int{1, 2, 100, 10000} {
+func TestTreasureFireOneInHundred(t *testing.T) {
+	for _, draw := range []int{1, 2, 99, 100} {
 		t.Run(fmt.Sprint(draw), func(t *testing.T) {
 			db, now := fixture(t)
 			calls := 0
@@ -21,7 +21,7 @@ func TestTreasureFireOneInTenThousand(t *testing.T) {
 				fire, err = awardTreasureInTx(tx, model.TreasurePick{RoundID: 1, UserID: 1, Reward: 10}, now, func(lo, hi int) (int, error) {
 					calls++
 					if calls == 1 {
-						if lo != 1 || hi != 10000 {
+						if lo != 1 || hi != 100 {
 							t.Fatalf("wrong probability range: %d..%d", lo, hi)
 						}
 						return draw, nil

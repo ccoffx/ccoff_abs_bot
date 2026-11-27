@@ -32,7 +32,7 @@ type Rules struct {
 }
 
 func DefaultRules() Rules {
-	return Rules{1, 1, 10, [4]int{2000, 3000, 4000, 5000}, [4]int{20, 25, 30, 35}}
+	return Rules{3, 3, 10, [4]int{2000, 3000, 4000, 5000}, [4]int{20, 25, 30, 35}}
 }
 func Day(t time.Time) string      { return t.In(Location).Format("2006-01-02") }
 func Tomorrow(t time.Time) string { return Day(t.In(Location).AddDate(0, 0, 1)) }

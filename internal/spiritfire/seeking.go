@@ -15,7 +15,7 @@ import (
 const SeekingCost = 100
 const ScrollBuyCost = 500
 const FragmentsPerScroll = 10
-const SeekingFireChance = 1
+const SeekingFireChance = 3
 const SeekingScrollChance = 10
 
 var ErrSeekingEmpty = errors.New("未认主异火已耗尽，寻缘暂停；可购买焚诀古卷，等待异火回归天地后再寻缘")

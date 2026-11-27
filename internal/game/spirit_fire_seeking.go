@@ -44,7 +44,7 @@ func spiritFireSeekingPanel(user int64) (string, tgbotapi.InlineKeyboardMarkup, 
 }
 
 func seekingQuoteText(q model.SpiritFireQuote) string {
-	detail := fmt.Sprintf("寻缘%d次，最多消耗%d积分（需备足总额）。\n每次必得残页×1；独立10%%获得古卷×1、1%%获得未认主异火，无异火保底。\n奖池耗尽会停止，仅扣实际次数费用。", q.Quantity, q.Points)
+	detail := fmt.Sprintf("寻缘%d次，最多消耗%d积分（需备足总额）。\n每次必得残页×1；独立%d%%获得古卷×1、%d%%获得未认主异火，无异火保底。\n奖池耗尽会停止，仅扣实际次数费用。", q.Quantity, q.Points, spiritfire.SeekingScrollChance, spiritfire.SeekingFireChance)
 	if q.Action == "scroll_buy" {
 		detail = fmt.Sprintf("购买焚诀古卷%d本，消耗%d积分。古卷绑定，不可交易或回收。", q.Quantity, q.Points)
 	}

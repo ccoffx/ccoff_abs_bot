@@ -411,7 +411,7 @@ func TestRulesConfirmationNextDayAndEligibilityFailures(t *testing.T) {
 	must(t, Confirm(db, 1, q.ID, now))
 	today, err := RulesAt(db, Day(now))
 	must(t, err)
-	if today.BossChance != 1 {
+	if today.BossChance != 3 || today.RealmChance != 3 {
 		t.Fatal(today)
 	}
 	next, err := RulesAt(db, Tomorrow(now))

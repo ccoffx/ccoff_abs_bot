@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const TreasureFireOneIn = 10000
+const TreasureFireOneIn = 100
 
 // The caller commits the closed treasure round and this award together, so a
 // settlement replay cannot roll again or grant another fire.

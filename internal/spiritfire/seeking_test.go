@@ -3,6 +3,7 @@ package spiritfire
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -199,5 +200,32 @@ func TestSeekingAuthorizationExpiryAndConcurrentLastFire(t *testing.T) {
 	u2, w2 := seekingState(t, db, 2)
 	if u1.Points+u2.Points != 199900 || w1.Fragments+w2.Fragments != 1 {
 		t.Fatal(u1.Points, u2.Points, w1, w2)
+	}
+}
+
+func TestSeekingFireThreePercentBoundary(t *testing.T) {
+	for _, draw := range []int{1, 3, 4, 100} {
+		t.Run(fmt.Sprint(draw), func(t *testing.T) {
+			db, now := fixture(t)
+			q, err := SeekingQuote(db, 1, "seek", 1, now)
+			must(t, err)
+			calls := 0
+			must(t, seekConfirmWithRoll(db, q, now, func(lo, hi int) int {
+				calls++
+				if calls == 2 {
+					return draw
+				}
+				return hi // No scroll; select a valid fire on a hit.
+			}))
+			var count int64
+			must(t, db.Model(&model.SpiritFire{}).Where("owner_id = 1").Count(&count).Error)
+			if (count == 1) != (draw <= 3) {
+				t.Fatalf("draw %d awarded %d fires", draw, count)
+			}
+			u, w := seekingState(t, db, 1)
+			if u.Points != 99900 || w.Fragments != 1 || w.Scrolls != 100 || w.SeekingSpent != 100 {
+				t.Fatal("incorrect seeking charge or rewards", u.Points, w)
+			}
+		})
 	}
 }
