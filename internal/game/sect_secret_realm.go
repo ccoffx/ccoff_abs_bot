@@ -1316,7 +1316,7 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 	}
 
 	settledAt := time.Now()
-	snapshotErrors := captureActivitySnapshotBatch(len(participants), func(i int) error {
+	snapshotErrors := runListeningSyncBatch(len(participants), func(i int) error {
 		p := &participants[i]
 		var current model.User
 		if err := storage.DB.Where("telegram_id = ?", p.UserID).First(&current).Error; err != nil {
@@ -2288,7 +2288,8 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 	}
 	defer listeningRefreshMu.RUnlock()
 	fetchedAt := time.Now()
-	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
+	day := SectDayKey(fetchedAt)
+	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningDaysPath(absUserID, day), nil)
 	if err != nil {
 		return sectSecretRealmListeningSnapshot{}, err
 	}
@@ -2296,19 +2297,18 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("ABS_STATUS_%d", code)
 	}
 
-	stats, err := parseOfficialListeningStats(body)
+	seconds, err := abs.ParseListeningDay(body, day)
 	if err != nil {
 		return sectSecretRealmListeningSnapshot{}, err
 	}
 
 	effectiveHours := 0.0
 	observedAt := time.Now()
-	day := SectDayKey(observedAt)
 	if storage.DB != nil {
 		var u model.User
 		readErr := storage.DB.Select("telegram_id", "abs_user_id").Where("abs_user_id = ?", absUserID).First(&u).Error
 		if readErr == nil {
-			credited, err := recordOfficialDailyListeningStats(u.TelegramID, absUserID, stats.Days, fetchedAt)
+			credited, err := recordCurrentListeningDay(u.TelegramID, absUserID, seconds, fetchedAt)
 			if err == nil {
 				// 秘境基线使用落库的累计净修为。
 				// The official source write already settled all changed days atomically.
@@ -2328,10 +2328,13 @@ func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretR
 		return sectSecretRealmListeningSnapshot{}, fmt.Errorf("read secret realm user: %w", readErr)
 	}
 
-	effectiveHours = calculateEffectiveCultivationHoursFromABSDays(stats.Days)
+	if SectDayKey(observedAt) != day {
+		return sectSecretRealmListeningSnapshot{}, ErrListeningNotFresh
+	}
+	credited := dailyListeningCreditSeconds(day, seconds, observedAt)
 	return sectSecretRealmListeningSnapshot{
-		EffectiveHours: effectiveHours,
-		DayKey:         day, DaySeconds: dailyListeningCreditSeconds(day, stats.Days[day], observedAt), FetchedAt: observedAt,
+		EffectiveHours: calculateSectEffectiveHoursFromSeconds(credited),
+		DayKey:         day, DaySeconds: credited, FetchedAt: observedAt,
 	}, nil
 }
 

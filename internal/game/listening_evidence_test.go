@@ -137,9 +137,11 @@ func TestSecretRealmUsesHistoricalRetreatTotalAndFailsClosed(t *testing.T) {
 	if err := storage.DB.Create(&retreat).Error; err != nil {
 		t.Fatal(err)
 	}
+	_, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{day: 8 * 3600}, time.Now())
+	contributionMust(t, err)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"days": map[string]float64{day: 8 * 3600}})
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"days": map[string]float64{r.URL.Query().Get("day"): 0}})
 			return
 		}
 		fmt.Fprint(w, `{"sessions":[]}`)

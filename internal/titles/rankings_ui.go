@@ -37,7 +37,7 @@ func renderRankTitlesInTx(tx *gorm.DB, b *strings.Builder, rows *[][]tgbotapi.In
 			return err
 		}
 		if holder.UserID > 0 {
-			fmt.Fprintf(b, "现任：%s\n", textfmt.LotteryDisplayText(holder.UserName, 24, "道友"))
+			fmt.Fprintf(b, "现任：%s\n", textfmt.LotteryDisplayText((model.User{TelegramID: holder.UserID, Username: holder.UserName}).DisplayLabel(), 24, "道友"))
 			switch d.Key {
 			case rankings.ListeningTitle:
 				fmt.Fprintf(b, "当前纪录：%.2f 小时（不含丹药、闭关和异火加成）\n", holder.Score)

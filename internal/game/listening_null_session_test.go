@@ -33,7 +33,7 @@ func nullListeningFixture(t *testing.T, emptyKind string, mismatch bool) string 
 				seconds--
 			}
 		}
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{day: seconds}})
 			return
 		}
@@ -157,7 +157,7 @@ func TestNullListeningTimeDoesNotClearKnownPositiveSession(t *testing.T) {
 	day := SectDayKey(start)
 	var changed atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			seconds := 60
 			if changed.Load() {
 				seconds = 0
@@ -215,7 +215,7 @@ func TestCrossDayUnknownListeningTimeDoesNotClearKnownPositiveSession(t *testing
 			day := SectDayKey(start)
 			var changed atomic.Bool
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if strings.HasSuffix(r.URL.Path, "/listening-days") {
 					seconds := 60
 					if changed.Load() {
 						seconds = 0

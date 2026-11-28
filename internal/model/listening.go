@@ -111,7 +111,7 @@ type DailyListeningStat struct {
 	OfficialBaselineHours           float64 `gorm:"not null;default:0"`
 
 	RawSeconds           float64
-	OfficialRawSeconds   float64 // Unmodified listening-stats.days value for this date.
+	OfficialRawSeconds   float64 // Unmodified listening-days.days value for this date.
 	ValidationJSON       string  // Daily credit limits and diagnostics; never penalty evidence.
 	CappedSeconds        float64
 	BaseCultivationHours float64
@@ -157,3 +157,14 @@ func (s DailyListeningStat) BonusListeningSeconds() float64 {
 	}
 	return math.Max(0, s.OfficialBaselineCreditedSeconds+(s.CappedSeconds-s.OfficialBaselineSeconds))
 }
+
+// ListeningDayClose retains each account/date until its closing sample commits.
+type ListeningDayClose struct {
+	ID        uint   `gorm:"primaryKey"`
+	UserID    int64  `gorm:"not null;uniqueIndex:ux_listening_day_close,priority:1"`
+	AbsUserID string `gorm:"not null;uniqueIndex:ux_listening_day_close,priority:2"`
+	DayKey    string `gorm:"not null;uniqueIndex:ux_listening_day_close,priority:3"`
+	Status    string `gorm:"not null;index"`
+}
+
+func (ListeningDayClose) TableName() string { return "listening_day_closes" }

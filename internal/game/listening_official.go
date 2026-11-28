@@ -62,7 +62,20 @@ func recordOfficialDailyListeningStats(userID int64, absID string, days map[stri
 	return recordOfficialDailyListeningStatsAt(userID, absID, days, fetchedAt, time.Now())
 }
 
-func recordOfficialDailyListeningStatsAt(userID int64, absID string, days map[string]float64, fetchedAt time.Time, now time.Time) (map[string]float64, error) {
+func recordOfficialDailyListeningStatsAt(userID int64, absID string, days map[string]float64, fetchedAt, now time.Time) (map[string]float64, error) {
+	return recordListeningDays(userID, absID, days, fetchedAt, now, false)
+}
+
+func recordCurrentListeningDay(userID int64, absID string, seconds float64, fetchedAt time.Time) (map[string]float64, error) {
+	now := time.Now()
+	day := SectDayKey(fetchedAt)
+	if day != SectDayKey(now) {
+		return nil, fmt.Errorf("ABS_DAILY_DATE_CHANGED")
+	}
+	return recordListeningDays(userID, absID, map[string]float64{day: seconds}, fetchedAt, now, true)
+}
+
+func recordListeningDays(userID int64, absID string, days map[string]float64, fetchedAt, now time.Time, currentOnly bool) (map[string]float64, error) {
 	if storage.DB == nil || days == nil || userID == 0 || strings.TrimSpace(absID) == "" {
 		return nil, fmt.Errorf("ABS_DAILY_NOT_READY")
 	}
@@ -120,9 +133,12 @@ func recordOfficialDailyListeningStatsAt(userID int64, absID string, days map[st
 			// for it without loading every day's full record. Valid caches are already
 			// guarded by source-invalidation triggers and the report timestamp above.
 			var stale int
-			if err := tx.Model(&model.DailyListeningStat{}).Select("1").
-				Where("user_id = ? AND abs_user_id = ? AND julianday(last_fetched_at) > julianday(?) AND julianday(last_fetched_at) <= julianday(?)", userID, absID, fetchedAt, now).
-				Limit(1).Scan(&stale).Error; err != nil {
+			source := tx.Model(&model.DailyListeningStat{}).
+				Where("user_id = ? AND abs_user_id = ? AND julianday(last_fetched_at) > julianday(?) AND julianday(last_fetched_at) <= julianday(?)", userID, absID, fetchedAt, now)
+			if currentOnly {
+				source = source.Where("day_key = ?", SectDayKey(now))
+			}
+			if err := source.Select("1").Limit(1).Scan(&stale).Error; err != nil {
 				return err
 			}
 			if stale != 0 {
@@ -143,24 +159,22 @@ func recordOfficialDailyListeningStatsAt(userID int64, absID string, days map[st
 		changed := make(map[string]float64)
 		today := SectDayKey(now)
 		lastDay := SectDayKey(snapshot.StatsFetchedAt)
-		var openDays []model.DailyListeningStat
-		if err := tx.Where("user_id = ? AND abs_user_id = ? AND day_key < ? AND archived = ?", userID, absID, today, false).Find(&openDays).Error; err != nil {
-			return err
-		}
-		open := make(map[string]bool, len(openDays))
 		var archiveIDs []uint
-		for _, stat := range openDays {
-			// The row itself retains the pending close across missing date keys,
-			// later report snapshots and cache rebuilds. Do not advance its sample
-			// time or archive it until ABS actually returns that date.
-			if !stat.LastFetchedAt.IsZero() && SectDayKey(stat.LastFetchedAt) <= stat.DayKey {
-				open[stat.DayKey] = true
-				continue
+		open := make(map[string]bool)
+		if !currentOnly {
+			var openDays []model.DailyListeningStat
+			if err := tx.Where("user_id = ? AND abs_user_id = ? AND day_key < ? AND archived = ?", userID, absID, today, false).Find(&openDays).Error; err != nil {
+				return err
 			}
-			// On upgrade, preserve and freeze history already sampled after its day.
-			archiveIDs = append(archiveIDs, stat.ID)
-			if !stat.OfficialPolicy {
-				changed[stat.DayKey] = stat.OfficialRawSeconds
+			for _, stat := range openDays {
+				if !stat.LastFetchedAt.IsZero() && SectDayKey(stat.LastFetchedAt) <= stat.DayKey {
+					open[stat.DayKey] = true
+					continue
+				}
+				archiveIDs = append(archiveIDs, stat.ID)
+				if !stat.OfficialPolicy {
+					changed[stat.DayKey] = stat.OfficialRawSeconds
+				}
 			}
 		}
 		for day, raw := range days {
@@ -229,7 +243,7 @@ func recordOfficialDailyListeningStatsAt(userID int64, absID string, days map[st
 				// Explicit column selection includes zeros, while retaining settlement and
 				// historical bonus columns until the shared settlement below updates them.
 				record.ID = old.ID
-				if err := tx.Model(&old).Select("Archived", "RawSeconds", "OfficialRawSeconds", "CappedSeconds", "EffectiveHours", "ValidationJSON", "AbsUserID", "LastFetchedAt", "Source", "FetchStatus", "RefreshReason", "OfficialPolicy", "OfficialBaselineKind", "OfficialBaselineSeconds", "OfficialBaselineHours", "OfficialBaselineCreditedSeconds").Updates(&record).Error; err != nil {
+				if err := updateOfficialDailyRecordInTx(tx, &record); err != nil {
 					return err
 				}
 			} else if err := tx.Create(&record).Error; err != nil {
@@ -259,6 +273,13 @@ func recordOfficialDailyListeningStatsAt(userID int64, absID string, days map[st
 	}
 	logDailyListeningWrite(userID, absID, previous, written, fetchedAt, false)
 	return credited, nil
+}
+
+func updateOfficialDailyRecordInTx(tx *gorm.DB, record *model.DailyListeningStat) error {
+	return tx.Model(record).Select("Archived", "RawSeconds", "OfficialRawSeconds", "CappedSeconds",
+		"EffectiveHours", "ValidationJSON", "AbsUserID", "LastFetchedAt", "Source", "FetchStatus",
+		"RefreshReason", "OfficialPolicy", "OfficialBaselineKind", "OfficialBaselineSeconds",
+		"OfficialBaselineHours", "OfficialBaselineCreditedSeconds").Updates(record).Error
 }
 
 func mergeOfficialDailyRecord(record *model.DailyListeningStat, old model.DailyListeningStat, exists bool, now time.Time) {

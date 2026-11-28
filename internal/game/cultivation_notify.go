@@ -54,7 +54,7 @@ func DeliverListeningUpgrades(bot *tgbotapi.BotAPI) {
 		if err := storage.DB.Where("telegram_id = ?", event.UserID).First(&user).Error; err != nil {
 			continue
 		}
-		name := textfmt.EscapeMarkdown(user.Username)
+		name := textfmt.EscapeMarkdown(user.DisplayLabel())
 		if name == "" {
 			name = "神秘道友"
 		}

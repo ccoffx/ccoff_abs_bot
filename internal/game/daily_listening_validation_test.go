@@ -23,7 +23,7 @@ func TestDailyListeningCreditCollectsSessionDatesBeforeAllocating(t *testing.T) 
 	source, middle, last := SectDayKey(start), SectDayKey(start.AddDate(0, 0, 1)), SectDayKey(start.AddDate(0, 0, 2))
 	var reverse atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{source: 28 * 3600}})
 			return
 		}
@@ -100,7 +100,7 @@ func TestDailyListeningValidationBoundedCrossDayRefresh(t *testing.T) {
 	start := dayStart.Add(-4 * time.Hour)
 	previous, target := SectDayKey(start), SectDayKey(dayStart)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{previous: 6 * 3600}})
 			return
 		}
@@ -126,7 +126,7 @@ func TestDailyListeningValidationBackfillsSameDayOverlapAndResumes(t *testing.T)
 	start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
 	day, recentDay := SectDayKey(start), SectDayKey(start.AddDate(0, 0, 1))
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{day: 24 * 3600, recentDay: 500 * 60}})
 			return
 		}
@@ -196,7 +196,7 @@ func TestDailyListeningValidationReportAndAtomicFailure(t *testing.T) {
 	var fail atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/listening-stats"):
+		case strings.HasSuffix(r.URL.Path, "/listening-days"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 86400, "days": map[string]float64{day: 24 * 3600}})
 		case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
 			if fail.Load() {
@@ -297,7 +297,7 @@ func TestDailyListeningValidationPersistsRawAndSurvivesRetry(t *testing.T) {
 	day := SectDayKey(start)
 	var fail atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{day: 24 * 3600}})
 			return
 		}

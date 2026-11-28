@@ -21,6 +21,7 @@ func clearDeletedAccountRankSourcesInTx(tx *gorm.DB, userID int64) error {
 		&model.Cultivation{},
 		&model.CultivationUpgradeEvent{},
 		&model.DailyListeningStat{},
+		&model.ListeningDayClose{},
 		&model.ListeningReportSnapshot{},
 		&model.ABSCrossDaySessionScanCursor{},
 		&model.ABSCrossDaySessionAdjustment{},

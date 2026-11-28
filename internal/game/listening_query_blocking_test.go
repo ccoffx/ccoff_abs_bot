@@ -51,7 +51,7 @@ func TestStrictListeningDoesNotWaitForAnotherAccountFlight(t *testing.T) {
 	seedListeningFreshnessUser(t, 1, 11*time.Minute, .5)
 	var requests atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(503) })
-	key := "stats:1:\"abs1\":[]"
+	key := "stats:1:\"abs1\""
 	call := &listeningFetchCall{done: make(chan struct{})}
 	listeningFetches.Lock()
 	listeningFetches.calls[key] = call

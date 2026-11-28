@@ -175,7 +175,7 @@ func formatWealthLeaderboardPage(users []model.User, totalUsers int, page int) s
 		} else if rank == 3 {
 			medal = "🥉"
 		}
-		b.WriteString(fmt.Sprintf("%s 第%d名 **%s** : `%d` 积分\n", medal, rank, textfmt.EscapeMarkdown(u.Username), u.Points))
+		b.WriteString(fmt.Sprintf("%s 第%d名 **%s** : `%d` 积分\n", medal, rank, textfmt.EscapeMarkdown(u.DisplayLabel()), u.Points))
 	}
 	if len(users) == 0 {
 		b.WriteString("暂无道友上榜。\n")

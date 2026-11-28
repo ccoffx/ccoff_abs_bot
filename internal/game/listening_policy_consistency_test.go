@@ -55,8 +55,10 @@ func TestOrdinaryAndSecretRealmRejectInvalidDailyInputs(t *testing.T) {
 	for _, value := range []string{"null", "-1", `"3600"`, "true", "1e999"} {
 		t.Run(value, func(t *testing.T) {
 			setupRetreatBackfillDB(t)
-			day := SectDayKey(time.Now().AddDate(0, 0, -1))
-			writeOfficial(t, map[string]float64{day: 3600})
+			now := time.Now()
+			day := SectDayKey(now)
+			_, err := recordCurrentListeningDay(1, "abs1", 60, now)
+			contributionMust(t, err)
 			before, total := officialStat(t, day), officialTotal(t)
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, `{"days":{%q:%s}}`, day, value)
@@ -77,14 +79,17 @@ func TestOrdinaryAndSecretRealmRejectInvalidDailyInputs(t *testing.T) {
 
 func TestSecretRealmStillAcceptsExplicitZeroCorrection(t *testing.T) {
 	setupRetreatBackfillDB(t)
-	day := SectDayKey(time.Now().AddDate(0, 0, -1))
-	writeOfficial(t, map[string]float64{day: 3600})
+	now := time.Now()
+	day := SectDayKey(now)
+	seconds := dailyListeningCreditSeconds(day, 60, now)
+	_, err := recordCurrentListeningDay(1, "abs1", seconds, now)
+	contributionMust(t, err)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, `{"days":{%q:0}}`, day) })
 	if _, err := fetchSectSecretRealmListeningSnapshotFromABS("abs1"); err != nil {
 		t.Fatal(err)
 	}
 	stat := officialStat(t, day)
-	if stat.RawSeconds != 0 || stat.CappedSeconds != 3600 || !strings.Contains(stat.ValidationJSON, "official_decrease_retained") {
+	if stat.RawSeconds != 0 || stat.CappedSeconds != seconds || !strings.Contains(stat.ValidationJSON, "official_decrease_retained") {
 		t.Fatalf("explicit zero no longer follows daily retention policy: %+v", stat)
 	}
 }

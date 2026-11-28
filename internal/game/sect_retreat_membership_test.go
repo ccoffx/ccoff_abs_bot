@@ -58,7 +58,7 @@ func TestSectRetreatRevalidatesMembershipAfterABSFetch(t *testing.T) {
 				if strings.HasSuffix(r.URL.Path, "/listening-sessions") {
 					fmt.Fprint(w, `{"sessions":[]}`)
 				} else {
-					fmt.Fprint(w, `{"days":{}}`)
+					fmt.Fprintf(w, `{"days":{%q:0}}`, r.URL.Query().Get("day"))
 				}
 			})
 			t.Cleanup(func() { waitSectRetreatPreparations(t) })

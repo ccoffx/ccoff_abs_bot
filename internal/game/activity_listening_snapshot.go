@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"sync"
 	"time"
 
 	"ccoff-abs-bot/internal/abs"
@@ -25,48 +24,23 @@ const (
 
 var ErrActivitySnapshotPending = errors.New("ACTIVITY_FINAL_SNAPSHOT_PENDING")
 
-// Capture the whole activity near one cutoff, rather than waiting serially for
-// every account's network timeout. The per-account input is durable before pay.
-func captureActivitySnapshotBatch(count int, work func(int) error) []error {
-	errors := make([]error, count)
-	jobs := make(chan int)
-	var workers sync.WaitGroup
-	for range min(listeningSyncWorkers-1, count) {
-		workers.Go(func() {
-			for i := range jobs {
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							errors[i] = fmt.Errorf("activity snapshot panic: %s", textfmt.FormatPlainValue(r))
-						}
-					}()
-					errors[i] = work(i)
-				}()
-			}
-		})
-	}
-	for i := range count {
-		jobs <- i
-	}
-	close(jobs)
-	workers.Wait()
-	return errors
-}
-
-func fetchActivityListeningStats(absID string) (officialListeningStats, time.Time, time.Time, error) {
-	startedAt := time.Now()
+func fetchActivityListeningStats(absID string, startedAt time.Time) (officialListeningStats, time.Time, error) {
 	if abs.DefaultClient == nil || absID == "" {
-		return officialListeningStats{}, time.Time{}, time.Time{}, fmt.Errorf("ACTIVITY_LISTENING_NOT_READY")
+		return officialListeningStats{}, time.Time{}, fmt.Errorf("ACTIVITY_LISTENING_NOT_READY")
 	}
-	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absID), nil)
+	day := SectDayKey(startedAt)
+	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningDaysPath(absID, day), nil)
 	if err != nil {
-		return officialListeningStats{}, time.Time{}, time.Time{}, err
+		return officialListeningStats{}, time.Time{}, err
 	}
 	if code != 200 {
-		return officialListeningStats{}, time.Time{}, time.Time{}, fmt.Errorf("ABS_STATUS_%d", code)
+		return officialListeningStats{}, time.Time{}, fmt.Errorf("ABS_STATUS_%d", code)
 	}
-	stats, err := parseOfficialListeningStats(body)
-	return stats, startedAt, time.Now(), err
+	seconds, err := abs.ParseListeningDay(body, day)
+	if err != nil {
+		return officialListeningStats{}, time.Time{}, err
+	}
+	return officialListeningStats{Days: map[string]float64{day: seconds}}, time.Now(), nil
 }
 
 type activityDailyListeningInput struct {
@@ -80,8 +54,8 @@ func newActivityListeningSnapshot(days map[string]float64, at time.Time) model.A
 }
 
 // Activities retain only their own date window. Daily elapsed caps, retained
-// decreases, missing closing dates and immutable archived dates follow the same
-// rules as ordinary daily credit, without settling cultivation or rewards here.
+// decreases and archived dates follow ordinary daily credit. At midnight the
+// last saved value closes the old day, even if today's response omits it.
 func advanceActivityListeningDays(days map[string]float64, requestedAt, capAt, start time.Time, savedSeconds float64, snapshot *model.ActivityListeningSnapshot) (float64, error) {
 	rebased := snapshot.BaselineDay == ""
 	if rebased {
@@ -107,6 +81,14 @@ func advanceActivityListeningDays(days map[string]float64, requestedAt, capAt, s
 	}
 	if _, ok := inputs[snapshot.BaselineDay]; !ok {
 		inputs[snapshot.BaselineDay] = activityDailyListeningInput{Seconds: snapshot.BaselineSeconds}
+	}
+	for day, input := range inputs {
+		if day < SectDayKey(requestedAt) && day <= SectDayKey(capAt) {
+			if _, hasClosingSample := days[day]; !hasClosingSample {
+				input.Archived = true
+				inputs[day] = input
+			}
+		}
 	}
 	for day, raw := range days {
 		if day < snapshot.BaselineDay || day > SectDayKey(capAt) {
@@ -143,7 +125,6 @@ func validateActivityFinalDailyInput(days map[string]float64, snapshot model.Act
 	for day, input := range inputs {
 		// Missing dates are unknown, not zero. Previously observed, unarchived
 		// dates still need a closing sample; archived dates are already frozen.
-		// ABS may omit days with no playback, so zero-only dates need no retry.
 		if _, present := days[day]; !present && !input.Archived && input.Seconds > 0 {
 			return fmt.Errorf("ACTIVITY_FINAL_DAY_MISSING: %s", day)
 		}
@@ -168,7 +149,10 @@ func captureActivityListeningSnapshot(table, eventTable, eventColumn, eventID st
 		limit = math.Max(0, now.Sub(start).Seconds())
 	}
 	deadline := cutoff.Add(activityFinalSnapshotGrace)
-	if final && now.Before(deadline) && snapshot.FinalNextRetryAt != nil && now.Before(*snapshot.FinalNextRetryAt) {
+	// A cutoff at exactly midnight belongs to the day that just ended.
+	cutoffDay := SectDayKey(cutoff.Add(-time.Nanosecond))
+	dayClosed := final && SectDayKey(now) > cutoffDay
+	if final && !dayClosed && now.Before(deadline) && snapshot.FinalNextRetryAt != nil && now.Before(*snapshot.FinalNextRetryAt) {
 		return 0, ErrActivitySnapshotPending
 	}
 	next := *snapshot
@@ -178,7 +162,7 @@ func captureActivityListeningSnapshot(table, eventTable, eventColumn, eventID st
 	if final {
 		priority, wait = listeningRequestFinal, min(5*time.Second, time.Until(deadline))
 	}
-	shouldFetch := !final || now.Before(deadline)
+	shouldFetch := !final || !dayClosed && now.Before(deadline)
 	failure := ""
 	finishedAt := now
 	if shouldFetch {
@@ -199,13 +183,17 @@ func captureActivityListeningSnapshot(table, eventTable, eventColumn, eventID st
 			func() {
 				defer listeningSyncSlots.release(group)
 				// Capacity may have become available after the closing window.
-				if (final && !time.Now().Before(deadline)) || (!final && !time.Now().Before(cutoff)) {
+				requestedAt = time.Now()
+				if final && SectDayKey(requestedAt) > cutoffDay {
+					failure = "day_closed"
+					return
+				}
+				if (final && !requestedAt.Before(deadline)) || (!final && !requestedAt.Before(cutoff)) {
 					failure = "deadline_exceeded"
 					return
 				}
-				requestStarted := time.Now()
-				stats, requestedAt, completedAt, fetchErr = fetchActivityListeningStats(absID)
-				requestDuration = time.Since(requestStarted)
+				stats, completedAt, fetchErr = fetchActivityListeningStats(absID, requestedAt)
+				requestDuration = time.Since(requestedAt)
 			}()
 			if failure == "" {
 				if fetchErr != nil {
@@ -250,15 +238,19 @@ func captureActivityListeningSnapshot(table, eventTable, eventColumn, eventID st
 		}
 	}
 	if final {
+		dayClosed = dayClosed || SectDayKey(finishedAt) > cutoffDay
 		if finalized {
 			next.FinalLastError, next.FinalFallbackReason = "", ""
 			next.FinalNextRetryAt = nil
-		} else if now.Before(deadline) && finishedAt.Before(deadline) {
+		} else if !dayClosed && now.Before(deadline) && finishedAt.Before(deadline) {
 			next.FinalLastError = failure
 			retryAt := minTime(finishedAt.Add(activityFinalRetryInterval), deadline)
 			next.FinalNextRetryAt = &retryAt
 		} else {
 			finalized = true
+			if dayClosed {
+				failure = "day_closed"
+			}
 			if failure != "" {
 				next.FinalLastError = failure
 			}
@@ -267,7 +259,7 @@ func captureActivityListeningSnapshot(table, eventTable, eventColumn, eventID st
 				next.FinalFallbackReason = "deadline_exceeded"
 			}
 			next.FinalNextRetryAt = nil
-			log.Printf("活动最终同步窗口耗尽，冻结已保存进度: event=%s participant=%d seconds=%.0f reason=%s attempts=%d",
+			log.Printf("活动按已保存进度结算: event=%s participant=%d seconds=%.0f reason=%s attempts=%d",
 				textfmt.FormatPlainValue(group), id, seconds, textfmt.FormatPlainValue(next.FinalFallbackReason), next.FinalAttempts)
 		}
 	}
@@ -319,6 +311,8 @@ func activityListeningSnapshotNotice(snapshot model.ActivityListeningSnapshot) s
 			reason = "ABS 读取失败"
 		case "invalid_input":
 			reason = "统计数据校验失败"
+		case "day_closed":
+			reason = "活动截止日已结束"
 		}
 		notice += "\n⚠️ 最终同步未成功，本次按最近保存的进度结算（" + reason + "）。"
 	} else if !snapshot.Finalized && snapshot.FinalNextRetryAt != nil {

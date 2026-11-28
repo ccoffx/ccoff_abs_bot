@@ -72,7 +72,7 @@ func setupListeningAbuseScheduleDB(t *testing.T) {
 		storage.DB, abs.DefaultClient = previousDB, previousClient
 		_ = conn.Close()
 	})
-	if err := db.AutoMigrate(&model.User{}, &model.AccountLifecycleClaim{}, &model.DailyListeningStat{}, &model.ListeningReportSnapshot{}, &model.SystemConfig{},
+	if err := db.AutoMigrate(&model.User{}, &model.AccountLifecycleClaim{}, &model.DailyListeningStat{}, &model.ListeningDayClose{}, &model.ListeningReportSnapshot{}, &model.SystemConfig{},
 		&model.Cultivation{}, &model.CultivationUpgradeEvent{}, &model.Sect{}, &model.SectMember{}, &model.SectContributionLog{}, &model.ListeningAbuseRecord{}, &model.AuditLog{}, &model.ABSCrossDaySessionAdjustment{}, &model.SectCaveRetreat{}); err != nil {
 		t.Fatal(err)
 	}

@@ -143,7 +143,7 @@ func TestSecretRealmQueriesDoNotWaitForScheduledRefresh(t *testing.T) {
 		requests.Add(1)
 		once.Do(func() { close(started) })
 		<-release
-		fmt.Fprint(w, `{"days":{}}`)
+		fmt.Fprintf(w, `{"days":{%q:0}}`, r.URL.Query().Get("day"))
 	})
 	// Start without Telegram board delivery, which is tested independently.
 	waitScheduler := startSecretRealmLiveScheduler(t)
@@ -181,7 +181,7 @@ func TestSecretRealmLiveRefreshUsesOneStatisticsRequestAndBoundsConcurrency(t *t
 	release := make(chan struct{})
 	started := make(chan struct{}, 7)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "listening-stats") {
+		if !strings.HasSuffix(r.URL.Path, "listening-days") {
 			stats.Add(1)
 			w.WriteHeader(503)
 			return
@@ -285,13 +285,13 @@ func TestSecretRealmLiveRefreshUpdatesExpiredDailyCache(t *testing.T) {
 	contributionMust(t, storage.DB.Model(&model.DailyListeningStat{}).Where("user_id = ?", 1).Update("last_fetched_at", time.Now().Add(-11*time.Minute)).Error)
 	var stats, sessions atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "listening-days") {
 			stats.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{SectDayKey(time.Now()): 3600}})
 			return
 		}
 		sessions.Add(1)
-		fmt.Fprint(w, `{"days":{}}`)
+		fmt.Fprintf(w, `{"days":{%q:0}}`, r.URL.Query().Get("day"))
 	})
 	refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event)
 	if !ran || err != nil || refreshed.LiveRefreshIncomplete || stats.Load() != 1 || sessions.Load() != 0 {
@@ -308,7 +308,7 @@ func TestSecretRealmBackgroundEvidenceCannotOverwriteFinalScan(t *testing.T) {
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		close(started)
 		<-release
-		fmt.Fprint(w, `{"days":{}}`)
+		fmt.Fprintf(w, `{"days":{%q:0}}`, r.URL.Query().Get("day"))
 	})
 	waitScheduler := startSecretRealmLiveScheduler(t)
 	var once sync.Once
@@ -339,7 +339,9 @@ func TestSecretRealmLivePreviewPublicationRollsBackTogether(t *testing.T) {
 	event := secretRealmLiveFixture(t, 2)
 	contributionMust(t, storage.DB.Model(&event).Updates(map[string]any{"total_delta_hours": 1.5, "total_reward_points": 8}).Error)
 	contributionMust(t, storage.DB.Model(&model.SectSecretRealmParticipant{}).Where("realm_id = ?", event.RealmID).Updates(map[string]any{"delta_hours": .75, "reward_points": 4}).Error)
-	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"days":{}}`) })
+	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"days":{%q:0}}`, r.URL.Query().Get("day"))
+	})
 	var writes atomic.Int32
 	contributionMust(t, storage.DB.Callback().Update().Before("gorm:update").Register("fail_second_preview_write", func(tx *gorm.DB) {
 		if tx.Statement.Table != "sect_secret_realm_participants" {

@@ -137,7 +137,8 @@ func TestBossAndRealmRefreshConcurrentlyWithoutMixingBaselines(t *testing.T) {
 			realm := secretRealmLiveFixture(t, 7)
 			// Entry must allow the full 600-second baseline even near 01:00,
 			// when a one-hour-old fixture starts just after midnight.
-			if scenario.crossDay || realm.StartAt.Sub(sectStartOfDay(realm.StartAt)) < 30*time.Minute {
+			today := SectDayKey(time.Now())
+			if scenario.crossDay || SectDayKey(realm.StartAt) != today || realm.StartAt.Sub(sectStartOfDay(realm.StartAt)) < 30*time.Minute {
 				realm.StartAt = sectStartOfDay(time.Now()).Add(-30 * time.Minute)
 				contributionMust(t, storage.DB.Save(&realm).Error)
 				contributionMust(t, storage.DB.Model(&model.SectSecretRealmParticipant{}).Where("realm_id = ?", realm.RealmID).Updates(map[string]any{
@@ -153,8 +154,18 @@ func TestBossAndRealmRefreshConcurrentlyWithoutMixingBaselines(t *testing.T) {
 			boss := model.WorldBossEvent{BossID: "parallel-boss", Status: "active", StartAt: realm.StartAt, EndAt: realm.EndAt}
 			contributionMust(t, storage.DB.Create(&boss).Error)
 			contributionMust(t, storage.DB.Model(&model.SectSecretRealmParticipant{}).Where("realm_id = ?", realm.RealmID).Update("listening_snapshot_baseline_seconds", 600).Error)
+			bossSnapshot := newActivityListeningSnapshot(nil, boss.StartAt)
+			secondsToday := 1800
+			if priorDay := SectDayKey(boss.StartAt); priorDay != today {
+				input, err := json.Marshal(map[string]activityDailyListeningInput{priorDay: {Seconds: 1800}})
+				contributionMust(t, err)
+				bossSnapshot.DailyInputJSON = string(input)
+				contributionMust(t, storage.DB.Model(&model.SectSecretRealmParticipant{}).Where("realm_id = ?", realm.RealmID).
+					Update("listening_snapshot_daily_input_json", string(input)).Error)
+				secondsToday = 0
+			}
 			for id := 1; id <= 7; id++ {
-				contributionMust(t, storage.DB.Create(&model.WorldBossParticipant{Model: gorm.Model{CreatedAt: boss.StartAt}, BossID: boss.BossID, UserID: int64(id), AbsUserID: fmt.Sprint("abs", id), ListeningSnapshot: newActivityListeningSnapshot(nil, boss.StartAt)}).Error)
+				contributionMust(t, storage.DB.Create(&model.WorldBossParticipant{Model: gorm.Model{CreatedAt: boss.StartAt}, BossID: boss.BossID, UserID: int64(id), AbsUserID: fmt.Sprint("abs", id), ListeningSnapshot: bossSnapshot}).Error)
 			}
 			var active, maximum, calls atomic.Int32
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -164,9 +175,10 @@ func TestBossAndRealmRefreshConcurrentlyWithoutMixingBaselines(t *testing.T) {
 				for old := maximum.Load(); n > old && !maximum.CompareAndSwap(old, n); old = maximum.Load() {
 				}
 				time.Sleep(20 * time.Millisecond)
-				// Keep the listening input on the entry day, including after midnight.
-				// The realm subtracts its 600-second baseline; the Boss starts at zero.
-				_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{SectDayKey(realm.StartAt): 1800}})
+				if r.URL.Query().Get("day") != today {
+					t.Errorf("unexpected listening date: %s", r.URL)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]int{today: secondsToday}})
 			})
 			results := make(chan error, 2)
 			go func() {

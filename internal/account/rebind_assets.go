@@ -56,6 +56,7 @@ var rebindAssetModels = []struct {
 	{&model.ABSCrossDaySessionAdjustment{}, []string{"UserID"}},
 	{&model.ListeningAbuseRecord{}, []string{"UserID"}},
 	{&model.DailyListeningStat{}, []string{"UserID"}},
+	{&model.ListeningDayClose{}, []string{"UserID"}},
 	{&model.MarketplaceListing{}, []string{"SellerID"}},
 	{&model.MarketplaceSecret{}, []string{"SellerID", "BuyerID"}},
 	{&model.MarketplacePurchase{}, []string{"SellerID", "BuyerID"}},

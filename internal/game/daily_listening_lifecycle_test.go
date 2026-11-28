@@ -23,7 +23,7 @@ func TestDailyListeningZeroCorrectionPreservesValidBudget(t *testing.T) {
 	day := SectDayKey(start)
 	var zero atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			seconds := 18.0 * 3600
 			if zero.Load() {
 				seconds = 12 * 3600
@@ -213,7 +213,7 @@ func TestDailyListeningOrdinaryDeletionBackfillResumes(t *testing.T) {
 	day, recentDay := SectDayKey(start), SectDayKey(start.AddDate(0, 0, 1))
 	var deleted, failLast atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			seconds := 18.0 * 3600
 			if deleted.Load() {
 				seconds = 12 * 3600

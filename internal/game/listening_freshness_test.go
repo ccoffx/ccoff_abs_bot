@@ -252,7 +252,7 @@ func TestExpiredListeningQueryRefreshesOrLabelsOldData(t *testing.T) {
 			contributionMust(t, storage.DB.First(&before).Error)
 			var stats, sessions atomic.Int32
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if strings.HasSuffix(r.URL.Path, "/listening-days") {
 					stats.Add(1)
 					if failure {
 						w.WriteHeader(503)
@@ -336,7 +336,7 @@ func TestConcurrentListeningRefreshSharesOneABSResponse(t *testing.T) {
 	defer releaseOnce.Do(func() { close(release) })
 	var requests atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			if requests.Add(1) == 1 {
 				close(started)
 			}
@@ -356,7 +356,7 @@ func TestConcurrentListeningRefreshSharesOneABSResponse(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		listeningFetches.Lock()
-		call := listeningFetches.calls[fmt.Sprintf("stats:%d:%q:%q", 1, "abs1", []string(nil))]
+		call := listeningFetches.calls[fmt.Sprintf("stats:%d:%q", 1, "abs1")]
 		joined := call != nil && call.waiters == callers-1
 		listeningFetches.Unlock()
 		if joined {
@@ -394,7 +394,7 @@ func TestDueListeningQueueRefreshesOnlyExpiredUsersAndProgress(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/listening-stats"):
+		case strings.HasSuffix(r.URL.Path, "/listening-days"):
 			stats.Add(1)
 			if strings.Contains(r.URL.Path, "/abs10/") || strings.Contains(r.URL.Path, "/abs11/") {
 				freshStats.Add(1)
@@ -425,7 +425,7 @@ func TestExpiredBookProgressIsReadLocallyAndLabelled(t *testing.T) {
 	var requests atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") || strings.HasSuffix(r.URL.Path, "/listening-sessions") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") || strings.HasSuffix(r.URL.Path, "/listening-sessions") {
 			t.Error("fresh cultivation contacted stats API")
 		}
 		if fail.Load() {

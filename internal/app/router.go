@@ -514,7 +514,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					"🍵 回气丹: `%s` 次\n"+
 					"💊 青灵养气丹: `%s` 次\n"+
 					"🍎 万载灵髓: `%s` 次 *(每月限额)*",
-					textfmt.EscapeMarkdown(u.Username), userID, u.Points, statusText,
+					textfmt.EscapeMarkdown(u.DisplayLabel()), userID, u.Points, statusText,
 					realmStr, cul.TotalAudioTime+cul.PillAudioTime, cul.TotalAudioTime, cul.PillAudioTime, todayEffectiveHoursText, ownerBonusText, cul.TribulationFails,
 					game.ManualPillUsageCountText(countHuiQi, 3, errHuiQi == nil),
 					game.ManualPillUsageCountText(countQingLingYangQi, 2, errQingLingYangQi == nil),
@@ -4577,7 +4577,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			var user model.User
 			userErr := storage.DB.Where("telegram_id = ?", usedByID).First(&user).Error
 			if userErr == nil {
-				safeName := textfmt.EscapeMarkdown(user.Username)
+				safeName := textfmt.EscapeMarkdown(user.DisplayLabel())
 				useInfo = fmt.Sprintf("\n👤 **使用者名称**: `%s`\n🆔 **使用者 TG ID**: `%d`", safeName, usedByID)
 			} else if errors.Is(userErr, gorm.ErrRecordNotFound) {
 				useInfo = fmt.Sprintf("\n👤 **使用者 TG ID**: `%d` (该用户可能已注销或退群)", usedByID)

@@ -52,7 +52,9 @@ func TestRetreatListeningSyncAfterHistoryCompleted(t *testing.T) {
 	day := SectDayKey(retreat.StartAt)
 	before := officialStat(t, day)
 	_, _, _, err := scanListeningAbuseForDay(nil, day, now)
-	contributionMust(t, err)
+	if err == nil || !strings.Contains(err.Error(), "LISTENING_ABUSE_SCAN_PENDING") {
+		t.Fatalf("unclosed report should keep the abuse scan pending: %v", err)
+	}
 	if requests != 0 {
 		t.Fatal("abuse scan fetched sessions")
 	}

@@ -26,7 +26,7 @@ func TestBossSnapshotUsesCurrentDayDeltaAndFreezesFinalInput(t *testing.T) {
 	var calls atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		if !strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if !strings.HasSuffix(r.URL.Path, "/listening-days") {
 			t.Error("activity requested history")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 9999999, "days": map[string]float64{SectDayKey(event.StartAt): baseline + 1800, "2000-01-01": 999999}})
@@ -78,7 +78,7 @@ func TestActivityFinalFailureOrLateRestartUsesSavedProgress(t *testing.T) {
 	}
 }
 
-func TestActivityFinalMissingObservedDayRetriesInsteadOfFreezing(t *testing.T) {
+func TestActivityFinalRetriesMissingTodayAndFreezesPreviousDay(t *testing.T) {
 	for _, crossMidnight := range []bool{false, true} {
 		t.Run(fmt.Sprint("cross_midnight=", crossMidnight), func(t *testing.T) {
 			event, p := bossEvidenceFixture(t)
@@ -96,20 +96,68 @@ func TestActivityFinalMissingObservedDayRetriesInsteadOfFreezing(t *testing.T) {
 			var healthy atomic.Bool
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 				days := map[string]float64{}
-				if healthy.Load() {
+				today := SectDayKey(time.Now())
+				if r.URL.Query().Get("day") != today {
+					t.Errorf("unexpected listening date: %s", r.URL)
+				}
+				if crossMidnight {
+					days[today] = 0
+				} else if healthy.Load() {
 					days[day] = baseline + 600
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"days": days})
 			})
-			_, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
+			hours, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
+			if crossMidnight {
+				if err != nil || !complete || hours != .1 {
+					t.Fatalf("saved progress should settle after midnight: hours=%v complete=%v err=%v", hours, complete, err)
+				}
+				return
+			}
 			if !errors.Is(err, ErrActivitySnapshotPending) || complete || p.ListeningSnapshot.Finalized {
 				t.Fatalf("missing day finalized incomplete input: %+v err=%v", p.ListeningSnapshot, err)
 			}
 			healthy.Store(true)
 			p.ListeningSnapshot.FinalNextRetryAt = nil
-			hours, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
+			hours, complete, err = worldBossListeningHours(&p, event, p.AbsUserID, time.Now())
 			if err != nil || !complete || math.Abs(hours-600.0/3600) > 1e-9 {
 				t.Fatalf("complete retry lost growth: hours=%v complete=%v err=%v", hours, complete, err)
+			}
+		})
+	}
+}
+
+func TestActivityFinalAfterCutoffDayPreservesSavedSampleWithoutABS(t *testing.T) {
+	for _, beforeMidnight := range []time.Duration{0, time.Minute} {
+		t.Run(beforeMidnight.String(), func(t *testing.T) {
+			event, p := bossEvidenceFixture(t)
+			midnight := time.Date(2026, 11, 28, 0, 0, 0, 0, storage.DailyOperationsLocation)
+			event.EndAt = midnight.Add(-beforeMidnight)
+			event.StartAt = event.EndAt.Add(-time.Hour)
+			event.Status = "settling"
+			p.CreatedAt = event.StartAt
+			p.DeltaHours = .25
+			sampledAt := event.EndAt.Add(-3 * time.Minute)
+			nextRetryAt := midnight.Add(time.Minute)
+			p.ListeningSnapshot = model.ActivityListeningSnapshot{
+				BaselineDay: SectDayKey(event.StartAt), FetchedAt: &sampledAt, FinalNextRetryAt: &nextRetryAt,
+			}
+			contributionMust(t, storage.DB.Save(&event).Error)
+			contributionMust(t, storage.DB.Save(&p).Error)
+			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("closed activity requested %s", r.URL)
+				w.WriteHeader(http.StatusBadGateway)
+			})
+			hours, complete, err := worldBossListeningHours(&p, event, p.AbsUserID, midnight.Add(30*time.Second))
+			if err != nil || !complete || hours != .25 {
+				t.Fatalf("saved progress should settle immediately: hours=%v complete=%v err=%v", hours, complete, err)
+			}
+			contributionMust(t, storage.DB.First(&p, p.ID).Error)
+			snapshot := p.ListeningSnapshot
+			if !snapshot.Finalized || snapshot.FetchedAt == nil || !snapshot.FetchedAt.Equal(sampledAt) ||
+				snapshot.FinalFallbackReason != "day_closed" || snapshot.FinalNextRetryAt != nil ||
+				!strings.Contains(activityListeningSnapshotNotice(snapshot), "活动截止日已结束") {
+				t.Fatalf("incorrect fallback snapshot: %+v", snapshot)
 			}
 		})
 	}
@@ -161,12 +209,18 @@ func TestActivitySnapshotSpansMidnightWithoutImportingOtherHistory(t *testing.T)
 	event.Status = "settling"
 	p.CreatedAt = event.StartAt
 	baseline := dailyListeningCreditSeconds(SectDayKey(event.StartAt), 7200, event.StartAt)
-	p.ListeningSnapshot = model.ActivityListeningSnapshot{BaselineDay: SectDayKey(event.StartAt), BaselineSeconds: baseline}
+	priorDay := SectDayKey(event.StartAt)
+	inputs, err := json.Marshal(map[string]activityDailyListeningInput{priorDay: {Seconds: baseline + 600}})
+	contributionMust(t, err)
+	p.ListeningSnapshot = model.ActivityListeningSnapshot{BaselineDay: priorDay, BaselineSeconds: baseline, DailyInputJSON: string(inputs)}
 	contributionMust(t, storage.DB.Save(&event).Error)
 	contributionMust(t, storage.DB.Save(&p).Error)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("day") != SectDayKey(event.EndAt) {
+			t.Errorf("unexpected listening date: %s", r.URL)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 999999, "days": map[string]float64{
-			SectDayKey(event.StartAt): baseline + 600, SectDayKey(event.EndAt): 300,
+			priorDay: baseline + 1800, SectDayKey(event.EndAt): 300,
 			SectDayKey(event.StartAt.AddDate(0, 0, -1)): 86400, SectDayKey(event.EndAt.AddDate(0, 0, 1)): 86400,
 		}})
 	})

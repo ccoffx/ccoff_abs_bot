@@ -55,11 +55,12 @@ func startBackgroundJobs(bot *tgbotapi.BotAPI) {
 		}
 	}()
 
-	log.Println("✅ 后台任务调度器已启动：播放异常风控每日北京时间 00:10 后执行；备份与生命周期任务每日 03:00 后执行。")
+	log.Println("✅ 后台任务调度器已启动：每日北京时间 00:00 收尾昨日听书；播放异常风控每日北京时间 00:10 后执行；备份与生命周期任务每日 03:00 后执行。")
 }
 
 // Listening must not wait for backups, account lifecycle scans or abuse scans.
 func startListeningBackgroundJobs(bot *tgbotapi.BotAPI) {
+	go runListeningDayCloseScheduler()
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -111,6 +112,29 @@ func startListeningBackgroundJobs(bot *tgbotapi.BotAPI) {
 			<-ticker.C
 		}
 	}()
+}
+
+func runListeningDayCloseScheduler() {
+	for {
+		started := time.Now().In(storage.DailyOperationsLocation)
+		next := time.Date(started.Year(), started.Month(), started.Day()+1, 0, 0, 0, 0, started.Location())
+		if err := closePreviousListeningDaySafely(started); err != nil {
+			log.Printf("昨日听书收尾失败: %s", textfmt.FormatPlainError(err))
+			if retryAt := time.Now().Add(time.Minute); retryAt.Before(next) {
+				next = retryAt
+			}
+		}
+		time.Sleep(time.Until(next))
+	}
+}
+
+func closePreviousListeningDaySafely(now time.Time) (err error) {
+	defer func() {
+		if fault := recover(); fault != nil {
+			err = fmt.Errorf("昨日听书收尾调度异常: %v", fault)
+		}
+	}()
+	return game.ClosePreviousListeningDay(now)
 }
 
 func runBackgroundSchedulerTickSafely(bot *tgbotapi.BotAPI) {

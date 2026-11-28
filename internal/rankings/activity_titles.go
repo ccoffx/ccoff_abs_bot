@@ -63,13 +63,14 @@ func ActivityTitleCandidates(db *gorm.DB, now time.Time) ([]model.RankTitleHolde
 	candidates := make([]model.RankTitleHolder, 0, len(queries))
 	for _, q := range queries {
 		var result struct {
-			UserID   int64
-			UserName string
-			Score    float64
+			UserID      int64
+			UserName    string
+			DisplayName string
+			Score       float64
 		}
-		err := q.query.Select("users.telegram_id AS user_id, users.username AS user_name, " + q.score + " AS score").
+		err := q.query.Select("users.telegram_id AS user_id, users.username AS user_name, users.display_name, " + q.score + " AS score").
 			Where("users.deleted_at IS NULL AND users.telegram_id > 0").
-			Group("users.telegram_id, users.username").Having(q.score + " > 0").
+			Group("users.telegram_id, users.username, users.display_name").Having(q.score + " > 0").
 			Order(clause.OrderBy{Expression: clause.Expr{
 				SQL:  "score DESC, CASE WHEN users.telegram_id = (SELECT user_id FROM rank_title_holders WHERE title_key = ? AND period_key = ?) THEN 0 ELSE 1 END, users.telegram_id ASC",
 				Vars: []any{q.key, q.period},
@@ -77,7 +78,7 @@ func ActivityTitleCandidates(db *gorm.DB, now time.Time) ([]model.RankTitleHolde
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
-		candidates = append(candidates, model.RankTitleHolder{TitleKey: q.key, UserID: result.UserID, UserName: result.UserName, PeriodKey: q.period, Score: result.Score})
+		candidates = append(candidates, model.RankTitleHolder{TitleKey: q.key, UserID: result.UserID, UserName: (model.User{TelegramID: result.UserID, Username: result.UserName, DisplayName: result.DisplayName}).DisplayLabel(), PeriodKey: q.period, Score: result.Score})
 	}
 	return candidates, nil
 }
@@ -107,6 +108,13 @@ func BossTitleCandidate(db *gorm.DB, now time.Time) (model.RankTitleHolder, erro
 		}}).Take(&next).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		err = nil
+	}
+	if err == nil && next.UserID > 0 {
+		var user model.User
+		if err := db.Where("telegram_id = ?", next.UserID).Take(&user).Error; err != nil {
+			return next, err
+		}
+		next.UserName = user.DisplayLabel()
 	}
 	return next, err
 }

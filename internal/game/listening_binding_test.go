@@ -29,7 +29,7 @@ func TestListeningRefreshRejectsBindingChangedDuringABSRequest(t *testing.T) {
 			}
 			var once sync.Once
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if strings.HasSuffix(r.URL.Path, "/listening-days") {
 					if !backfill {
 						once.Do(func() {
 							if err := storage.DB.Model(&model.User{}).Where("telegram_id = 1").Update("abs_user_id", "replacement").Error; err != nil {

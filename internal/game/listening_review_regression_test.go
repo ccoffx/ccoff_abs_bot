@@ -15,10 +15,10 @@ import (
 
 func TestDailyAndReportSnapshotRollBackTogether(t *testing.T) {
 	setupRetreatBackfillDB(t)
-	start := time.Now().In(storage.DailyOperationsLocation).AddDate(0, 0, -2)
+	start := time.Now().In(storage.DailyOperationsLocation)
 	day := SectDayKey(start)
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 3600, "days": map[string]float64{day: 3600}})
 			return
 		}

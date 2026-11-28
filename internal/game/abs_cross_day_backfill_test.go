@@ -35,7 +35,7 @@ func TestHistoricalBackfillRecordsRetreatBeyondRecentFivePages(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			fmt.Fprint(w, `{"days":{"2026-10-26":28800}}`)
 			return
 		}
@@ -68,9 +68,10 @@ func TestHistoricalBackfillRecordsRetreatBeyondRecentFivePages(t *testing.T) {
 	}))
 	defer server.Close()
 	abs.DefaultClient = &abs.AbsClient{BaseURL: server.URL, Token: "test", HttpClient: server.Client()}
-	if _, ok := RefreshDailyListeningStatsFromABS(1, "abs1"); !ok {
-		t.Fatal("normal refresh failed")
-	}
+	// Historical ordinary credit has already been saved. The evidence backfill
+	// must still find the closed retreat on a later page.
+	_, err := recordOfficialDailyListeningStats(1, "abs1", map[string]float64{SectDayKey(start): 28800}, time.Now())
+	contributionMust(t, err)
 	assertTotal := func(want float64) {
 		t.Helper()
 		total, ok := totalCultivationEffectiveHoursFromDailyStats(1, start.AddDate(0, 0, 2))

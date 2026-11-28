@@ -31,7 +31,7 @@ func TestExternalListeningRefreshWaitsBeforeFetchingDuringBatch(t *testing.T) {
 			done := make(chan error, 1)
 			today := SectDayKey(time.Now())
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if !strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if !strings.HasSuffix(r.URL.Path, "/listening-days") {
 					fmt.Fprint(w, `{"sessions":[],"mediaProgress":[]}`)
 					return
 				}

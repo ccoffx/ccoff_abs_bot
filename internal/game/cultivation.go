@@ -1072,6 +1072,7 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 	type RankResult struct {
 		UserID              int64
 		Username            string
+		DisplayName         string
 		SectName            string
 		MajorRealm          int
 		MinorRealm          int
@@ -1084,7 +1085,7 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 	var results []RankResult
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		if err := rankings.Cultivation(tx).
-			Select("cultivations.user_id, users.username, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time, COALESCE(sects.owner_id = cultivations.user_id, 0) AS is_sect_owner").
+			Select("cultivations.user_id, users.username, users.display_name, sects.name as sect_name, cultivations.major_realm, cultivations.minor_realm, cultivations.total_audio_time, cultivations.pill_audio_time, COALESCE(sects.owner_id = cultivations.user_id, 0) AS is_sect_owner").
 			Joins("left join sect_members on sect_members.user_id = cultivations.user_id and sect_members.deleted_at is null").
 			Joins("left join sects on sects.id = sect_members.sect_id and sects.deleted_at is null").
 			Limit(10).
@@ -1140,7 +1141,7 @@ func HandleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
 		dummyCul := &model.Cultivation{MajorRealm: r.MajorRealm, MinorRealm: r.MinorRealm}
 		realmName := GetRealmName(dummyCul)
 
-		displayName := cultivationRankDisplayName(r.Username, r.SectName)
+		displayName := cultivationRankDisplayName((model.User{TelegramID: r.UserID, Username: r.Username, DisplayName: r.DisplayName}).DisplayLabel(), r.SectName)
 
 		totalShow := r.TotalAudioTime + r.PillAudioTime
 

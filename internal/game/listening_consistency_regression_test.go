@@ -144,7 +144,7 @@ func TestBookProgressDoesNotHoldListeningBatchBarrier(t *testing.T) {
 	today := SectDayKey(time.Now())
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/listening-stats"):
+		case strings.HasSuffix(r.URL.Path, "/listening-days"):
 			if statsRequests.Add(1) > 1 {
 				personalStarted <- struct{}{}
 			}

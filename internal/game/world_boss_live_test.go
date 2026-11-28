@@ -226,7 +226,9 @@ func TestWorldBossPreviewWriteFailureRollsBackWholeRound(t *testing.T) {
 	event := worldBossLiveFixture(t, 2)
 	contributionMust(t, storage.DB.Model(&event).Update("current_hp", 96).Error)
 	contributionMust(t, storage.DB.Model(&model.WorldBossParticipant{}).Where("boss_id = ?", event.BossID).Update("damage", 12).Error)
-	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"totalTime":0,"days":{}}`) })
+	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"days":{%q:0}}`, r.URL.Query().Get("day"))
+	})
 	var writes atomic.Int32
 	contributionMust(t, storage.DB.Callback().Update().Before("gorm:update").Register("fail_boss_preview", func(tx *gorm.DB) {
 		if tx.Statement.Table != "world_boss_participants" {
@@ -303,12 +305,12 @@ func TestWorldBossFirstJoinOnlyFetchesOwnBaselineOnce(t *testing.T) {
 	var requests atomic.Int32
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if !strings.HasSuffix(r.URL.Path, "/abs2/listening-stats") {
+		if !strings.HasSuffix(r.URL.Path, "/abs2/listening-days") {
 			t.Errorf("join fetched another account or a session page: %s", r.URL.Path)
 			w.WriteHeader(503)
 			return
 		}
-		fmt.Fprint(w, `{"totalTime":3600,"days":{}}`)
+		fmt.Fprintf(w, `{"totalTime":3600,"days":{%q:0}}`, r.URL.Query().Get("day"))
 	})
 	bot, replies := secretRealmQueryBot(t)
 	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 2}, Chat: &tgbotapi.Chat{ID: 2, Type: "private"}}

@@ -55,32 +55,64 @@ func writeOfficial(t *testing.T, days map[string]float64) {
 	_, err := recordOpenOfficialTestDay(1, "abs1", days, time.Now())
 	contributionMust(t, err)
 }
-func TestOfficialDailyRefreshDoesNotRequestSessions(t *testing.T) {
+func TestOfficialDailyRefreshKeepsSavedValueAndTimeWhenRequestedDayIsMissing(t *testing.T) {
 	setupRetreatBackfillDB(t)
-	day := SectDayKey(time.Now().AddDate(0, 0, -1))
-	var stats, sessions atomic.Int32
+	now := time.Now()
+	day := SectDayKey(now)
+	_, err := recordCurrentListeningDay(1, "abs1", 60, now)
+	contributionMust(t, err)
+	before := officialStat(t, day)
+
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
-			stats.Add(1)
-			fmt.Fprintf(w, `{"days":{%q:26590}}`, day)
+		if r.URL.Query().Get("day") != day {
+			t.Errorf("unexpected listening date: %s", r.URL)
+		}
+		fmt.Fprint(w, `{"days":{}}`)
+	})
+	if _, ok := refreshDailyListeningStatsFromABS(1, "abs1", true); ok {
+		t.Fatal("missing date was reported as a successful refresh")
+	}
+	after := officialStat(t, day)
+	if after.RawSeconds != before.RawSeconds || !after.LastFetchedAt.Equal(before.LastFetchedAt) {
+		t.Fatalf("missing date changed a saved report: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestOfficialDailyRefreshRequestsOnlyTodayAndLeavesPreviousDayForClosing(t *testing.T) {
+	setupRetreatBackfillDB(t)
+	now := time.Now()
+	today, yesterday := SectDayKey(now), SectDayKey(now.AddDate(0, 0, -1))
+	writeOfficial(t, map[string]float64{yesterday: 3600})
+	history := officialStat(t, yesterday)
+	todaySeconds := dailyListeningCreditSeconds(today, 60, now)
+	var stats atomic.Int32
+	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/listening-days") || r.URL.Query().Get("day") != today {
+			t.Errorf("unexpected listening refresh: %s", r.URL)
+			w.WriteHeader(503)
 			return
 		}
-		sessions.Add(1)
-		w.WriteHeader(503)
+		stats.Add(1)
+		fmt.Fprintf(w, `{"days":{%q:%f,%q:26590}}`, today, todaySeconds, yesterday)
 	})
 	for i := 0; i < 3; i++ {
 		days, ok := refreshDailyListeningStatsFromABS(1, "abs1", true)
-		if !ok || days[day] != 26590 {
+		if !ok || math.Abs(days[today]-todaySeconds) > 1e-6 {
 			t.Fatalf("refresh=%v %v", days, ok)
 		}
 	}
-	if sessions.Load() != 0 || stats.Load() != 3 {
-		t.Fatalf("stats=%d sessions=%d", stats.Load(), sessions.Load())
+	if stats.Load() != 3 {
+		t.Fatalf("stats=%d", stats.Load())
 	}
-	if got, want := officialTotal(t), calculateSectEffectiveHoursFromSeconds(26590); math.Abs(got-want) > 1e-9 {
+	frozen := officialStat(t, yesterday)
+	if frozen.Archived != history.Archived || frozen.RawSeconds != history.RawSeconds || !frozen.LastFetchedAt.Equal(history.LastFetchedAt) {
+		t.Fatalf("history changed: before=%+v after=%+v", history, frozen)
+	}
+	if got, want := officialTotal(t), history.EffectiveHours+calculateSectEffectiveHoursFromSeconds(todaySeconds); math.Abs(got-want) > 1e-9 {
 		t.Fatalf("%g != %g", got, want)
 	}
 }
+
 func TestOfficialDailyRetainsDecreasesAndMissingHistoryAndSupplementsGrowth(t *testing.T) {
 	setupRetreatBackfillDB(t)
 	day := SectDayKey(time.Now().AddDate(0, 0, -3))

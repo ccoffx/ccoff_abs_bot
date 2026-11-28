@@ -35,7 +35,7 @@ type dailyListeningValidation struct {
 }
 
 // Unobserved history retains its official budget. Known sessions can only
-// replace that budget, never add playback on top of listening-stats.days.
+// replace that budget, never add playback on top of listening-days.days.
 // This also works while the resumable historical scanner is still running.
 func validateDailyListeningCredit(official, adjusted map[string]float64, sessions []absListeningSession, now time.Time) *dailyListeningValidation {
 	result := &dailyListeningValidation{Official: official, Seconds: make(map[string]float64), Details: make(map[string]dailyListeningValidationDetail)}

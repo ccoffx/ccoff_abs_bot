@@ -31,7 +31,7 @@ func TestDailyListeningRecomputesDatesWithoutStoredAllocations(t *testing.T) {
 					if changed.Load() && correction != "moved" {
 						seconds = 0
 					}
-					if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+					if strings.HasSuffix(r.URL.Path, "/listening-days") {
 						days := map[string]float64{otherDay: 900}
 						if seconds > 0 {
 							days[source] = seconds

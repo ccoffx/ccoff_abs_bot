@@ -28,7 +28,7 @@ func TestManualListeningRefreshBypassesFreshCache(t *testing.T) {
 	var requests atomic.Int32
 	today := SectDayKey(time.Now())
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			seconds := requests.Add(1) * 60
 			fmt.Fprintf(w, `{"days":{%q:%d}}`, today, seconds)
 			return
@@ -71,7 +71,7 @@ func TestLateCrossDayReportCorrectsBothDaysAndPreservesOnFailure(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(oldWriter) })
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		mode := phase.Load()
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			seconds := 61338.942 + 2328.233
 			if mode == 0 || mode == 3 {
 				seconds = 10666.337

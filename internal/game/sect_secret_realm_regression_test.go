@@ -54,7 +54,7 @@ func secretRealmSettlementFixture(t *testing.T, users int) model.SectSecretRealm
 }
 
 func secretRealmSessionResponse(w http.ResponseWriter, r *http.Request, event model.SectSecretRealmEvent, after bool) {
-	if strings.HasSuffix(r.URL.Path, "listening-stats") {
+	if strings.HasSuffix(r.URL.Path, "listening-days") {
 		_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{SectDayKey(event.StartAt): 3600}})
 		return
 	}
@@ -75,7 +75,7 @@ func TestSecretRealmMockUsesBusinessDayAcrossTimeZones(t *testing.T) {
 	for _, start := range []time.Time{at, at.In(storage.DailyOperationsLocation)} {
 		t.Run(start.Location().String(), func(t *testing.T) {
 			response := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodGet, "/api/users/abs1/listening-stats", nil)
+			request := httptest.NewRequest(http.MethodGet, "/api/users/abs1/listening-days", nil)
 			secretRealmSessionResponse(response, request, model.SectSecretRealmEvent{StartAt: start}, false)
 			var stats struct {
 				Days map[string]float64 `json:"days"`
@@ -144,7 +144,7 @@ func TestSecretRealmDailyProgressCapsAtParticipationWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{
 				SectDayKey(p.CreatedAt): 86400,
 				SectDayKey(event.EndAt): 86400,

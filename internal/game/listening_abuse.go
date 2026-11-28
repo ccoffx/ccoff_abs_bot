@@ -87,7 +87,11 @@ func runListeningAbuseMonitorIfNeeded(bot *tgbotapi.BotAPI, currentTime func() t
 		return
 	}
 
-	warnings, freezes, skipped, err := scanListeningAbuseForDay(bot, scanDay, now)
+	var warnings, freezes, skipped int
+	err = seedListeningDayCloses(now)
+	if err == nil {
+		warnings, freezes, skipped, err = scanListeningAbuseForDay(bot, scanDay, now)
+	}
 	if err != nil {
 		storage.SetSystemConfigError(storage.ListeningAbuseLastErrorKey, err)
 		log.Printf("listening abuse scan failed: day=%s err=%s", textfmt.FormatPlainValue(scanDay), textfmt.FormatPlainError(err))
@@ -250,8 +254,17 @@ func listeningAbuseShouldFreeze(rawHours float64, previousRawHours float64) bool
 // Use exactly the saved raw seconds displayed by the listening report. Closed
 // days must not be reinterpreted through session timestamps during a scan.
 func savedListeningAbuseDays(userID int64, absUserID string, dayKey, previousKey string) (map[string]float64, error) {
+	var waiting int64
+	if err := storage.DB.Model(&model.ListeningDayClose{}).
+		Where("user_id = ? AND abs_user_id = ? AND day_key IN ? AND status = ?", userID, absUserID, []string{dayKey, previousKey}, "pending").
+		Count(&waiting).Error; err != nil {
+		return nil, err
+	}
+	if waiting > 0 {
+		return nil, fmt.Errorf("LISTENING_ABUSE_DAY_CLOSE_PENDING")
+	}
 	var stats []model.DailyListeningStat
-	if err := storage.DB.Select("day_key", "raw_seconds", "last_fetched_at").
+	if err := storage.DB.Select("day_key", "raw_seconds", "last_fetched_at", "archived", "official_policy").
 		Where("user_id = ? AND abs_user_id = ? AND day_key IN ?", userID, absUserID, []string{dayKey, previousKey}).
 		Where("EXISTS (SELECT 1 FROM users WHERE users.telegram_id = ? AND users.abs_user_id = ? AND users.deleted_at IS NULL)", userID, absUserID).
 		Find(&stats).Error; err != nil {
@@ -259,6 +272,9 @@ func savedListeningAbuseDays(userID int64, absUserID string, dayKey, previousKey
 	}
 	days := make(map[string]float64, len(stats))
 	for _, stat := range stats {
+		if stat.OfficialPolicy && !stat.Archived {
+			return nil, fmt.Errorf("LISTENING_ABUSE_DAY_CLOSE_PENDING: %s", stat.DayKey)
+		}
 		if stat.LastFetchedAt.IsZero() {
 			continue
 		}
@@ -277,7 +293,7 @@ func scanListeningAbuseForDay(bot *tgbotapi.BotAPI, dayKey string, now time.Time
 	}
 
 	var users []model.User
-	if err := storage.DB.Select("telegram_id", "username", "abs_user_id", "expire_at", "is_suspended", "is_whitelist", "role", "status").
+	if err := storage.DB.Select("telegram_id", "username", "display_name", "abs_user_id", "expire_at", "is_suspended", "is_whitelist", "role", "status").
 		Where("abs_user_id <> '' AND is_whitelist = ? AND role <> ?", false, "super_admin").
 		Where("status = ?", "active").
 		Find(&users).Error; err != nil {
@@ -592,7 +608,7 @@ func sendListeningAbuseGroupFreezeNotice(bot *tgbotapi.BotAPI, u model.User, day
 		return nil
 	}
 
-	name := textfmt.EscapeMarkdown(u.Username)
+	name := textfmt.EscapeMarkdown(u.DisplayLabel())
 	if name == "" {
 		name = strconv.FormatInt(u.TelegramID, 10)
 	}

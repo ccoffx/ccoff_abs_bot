@@ -46,7 +46,7 @@ func TestDeletedCrossDaySessionRecoversAndClearsOldAllocation(t *testing.T) {
 			ordinary["date"] = source
 			var deleted atomic.Bool
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if strings.HasSuffix(r.URL.Path, "/listening-days") {
 					days := map[string]float64{source: 7200 + remaining, today: 60}
 					if deleted.Load() {
 						days = map[string]float64{today: 600}
@@ -96,7 +96,7 @@ func TestMissingCrossDaySourceCannotOverwriteCorrectedToday(t *testing.T) {
 			session, source, today := recoveryCrossDaySession()
 			var omitSource atomic.Bool
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if strings.HasSuffix(r.URL.Path, "/listening-days") {
 					days := map[string]float64{source: 7200}
 					if omitSource.Load() {
 						days = map[string]float64{}
@@ -130,7 +130,7 @@ func TestMissingSourceAllowsAbuseEvidenceWithoutWritingDailyCache(t *testing.T) 
 	session, source, today := recoveryCrossDaySession()
 	var omitSource atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			days := map[string]float64{source: 7200}
 			if omitSource.Load() {
 				days = map[string]float64{today: 60}
@@ -164,7 +164,7 @@ func TestSameDayAbuseEvidenceWithMismatchedSourceStatistics(t *testing.T) {
 			day := SectDayKey(start)
 			var mismatch atomic.Bool
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if strings.HasSuffix(r.URL.Path, "/listening-days") {
 					days := map[string]float64{day: 86400}
 					if tc.missingHistory {
 						days[day] += 3600
@@ -242,7 +242,7 @@ func TestPersonalReportUsesCorrectedCacheWhenRefreshFails(t *testing.T) {
 					var fail atomic.Bool
 					bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 						switch {
-						case strings.HasSuffix(r.URL.Path, "/listening-stats"):
+						case strings.HasSuffix(r.URL.Path, "/listening-days"):
 							payload := map[string]any{"totalTime": 7200, "days": map[string]float64{source: 7200}}
 							if fail.Load() && failure == "snapshot" {
 								payload["days"] = map[string]float64{source: 3600}
@@ -293,7 +293,7 @@ func TestPersonalReportWithoutCacheWaitsForBackgroundSynchronization(t *testing.
 	_, source, _ := recoveryCrossDaySession()
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/listening-stats"):
+		case strings.HasSuffix(r.URL.Path, "/listening-days"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 7200, "days": map[string]float64{source: 7200}})
 		case strings.HasSuffix(r.URL.Path, "/listening-sessions"):
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -320,7 +320,7 @@ func TestHistoricalDeletionReconciliationResumesAndCommitsAtomically(t *testing.
 	ordinary["date"] = source
 	var deleted, failLastPage atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			days := map[string]float64{source: 10800, today: 60}
 			if deleted.Load() {
 				days[source], days[today] = 3600, 500
@@ -492,7 +492,7 @@ func TestSessionCorrectedToSameDayClearsCrossDayAllocation(t *testing.T) {
 	session, source, today := recoveryCrossDaySession()
 	var corrected atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			days := map[string]float64{source: 7200}
 			if corrected.Load() {
 				days = map[string]float64{today: 7200}

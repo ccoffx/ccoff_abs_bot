@@ -15,6 +15,13 @@ current_image() { [ ! -f .release.env ] || sed -n 's/^BOT_IMAGE=//p' .release.en
 check_pin() { [[ "$1" =~ ^[a-z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || die 'Invalid pinned image.'; }
 version_ok() { [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Use a version such as v1.0.1; latest is not accepted.'; }
 
+# Check the new image's ABS dependency before taking the current Bot offline.
+deployment_preflight() {
+  docker run --rm --platform "$PLATFORM" --network bridge --read-only --user 0:0 --security-opt no-new-privileges:true \
+    --mount "type=bind,src=$ROOT/.env,dst=/app/.env,readonly" \
+    --entrypoint /app/ccoff-abs-bot "$1" maintenance preflight
+}
+
 # Maintenance runs offline as root to read a host-owned 0600 .env and restore
 # app-owned SQLite files. Backups are returned to the invoking host user's UID.
 maintenance() {
@@ -122,7 +129,7 @@ case "$command" in
     required=$(( $(du -sk data | awk '{print $1}') * 4 + 102400 ))
     available=$(df -Pk "$ROOT" | awk 'END {print $4}')
     [ "$available" -ge "$required" ] || die 'Insufficient free space for a verified backup.'
-    maintenance "$pin" preflight
+    deployment_preflight "$pin" || die 'Deployment preflight failed before stopping the current Bot.'
     if [ -n "$old" ]; then compose stop ccoff_abs_bot; fi
     if [ -f data/bot_data.db ]; then
       # Backup failure occurs before selecting the new image; keep the old

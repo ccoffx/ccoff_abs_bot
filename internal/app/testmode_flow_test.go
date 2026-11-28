@@ -52,12 +52,12 @@ func TestSandboxPrivateCommandsSeedOnceAndControlMock(t *testing.T) {
 	if err := storage.DB.Where("telegram_id = ?", 99).First(&user).Error; err != nil || user.Points != 1000 || !security.VerifySensitiveToken("TestSecurity123!", user.SecurityCode) {
 		t.Fatalf("seed changed: %+v %v", user, err)
 	}
-	if _, code, _ := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(user.AbsUserID), nil); code != 500 {
+	if _, code, _ := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningDaysPath(user.AbsUserID, ""), nil); code != 500 {
 		t.Fatal("fault not injected")
 	}
 	message.Text = "/test failure off"
 	handleTestCommand(bot, message)
-	if body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(user.AbsUserID), nil); err != nil || code != 200 || !strings.Contains(string(body), "9000") {
+	if body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningDaysPath(user.AbsUserID, ""), nil); err != nil || code != 200 || !strings.Contains(string(body), "9000") {
 		t.Fatalf("listening data missing: %s %v", body, err)
 	}
 	config.AppConfig.AppEnv = "production"

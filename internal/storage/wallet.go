@@ -69,7 +69,7 @@ func ApplyPointDeltaInTx(
 	}
 
 	var afterUser model.User
-	if err := tx.Select("telegram_id", "username", "points").
+	if err := tx.Select("telegram_id", "username", "display_name", "points").
 		Where("telegram_id = ?", userID).
 		First(&afterUser).Error; err != nil {
 		return err
@@ -80,7 +80,7 @@ func ApplyPointDeltaInTx(
 
 	txRes := tx.Create(&model.PointTransaction{
 		UserID:        userID,
-		UserName:      afterUser.Username,
+		UserName:      afterUser.DisplayLabel(),
 		Type:          txType,
 		Delta:         delta,
 		BalanceBefore: beforePoints,

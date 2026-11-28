@@ -92,10 +92,11 @@ func refreshRankTitlesWithListeningInTx(tx *gorm.DB, now time.Time, completedLis
 		return err
 	}
 	var cultivation struct {
-		UserID   int64
-		UserName string
+		UserID      int64
+		UserName    string
+		DisplayName string
 	}
-	if err := rankings.Cultivation(tx).Select("cultivations.user_id, users.username AS user_name").Take(&cultivation).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := rankings.Cultivation(tx).Select("cultivations.user_id, users.username AS user_name, users.display_name").Take(&cultivation).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
 	var sect model.Sect
@@ -109,9 +110,9 @@ func refreshRankTitlesWithListeningInTx(tx *gorm.DB, now time.Time, completedLis
 		}
 	}
 	candidates := []model.RankTitleHolder{
-		{TitleKey: rankings.WealthTitle, UserID: wealth.TelegramID, UserName: wealth.Username},
-		{TitleKey: rankings.CultivationTitle, UserID: cultivation.UserID, UserName: cultivation.UserName},
-		{TitleKey: rankings.SectTitle, UserID: owner.TelegramID, UserName: owner.Username, SubjectID: sect.ID},
+		{TitleKey: rankings.WealthTitle, UserID: wealth.TelegramID, UserName: wealth.DisplayLabel()},
+		{TitleKey: rankings.CultivationTitle, UserID: cultivation.UserID, UserName: (model.User{TelegramID: cultivation.UserID, Username: cultivation.UserName, DisplayName: cultivation.DisplayName}).DisplayLabel()},
+		{TitleKey: rankings.SectTitle, UserID: owner.TelegramID, UserName: owner.DisplayLabel(), SubjectID: sect.ID},
 	}
 	activityCandidates, err := rankings.ActivityTitleCandidates(tx, now)
 	if err != nil {

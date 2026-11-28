@@ -27,7 +27,7 @@ func TestDailyListeningClearWithOlderStatisticsCannotIncreaseCredit(t *testing.T
 			var rawHours atomic.Int64
 			rawHours.Store(18 + unseenHours)
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if strings.HasSuffix(r.URL.Path, "/listening-days") {
 					_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{day: float64(rawHours.Load()) * 3600}})
 					return
 				}
@@ -173,7 +173,7 @@ func TestDailyListeningMismatchedBudgetDoesNotSilentlyUndercountUnion(t *testing
 	var stage atomic.Int64
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		i := stage.Load()
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{day: float64(8+4*i) * 3600}})
 			return
 		}
@@ -214,7 +214,7 @@ func TestDailyListeningBackfillCorrectionRequiresMatchingStatistics(t *testing.T
 	var cleared, failStats, caughtUp atomic.Bool
 	var statsCalls atomic.Int64
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			statsCalls.Add(1)
 			if failStats.Load() {
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -290,7 +290,7 @@ func TestDailyListeningSourceRepairFindsNewHistoryOutsideRecentPages(t *testing.
 	day := SectDayKey(start)
 	var hidden atomic.Bool
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			seconds := 12.0 * 3600
 			if hidden.Load() {
 				seconds += 7200
@@ -361,7 +361,7 @@ func TestDailyListeningDeletedCrossDaySessionRejectsLaterStaleTotal(t *testing.T
 	var stage atomic.Int64
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		i := stage.Load()
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			days := map[string]float64{}
 			if i != 1 {
 				days[source] = 7200

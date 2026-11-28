@@ -1,22 +1,19 @@
 package game
 
 import (
-	"ccoff-abs-bot/internal/textfmt"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"ccoff-abs-bot/internal/abs"
+	"ccoff-abs-bot/internal/textfmt"
 )
 
 // Historical session-ledger tests exercise the retained evidence algorithms for
 // abuse/retreats independently of the official-daily cultivation policy. This
-// harness deliberately materializes estimated days for assertions only; the
-// production abuse path never writes them into ordinary cultivation rows.
+// harness deliberately materializes estimated days for assertions only.
 func refreshSessionEvidenceForTest(userID int64, absID string, force bool, abuseDays ...string) (map[string]float64, bool) {
-	if len(abuseDays) > 0 {
-		return refreshDailyListeningStatsFromABS(userID, absID, force, abuseDays...)
-	}
-	if !force {
+	if !force && len(abuseDays) == 0 {
 		if days, ok := cachedDailyListeningDaysWithinTTL(userID, absID, time.Now()); ok {
 			return days, true
 		}
@@ -26,7 +23,7 @@ func refreshSessionEvidenceForTest(userID int64, absID string, force bool, abuse
 	defer func() {
 		logDailyListeningRefresh(userID, absID, force, started, time.Since(started), 200, outcome, failure)
 	}()
-	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absID), nil)
+	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningDaysPath(absID, ""), nil)
 	if err != nil || code != 200 {
 		return nil, false
 	}
@@ -36,10 +33,18 @@ func refreshSessionEvidenceForTest(userID int64, absID string, force bool, abuse
 	if json.Unmarshal(body, &stats) != nil || stats.Days == nil {
 		return nil, false
 	}
-	days, corrected, _, validation, err := prepareDailyListeningDaysChecked(userID, absID, stats.Days, started)
+	days, corrected, sessions, validation, err := prepareDailyListeningDaysChecked(userID, absID, stats.Days, started)
 	if err != nil {
 		outcome, failure = "correction_failed", textfmt.FormatPlainError(err)
+		var mismatch *absCrossDaySnapshotMismatchError
+		if len(abuseDays) > 0 && errors.As(err, &mismatch) && mismatch.OnlyMissingSourceDays &&
+			recordSectRetreatListeningSessions(userID, absID, sessions) == nil {
+			return listeningAbuseProvenDays(sessions, abuseDays), true
+		}
 		return nil, false
+	}
+	if len(abuseDays) > 0 {
+		return listeningAbuseProvenDays(sessions, abuseDays), true
 	}
 	if recordPreparedDailyListeningStatsWithReport(userID, absID, days, corrected, started, true, validation) != nil {
 		return nil, false

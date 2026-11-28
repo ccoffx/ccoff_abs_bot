@@ -68,6 +68,29 @@ func entryTestFixture(t *testing.T, kind string) (string, int64, *tgbotapi.Messa
 	}
 }
 
+func TestActivityEntryRetriesWhenABSDoesNotReturnRequestedDay(t *testing.T) {
+	for _, kind := range []string{activityEntryBoss, activityEntryRealm} {
+		t.Run(kind, func(t *testing.T) {
+			eventID, userID, _, submit := entryTestFixture(t, kind)
+			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("day") != SectDayKey(time.Now()) {
+					t.Errorf("unexpected listening date: %s", r.URL)
+				}
+				fmt.Fprint(w, `{"days":{}}`)
+			})
+			bot, _ := secretRealmQueryBot(t)
+			submit(bot)
+			waitActivityEntries(t)
+			var entry model.ActivityEntryRequest
+			contributionMust(t, storage.DB.First(&entry, "kind = ? AND event_id = ? AND user_id = ?", kind, eventID, userID).Error)
+			if entry.Status != "pending" || entry.Attempts != 1 || entry.NextAttemptAt == nil ||
+				!strings.Contains(entry.LastError, "ABS_DAILY_MISSING_DAY") {
+				t.Fatalf("missing date did not trigger a retry: %+v", entry)
+			}
+		})
+	}
+}
+
 func TestActivityEntryReturnsBeforeABSAndDeduplicatesPendingAndJoined(t *testing.T) {
 	for _, kind := range []string{activityEntryBoss, activityEntryRealm} {
 		t.Run(kind, func(t *testing.T) {

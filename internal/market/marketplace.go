@@ -482,13 +482,13 @@ func createMarketplaceSecretListing(sellerID int64, sellerName string, name stri
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		var txListingID uint
 		var seller model.User
-		if err := tx.Select("telegram_id", "username").
+		if err := tx.Select("telegram_id", "username", "display_name").
 			Where("telegram_id = ?", sellerID).
 			First(&seller).Error; err != nil {
 			return err
 		}
 		if strings.TrimSpace(sellerName) == "" {
-			sellerName = seller.Username
+			sellerName = seller.DisplayLabel()
 		}
 		if err := ensureMarketplaceSecretListingRealmTx(tx, sellerID); err != nil {
 			return err
@@ -914,13 +914,13 @@ func createMarketplaceInventoryListing(sellerID int64, sellerName string, itemNa
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		var txListingID uint
 		var seller model.User
-		if err := tx.Select("telegram_id", "username").
+		if err := tx.Select("telegram_id", "username", "display_name").
 			Where("telegram_id = ?", sellerID).
 			First(&seller).Error; err != nil {
 			return err
 		}
 		if strings.TrimSpace(sellerName) == "" {
-			sellerName = seller.Username
+			sellerName = seller.DisplayLabel()
 		}
 
 		if originalValue, ok := marketplaceInventoryOriginalValue(itemName); ok {

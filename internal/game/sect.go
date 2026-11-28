@@ -2866,7 +2866,7 @@ func finishStartSectCaveRetreat(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mem
 		return
 	}
 
-	preparationErrors := captureActivitySnapshotBatch(len(targets), func(i int) error {
+	preparationErrors := runListeningSyncBatch(len(targets), func(i int) error {
 		var err error
 		targets[i].Base, err = getUserTodayBonusListeningSeconds(targets[i].User.TelegramID, targets[i].User.AbsUserID, now)
 		return err
@@ -3468,23 +3468,26 @@ func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map
 
 	records := make([]model.DailyListeningStat, 0, len(daySet))
 	for dayKey := range daySet {
-		rawSeconds := rawOfficialByDay[dayKey]
-		cappedSeconds := dailyListeningCreditSeconds(dayKey, rawSeconds, recordedAt)
-		records = append(records, model.DailyListeningStat{
-			UserID:             userID,
-			AbsUserID:          strings.TrimSpace(absUserID),
-			DayKey:             dayKey,
-			RawSeconds:         rawSeconds,
-			OfficialRawSeconds: rawSeconds,
-			CappedSeconds:      cappedSeconds,
-			EffectiveHours:     calculateSectEffectiveHoursFromSeconds(cappedSeconds),
-			LastFetchedAt:      fetchedAt,
-			Source:             "abs_days",
-			FetchStatus:        "ok",
-			RefreshReason:      "abs_refresh",
-		})
+		records = append(records, newOfficialDailyListeningRecord(userID, absUserID, dayKey, rawOfficialByDay[dayKey], fetchedAt, recordedAt))
 	}
 	return records
+}
+
+func newOfficialDailyListeningRecord(userID int64, absUserID, day string, rawSeconds float64, fetchedAt, recordedAt time.Time) model.DailyListeningStat {
+	cappedSeconds := dailyListeningCreditSeconds(day, rawSeconds, recordedAt)
+	return model.DailyListeningStat{
+		UserID:             userID,
+		AbsUserID:          strings.TrimSpace(absUserID),
+		DayKey:             day,
+		RawSeconds:         rawSeconds,
+		OfficialRawSeconds: rawSeconds,
+		CappedSeconds:      cappedSeconds,
+		EffectiveHours:     calculateSectEffectiveHoursFromSeconds(cappedSeconds),
+		LastFetchedAt:      fetchedAt,
+		Source:             "abs_days",
+		FetchStatus:        "ok",
+		RefreshReason:      "abs_refresh",
+	}
 }
 
 func getTodayDailyListeningStat(userID int64, now time.Time) (model.DailyListeningStat, bool) {
@@ -3575,31 +3578,31 @@ func RefreshDailyListeningStatsFromABS(userID int64, absUserID string) (map[stri
 	return refreshDailyListeningStatsFromABS(userID, absUserID, false)
 }
 
-func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force bool, abuseDays ...string) (map[string]float64, bool) {
+func refreshDailyListeningStatsFromABS(userID int64, absUserID string, force bool) (map[string]float64, bool) {
 	waitStarted := time.Now()
 	listeningRefreshMu.RLock()
 	defer listeningRefreshMu.RUnlock()
 	if waited := time.Since(waitStarted); waited >= time.Second {
 		logDailyListeningDiagnostic("refresh_wait", userID, absUserID, map[string]any{"lock_wait_ms": waited.Milliseconds()})
 	}
-	return refreshDailyListeningStatsFromABSUnlocked(userID, absUserID, force, abuseDays...)
+	return refreshDailyListeningStatsFromABSUnlocked(userID, absUserID, force)
 }
 
 // Callers must hold listeningRefreshMu for the entire fetch and write.
-func refreshDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, force bool, abuseDays ...string) (map[string]float64, bool) {
-	if !force && len(abuseDays) == 0 {
+func refreshDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, force bool) (map[string]float64, bool) {
+	if !force {
 		started := time.Now()
 		if days, ok := cachedDailyListeningDaysWithinTTL(userID, absUserID, started); ok {
 			logDailyListeningRefresh(userID, absUserID, false, started, 0, 0, "cache_hit", "")
 			return days, true
 		}
 	}
-	result := coalesceListeningFetch(fmt.Sprintf("stats:%d:%q:%q", userID, absUserID, abuseDays), func() listeningFetchResult {
+	result := coalesceListeningFetch(fmt.Sprintf("stats:%d:%q", userID, absUserID), func() listeningFetchResult {
 		if !acquireListeningSyncSlot() {
 			return listeningFetchResult{}
 		}
 		defer releaseListeningSyncSlot()
-		days, ok := fetchDailyListeningStatsFromABSUnlocked(userID, absUserID, true, abuseDays...)
+		days, ok := fetchDailyListeningStatsFromABSUnlocked(userID, absUserID, true)
 		return listeningFetchResult{days: days, ok: ok}
 	})
 	// A caller may adjust its returned map; never share mutable maps between
@@ -3614,7 +3617,7 @@ func refreshDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, f
 	return days, result.ok
 }
 
-func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, force bool, abuseDays ...string) (map[string]float64, bool) {
+func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, force bool) (map[string]float64, bool) {
 	startedAt := time.Now()
 	outcome, failure := "not_ready", ""
 	statusCode := 0
@@ -3622,19 +3625,19 @@ func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, for
 	defer func() {
 		logDailyListeningRefresh(userID, absUserID, force, startedAt, statsDuration, statusCode, outcome, failure)
 	}()
-	forAbuse := len(abuseDays) > 0
 	if storage.DB == nil || abs.DefaultClient == nil || userID == 0 || strings.TrimSpace(absUserID) == "" {
 		return nil, false
 	}
 
-	if !force && !forAbuse {
+	if !force {
 		if days, ok := cachedDailyListeningDaysWithinTTL(userID, absUserID, time.Now()); ok {
 			outcome = "cache_hit"
 			return days, true
 		}
 	}
 
-	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
+	day := SectDayKey(startedAt)
+	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningDaysPath(absUserID, day), nil)
 	statsDuration = time.Since(startedAt)
 	statusCode = code
 	if err != nil || code != 200 {
@@ -3644,48 +3647,20 @@ func fetchDailyListeningStatsFromABSUnlocked(userID int64, absUserID string, for
 		return nil, false
 	}
 
-	stats, err := parseOfficialListeningStats(body)
+	seconds, err := abs.ParseListeningDay(body, day)
 	if err != nil {
 		outcome, failure = "stats_parse_failed", textfmt.FormatPlainError(err)
 		log.Printf("每日听书 ABS 统计解析失败: user=%d err=%s", userID, textfmt.FormatPlainError(err))
 		return nil, false
 	}
 
-	if !forAbuse {
-		days, err := recordOfficialDailyListeningStats(userID, absUserID, stats.Days, startedAt)
-		if err != nil {
-			outcome, failure = "write_failed", textfmt.FormatPlainError(err)
-			return nil, false
-		}
-		outcome = "updated"
-		return days, true
-	}
-	// Order concurrent responses by request start, so an older request cannot
-	// overwrite a more recent snapshot just because its response arrived later.
-	fetchedAt := startedAt
-	adjustedDays, correctedDays, sessions, validation, correctionErr := prepareDailyListeningDaysChecked(userID, absUserID, stats.Days, fetchedAt)
-	if correctionErr != nil {
-		outcome, failure = "correction_failed", textfmt.FormatPlainError(correctionErr)
-		log.Printf("每日听书跨日修正失败: user=%d err=%s", userID, textfmt.FormatPlainError(correctionErr))
-		var mismatch *absCrossDaySnapshotMismatchError
-		if forAbuse && errors.As(correctionErr, &mismatch) && mismatch.OnlyMissingSourceDays {
-			// Penalties already use guaranteed session lower bounds independently
-			// of official day assignment. Preserve that behavior when days omits a
-			// source key, while leaving every daily cache row and timestamp intact.
-			if err := recordSectRetreatListeningSessions(userID, absUserID, sessions); err == nil {
-				outcome = "evidence_only"
-				return listeningAbuseProvenDays(sessions, abuseDays), true
-			} else {
-				failure = textfmt.FormatPlainError(err)
-			}
-		}
+	days, err := recordCurrentListeningDay(userID, absUserID, seconds, startedAt)
+	if err != nil {
+		outcome, failure = "write_failed", textfmt.FormatPlainError(err)
 		return nil, false
 	}
-	_ = adjustedDays
-	_ = correctedDays
-	_ = validation
-	outcome = "evidence_only"
-	return listeningAbuseProvenDays(sessions, abuseDays), true
+	outcome = "updated"
+	return days, true
 }
 
 func refreshSectMembersDailyListeningStats(sectID int64, limit int) int {

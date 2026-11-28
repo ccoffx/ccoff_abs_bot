@@ -306,11 +306,16 @@ func processActivityEntry(bot *tgbotapi.BotAPI, id uint) {
 			return
 		}
 		r.Attempts++
-		stats, requestedAt, sampledAt, err = fetchActivityListeningStats(r.AbsUserID)
+		requestedAt = time.Now()
+		stats, sampledAt, err = fetchActivityListeningStats(r.AbsUserID, requestedAt)
 	}()
 	log.Printf("活动入场采样: request=%d kind=%s event=%s attempts=%d duration_ms=%d err=%s", r.ID, r.Kind, textfmt.FormatPlainValue(r.EventID), r.Attempts, time.Since(started).Milliseconds(), textfmt.FormatPlainError(err))
 	if err != nil {
 		retryActivityEntry(r, err)
+		return
+	}
+	if SectDayKey(requestedAt) != SectDayKey(sampledAt) {
+		retryActivityEntry(r, errors.New("听书基线跨日，需要重新采样"))
 		return
 	}
 	if !sampledAt.Before(r.DeadlineAt) {
@@ -329,7 +334,7 @@ func processActivityEntry(bot *tgbotapi.BotAPI, id uint) {
 	baseline := newActivityListeningSnapshot(stats.Days, sampledAt)
 	baseHours := 0.0
 	if r.Kind == activityEntryRealm {
-		credited, recordErr := recordOfficialDailyListeningStats(r.UserID, r.AbsUserID, stats.Days, requestedAt)
+		credited, recordErr := recordCurrentListeningDay(r.UserID, r.AbsUserID, stats.Days[SectDayKey(requestedAt)], requestedAt)
 		if recordErr != nil {
 			retryActivityEntry(r, recordErr)
 			return

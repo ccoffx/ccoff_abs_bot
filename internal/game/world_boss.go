@@ -587,7 +587,7 @@ func settleWorldBoss(bot *tgbotapi.BotAPI, bossID string) {
 		return
 	}
 	event.MaxHP = calculateWorldBossMaxHP(len(participants))
-	snapshotErrors := captureActivitySnapshotBatch(len(participants), func(i int) error {
+	snapshotErrors := runListeningSyncBatch(len(participants), func(i int) error {
 		p := &participants[i]
 		var current model.User
 		if err := storage.DB.Where("telegram_id = ?", p.UserID).First(&current).Error; err != nil {

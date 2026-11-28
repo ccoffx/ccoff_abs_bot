@@ -256,12 +256,12 @@ func (m *MockTransport) handle(r *http.Request) (int, any) {
 		}
 		if len(parts) == 4 && r.Method == "GET" {
 			switch parts[3] {
-			case "listening-stats":
-				total := 0.0
-				for _, v := range u.Days {
-					total += v
+			case "listening-days":
+				days := u.Days
+				if day := r.URL.Query().Get("day"); day != "" {
+					days = map[string]float64{day: u.Days[day]}
 				}
-				return 200, map[string]any{"totalTime": total, "days": u.Days, "items": map[string]any{}}
+				return 200, map[string]any{"days": days}
 			case "listening-sessions":
 				return 200, map[string]any{"total": 0, "sessions": []any{}}
 			}

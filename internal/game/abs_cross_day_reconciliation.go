@@ -38,7 +38,7 @@ func (e *absCrossDayReconciliationEvidence) observe(sessions []absListeningSessi
 	for _, session := range sessions {
 		delete(e.MissingSessions, session.SessionKey)
 		day := strings.TrimSpace(session.DateKey)
-		// ABS excludes explicit null durations from listening-stats. Such a
+		// ABS excludes explicit null durations from listening-days. Such a
 		// session proves its ID is present but contributes no playback. Do not
 		// treat it as a zero correction of an already known positive session.
 		if session.ListeningTimeNull && validDailyListeningDayKey(day) {
@@ -84,7 +84,7 @@ func invalidateMissingABSCrossDaySessionsInTx(tx *gorm.DB, userID int64, absUser
 	for _, row := range rows {
 		// A concurrent request may have supplied newer evidence during the scan.
 		// Absence is actionable only when the complete source-day sum agrees with
-		// listening-stats; a temporarily empty/partial API response cannot erase it.
+		// listening-days; a temporarily empty/partial API response cannot erase it.
 		if !row.ObservedAt.Before(startedAt) || row.SourceDay != evidence.MissingSessions[row.SessionKey] ||
 			math.Abs(evidence.DaySeconds[row.SourceDay]-abs.PositiveListeningSeconds(days[row.SourceDay])) > 1e-6 {
 			continue
@@ -159,7 +159,7 @@ func scheduleABSListeningReconciliationEvidence(userID int64, absUserID string, 
 }
 
 func fetchABSCrossDayReconciliationDays(absUserID string) (map[string]float64, error) {
-	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningStatsPath(absUserID), nil)
+	body, code, err := abs.DefaultClient.SendRequest("GET", abs.AbsUserListeningDaysPath(absUserID, ""), nil)
 	if err != nil {
 		return nil, err
 	}

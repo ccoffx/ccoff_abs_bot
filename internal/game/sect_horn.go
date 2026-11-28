@@ -61,8 +61,9 @@ func createSectHornDeliveriesInTx(tx *gorm.DB, deliveries []model.SectHornDelive
 }
 
 type sectHornRecipient struct {
-	UserID   int64
-	UserName string
+	UserID      int64
+	UserName    string
+	DisplayName string
 }
 
 type sectHornPreview struct {
@@ -669,20 +670,28 @@ func querySectHornRecipientsTx(tx *gorm.DB, scope string, sectID int64) ([]sectH
 	switch scope {
 	case sectHornScopeSect:
 		err := tx.Table("sect_members AS sm").
-			Select("sm.user_id AS user_id, COALESCE(NULLIF(u.username, ''), sm.user_name) AS user_name").
+			Select("sm.user_id AS user_id, COALESCE(NULLIF(u.username, ''), sm.user_name) AS user_name, u.display_name").
 			Joins("JOIN users AS u ON u.telegram_id = sm.user_id AND u.deleted_at IS NULL").
 			Where("sm.sect_id = ? AND sm.deleted_at IS NULL", sectID).
 			Where("u.status = ? AND u.is_suspended = ?", "active", false).
 			Order("sm.joined_at ASC").
 			Scan(&recipients).Error
+		for i := range recipients {
+			r := &recipients[i]
+			r.UserName = (model.User{TelegramID: r.UserID, Username: r.UserName, DisplayName: r.DisplayName}).DisplayLabel()
+		}
 		return dedupeSectHornRecipients(recipients), err
 	case sectHornScopeWorld:
 		err := tx.Model(&model.User{}).
-			Select("telegram_id AS user_id, username AS user_name").
+			Select("telegram_id AS user_id, username AS user_name, display_name").
 			Where("abs_user_id <> ''").
 			Where("status = ? AND is_suspended = ?", "active", false).
 			Order("telegram_id ASC").
 			Scan(&recipients).Error
+		for i := range recipients {
+			r := &recipients[i]
+			r.UserName = (model.User{TelegramID: r.UserID, Username: r.UserName, DisplayName: r.DisplayName}).DisplayLabel()
+		}
 		return dedupeSectHornRecipients(recipients), err
 	default:
 		return nil, storage.ErrSectHornInvalidScope

@@ -51,12 +51,11 @@ func TestMockAccountLifecycleAndPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, _ = mockClient(t, path)
-	data, code, err := c.SendRequest("GET", AbsUserListeningStatsPath(id), nil)
+	data, code, err := c.SendRequest("GET", AbsUserListeningDaysPath(id, "2026-10-28"), nil)
 	var stats struct {
-		Total float64            `json:"totalTime"`
-		Days  map[string]float64 `json:"days"`
+		Days map[string]float64 `json:"days"`
 	}
-	if err != nil || code != 200 || json.Unmarshal(data, &stats) != nil || stats.Total != 12600 || stats.Days["2026-10-28"] != 9000 {
+	if err != nil || code != 200 || json.Unmarshal(data, &stats) != nil || len(stats.Days) != 1 || stats.Days["2026-10-28"] != 9000 {
 		t.Fatalf("stats: %s %v", data, err)
 	}
 	if err := c.SetUserActiveStatus(id, false); err != nil {

@@ -77,7 +77,7 @@ func TestOfficialListeningSyncLoadsOnlyChangedHistory(t *testing.T) {
 	// The secret-realm path must consume this incremental result, without an
 	// additional full-history reconstruction after the official source write.
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"days": days})
+		_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{r.URL.Query().Get("day"): 0}})
 	})
 	loaded = 0
 	snapshot, err := fetchSectSecretRealmListeningSnapshotFromABS("abs1")

@@ -158,7 +158,7 @@ func EnsureListeningFresh(userID int64) ListeningFreshness {
 	if state.Fresh {
 		return state
 	}
-	coalesceListeningFetchIfIdle(fmt.Sprintf("stats:%d:%q:%q", userID, user.AbsUserID, []string(nil)), func() listeningFetchResult {
+	coalesceListeningFetchIfIdle(fmt.Sprintf("stats:%d:%q", userID, user.AbsUserID), func() listeningFetchResult {
 		if !listeningSyncSlots.acquire(listeningRequestNormal, "", 0) {
 			return listeningFetchResult{}
 		}

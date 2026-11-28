@@ -51,7 +51,7 @@ func isABSListeningReduction(old, current model.ABSCrossDaySessionAdjustment) bo
 
 // A known reduction must not turn the previous session's budget into unseen
 // history. Verify it before replacing the observation, so a failed check can
-// be retried with the same evidence after listening-stats catches up.
+// be retried with the same evidence after listening-days catches up.
 func validateABSListeningReductionsInTx(tx *gorm.DB, previous, incoming []model.ABSCrossDaySessionAdjustment, budgets []map[string]float64) error {
 	oldByKey := make(map[string]model.ABSCrossDaySessionAdjustment, len(previous))
 	for _, row := range previous {

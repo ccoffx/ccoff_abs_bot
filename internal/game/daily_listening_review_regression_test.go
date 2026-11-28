@@ -132,7 +132,7 @@ func TestSplitCorrectionAcrossPagesResumesWithoutChangingPriorCredit(t *testing.
 			fmt.Fprint(w, `{"sessions":[]}`)
 			return
 		}
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{day: 12 * 3600}})
 			return
 		}
@@ -238,7 +238,7 @@ func TestBackfillMismatchBacksOffAndRescansEarlierPages(t *testing.T) {
 			fmt.Fprint(w, `{"sessions":[]}`)
 			return
 		}
-		if strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "/listening-days") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"days": map[string]float64{day: 43200}})
 			return
 		}

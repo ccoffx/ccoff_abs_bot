@@ -140,6 +140,7 @@ func InitDB() {
 		&model.SectWeeklyTaskSettlement{},
 		&model.SectListeningDailyProgress{},
 		&model.DailyListeningStat{},
+		&model.ListeningDayClose{},
 		&model.ListeningReportSnapshot{},
 		&model.ABSCrossDaySessionAdjustment{},
 		&model.ABSCrossDaySessionScanCursor{},

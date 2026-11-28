@@ -69,8 +69,12 @@ func AbsUserPath(absUserID string) string {
 	return "/api/users/" + url.PathEscape(absUserID)
 }
 
-func AbsUserListeningStatsPath(absUserID string) string {
-	return AbsUserPath(absUserID) + "/listening-stats"
+func AbsUserListeningDaysPath(absUserID, day string) string {
+	path := AbsUserPath(absUserID) + "/listening-days"
+	if day != "" {
+		path += "?day=" + url.QueryEscape(day)
+	}
+	return path
 }
 
 func AbsUserListeningSessionsPath(absUserID string, page int, itemsPerPage int) string {

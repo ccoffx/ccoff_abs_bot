@@ -149,6 +149,25 @@ Bot 需要在 `NOTICE_GROUP_ID` 对应的超级群中拥有“添加管理员”
 
 超级管理员可在私聊管理面板的“系统配置”或“卡密续期”中查看、关闭或开启回收，也可发送 `卡密回收状态`、`关闭卡密回收`、`开启卡密回收`。修改时按提示回复 `确认关闭卡密回收` 或 `确认开启卡密回收`；发送 `取消` 退出。默认开启，保存后立即生效，重启后保留，并记录审计。关闭期间此前取得的报价也不能继续成交，正常注册、续期、积分兑换和交易行不受影响。
 
+## Audiobookshelf 每日汇总接口
+
+升级时先解压本次发布的部署包，以使用带 ABS 检查的 `deploy.sh`。从部署包取出 `scripts/audiobookshelf/listening-days.cjs`，先在 ABS 启用该模块，再更新 Bot。这一模块已用 Audiobookshelf 2.37.2 验证。模块沿用 ABS 自身的用户鉴权，并在 ABS 数据库内聚合指定日期的时长。ABS 客户端原有接口保留，Bot 通过 `GET /api/users/:id/listening-days?day=YYYY-MM-DD` 取北京时间当日汇总。
+
+如果 ABS 已通过 Compose 挂载只读的 `./policy:/opt/abs-policy`，把文件放进 ABS 部署目录的 `policy/`，然后在 ABS 的 `NODE_OPTIONS` 中追加 `--require=/opt/abs-policy/listening-days.cjs`，保留已有选项。创建按用户、日期查询的索引，再重建 ABS 容器。以下命令在 ABS 的 Compose 目录执行，服务名按实际配置替换。
+
+```sh
+docker compose exec -T audiobookshelf node -e '
+  const { DatabaseSync } = require("node:sqlite");
+  const db = new DatabaseSync("/config/absdatabase.sqlite");
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("CREATE INDEX IF NOT EXISTS bot_playback_sessions_user_day ON playbackSessions (userId, date)");
+  db.close();
+'
+docker compose up -d audiobookshelf
+```
+
+在 Bot 配置的 ABS 地址上，用 Bot 已有的 ABS 凭证查询一个已绑定账号的当天日期。响应应是 HTTP 200 和 `{"days":{"YYYY-MM-DD":秒数}}`，当天没有播放时为数字零。使用新的 ABS 镜像版本时也先验证此接口，再部署 Bot。
+
 ## 日常更新与状态
 
 ```sh
@@ -157,11 +176,11 @@ Bot 需要在 `NOTICE_GROUP_ID` 对应的超级群中拥有“添加管理员”
 ./deploy.sh logs
 ```
 
-更新先拉取镜像并固定 digest，再检查配置、数据库兼容标识及备份空间，随后停止旧实例、创建并校验加密一致性备份、启动新版本。备份会复制到已配置的外部目录；副本失败时返回错误，保留本地备份。
+更新先拉取镜像并固定 digest，再检查配置、数据库兼容标识及备份空间。候选镜像通过生产 ABS 地址和模板账号，验证当天的汇总接口与鉴权。检查通过后停止旧实例、创建并校验加密一致性备份、启动新版本。备份会复制到已配置的外部目录；副本失败时返回错误，保留本地备份。
 
 最多等待 180 秒，要求进程存在、SQLite 可读并且最近 120 秒内成功完成过 Telegram 轮询。启动阶段文件不作为运行健康证明。网络持续不可用也会导致健康检查失败；Docker 的 `unless-stopped` 不会仅因为 unhealthy 自动重启容器。
 
-拉取或兼容检查失败时，原实例继续运行。停止旧实例之后失败，脚本保持现场并退出；启动检查失败时还会保存日志并停止新实例。它不会自动恢复数据库，也不会在新旧实例之间反复切换。查看 `status`、`deploy-state/history.tsv`、失败日志和最近备份，再选择恢复操作。
+拉取、兼容或 ABS 接口检查失败时，原实例继续运行。停止旧实例之后失败，脚本保持现场并退出；启动检查失败时还会保存日志并停止新实例。它不会自动恢复数据库，也不会在新旧实例之间反复切换。查看 `status`、`deploy-state/history.tsv`、失败日志和最近备份，再选择恢复操作。
 
 操作通过目录锁互斥。进程被强制终止可能留下 `deploy-state/.lock`，确认没有维护任务运行后再手动移除。不要并行执行额外的 `docker compose up` 绕过此锁。
 

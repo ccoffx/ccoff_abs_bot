@@ -25,6 +25,7 @@ func seedDeletedAccountProgressTest(t *testing.T) {
 	}
 	for _, id := range []int64{2, 3} {
 		for _, row := range []any{
+			&model.ListeningDayClose{UserID: id, AbsUserID: fmt.Sprintf("abs-%d", id), DayKey: "2026-11-01", Status: "pending"},
 			&model.Cultivation{UserID: id, MajorRealm: 5, MinorRealm: 8, TotalAudioTime: 1000, PillAudioTime: 100},
 			&model.DailyListeningStat{UserID: id, AbsUserID: fmt.Sprintf("abs-%d", id), DayKey: "2026-11-01", CappedSeconds: 3600, EffectiveHours: 1},
 			&model.ABSCrossDaySessionScanCursor{UserID: id, AbsUserID: fmt.Sprintf("abs-%d", id)},
@@ -83,7 +84,7 @@ func TestAccountDeletionPreventsProgressInheritance(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for _, source := range []any{&model.Cultivation{}, &model.DailyListeningStat{}, &model.ABSCrossDaySessionScanCursor{}, &model.ABSCrossDaySessionAdjustment{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}, &model.WorldBossParticipant{}, &model.GardenPlot{}, &model.GardenProgress{}, &model.GardenRecipeUnlock{}, &model.Inventory{}, &model.GardenSeedPurchase{}, &model.GardenHerbMarketSale{}, &model.SectCaveRetreat{}, &model.SectOwnerBonusRevision{}} {
+			for _, source := range []any{&model.Cultivation{}, &model.DailyListeningStat{}, &model.ListeningDayClose{}, &model.ABSCrossDaySessionScanCursor{}, &model.ABSCrossDaySessionAdjustment{}, &model.GardenPlanting{}, &model.GardenAlchemyRecord{}, &model.WorldBossParticipant{}, &model.GardenPlot{}, &model.GardenProgress{}, &model.GardenRecipeUnlock{}, &model.Inventory{}, &model.GardenSeedPurchase{}, &model.GardenHerbMarketSale{}, &model.SectCaveRetreat{}, &model.SectOwnerBonusRevision{}} {
 				var count int64
 				if err := storage.DB.Model(source).Where("user_id = ?", 2).Count(&count).Error; err != nil || count != 0 {
 					t.Fatalf("deleted account source %T remains: %d %v", source, count, err)

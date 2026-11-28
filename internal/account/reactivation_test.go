@@ -163,7 +163,7 @@ func TestTrialTaskBackfillRestoresExpiredABSAccount(t *testing.T) {
 	}
 	var patches atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "listening-stats") {
+		if strings.HasSuffix(r.URL.Path, "listening-days") {
 			fmt.Fprint(w, `{"days":{}}`)
 			return
 		}

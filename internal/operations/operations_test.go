@@ -2,11 +2,15 @@ package operations
 
 import (
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"ccoff-abs-bot/internal/abs"
 )
 
 func createDB(t *testing.T) (string, *sql.DB) {
@@ -120,5 +124,41 @@ func TestDatabaseWithoutMarkerMustBeEmpty(t *testing.T) {
 	}
 	if err := CheckCompatibility(db); err == nil {
 		t.Fatal("existing unmarked database accepted")
+	}
+}
+
+func TestListeningDaysPreflight(t *testing.T) {
+	now := time.Date(2026, 11, 28, 16, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, body, wantError string
+		status                int
+	}{
+		{"explicit zero", `{"days":{"2026-11-29":0}}`, "", http.StatusOK},
+		{"missing date", `{"days":{"2026-11-28":600}}`, "ABS_DAILY_MISSING_DAY: 2026-11-29", http.StatusOK},
+		{"null", `{"days":{"2026-11-29":null}}`, "ABS_DAILY_INVALID_VALUE: 2026-11-29", http.StatusOK},
+		{"malformed response", `{"days":[0]}`, "ABS_DAILY_INVALID_RESPONSE", http.StatusOK},
+		{"unauthorized", "", "HTTP 401", http.StatusUnauthorized},
+		{"missing endpoint", "", "HTTP 404", http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/users/template/listening-days" ||
+					r.URL.Query().Get("day") != "2026-11-29" || r.Header.Get("Authorization") != "Bearer test-token" {
+					t.Errorf("unexpected preflight request: %s %s", r.Method, r.URL)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			client := &abs.AbsClient{BaseURL: server.URL, Token: "test-token", HttpClient: server.Client()}
+			err := checkListeningDaysEndpoint(client, "template", now)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("want %q, got %v", tc.wantError, err)
+			}
+		})
 	}
 }

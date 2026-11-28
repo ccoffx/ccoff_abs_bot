@@ -120,6 +120,10 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 	monthPrefix := localNow.AddDate(0, -1, 0).Format("2006-01")
 
 	userTimeMap := make(map[string]float64)
+	userLabels := make(map[string]string, len(users))
+	for _, user := range users {
+		userLabels[strconv.FormatInt(user.TelegramID, 10)] = user.DisplayLabel()
+	}
 	// 🚨 升级1：将单一的时长 Map 升级为多维度的结构体 Map
 	bookStatsMap := make(map[string]*BookStat)
 	statsSuccess := 0
@@ -152,7 +156,7 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 			}
 			if cultivationHours > 0 {
 				dataMu.Lock()
-				userTimeMap[user.Username] += cultivationHours
+				userTimeMap[strconv.FormatInt(user.TelegramID, 10)] += cultivationHours
 				dataMu.Unlock()
 			}
 
@@ -204,7 +208,7 @@ func GenerateAndSendLeaderboard(bot *tgbotapi.BotAPI, timeframe string, now time
 		finalMsg += "✨ **净修为排行榜**\n"
 		medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"}
 		for i, kv := range userTop {
-			finalMsg += fmt.Sprintf("%s **%s** - `%.2f` 小时\n", medals[i], textfmt.EscapeMarkdown(kv.Key), kv.Value)
+			finalMsg += fmt.Sprintf("%s **%s** - `%.2f` 小时\n", medals[i], textfmt.EscapeMarkdown(userLabels[kv.Key]), kv.Value)
 		}
 	} else {
 		finalMsg += "✨ **净修为排行榜**\n🫙 本周期内暂无净修为记录...\n"

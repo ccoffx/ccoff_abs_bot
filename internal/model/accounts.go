@@ -1,6 +1,8 @@
 package model
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -24,6 +26,21 @@ type User struct {
 	TrialEndsAt    *time.Time
 	IsSuspended    bool `gorm:"default:false"` // 记录该账号是否已被系统封禁
 	AdminSuspended bool `gorm:"default:false"` // 管理员封禁不能被续期、转正或补偿解除
+}
+
+// DisplayLabel returns a public name without exposing internal wallet placeholders.
+// Account identity and login checks must continue to use Username.
+func (u User) DisplayLabel() string {
+	for _, value := range []string{u.DisplayName, u.Username} {
+		name := strings.TrimSpace(value)
+		if name != "" && !strings.HasPrefix(strings.TrimPrefix(name, "@"), "ghost_tg_") {
+			return name
+		}
+	}
+	if u.TelegramID != 0 {
+		return fmt.Sprintf("道友%d", u.TelegramID)
+	}
+	return "未知用户"
 }
 
 type InviteCode struct {

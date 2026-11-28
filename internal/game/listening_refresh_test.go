@@ -34,7 +34,7 @@ func TestListeningBatchIsolatesConcurrentPersonalRefreshUntilPublication(t *test
 	personalDone := make(chan error, 1)
 	today := SectDayKey(time.Now())
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if !strings.HasSuffix(r.URL.Path, "/listening-days") {
 			fmt.Fprint(w, `{"sessions":[]}`)
 			return
 		}
@@ -130,7 +130,7 @@ func TestListeningBatchPublishesOnlyAfterAllAccountsSucceed(t *testing.T) {
 	var phase, requests atomic.Int32
 	today := SectDayKey(time.Now())
 	bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/listening-stats") {
+		if !strings.HasSuffix(r.URL.Path, "/listening-days") {
 			fmt.Fprint(w, `{"sessions":[]}`)
 			return
 		}

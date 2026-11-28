@@ -13,7 +13,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-func TestActivityDailyCreditMatchesOrdinaryAcrossMissingDatesAndArchive(t *testing.T) {
+func TestActivityDailyCreditFreezesSavedHistoryAtMidnight(t *testing.T) {
 	setupRetreatBackfillDB(t)
 	start := time.Date(2026, 11, 20, 23, 0, 0, 0, storage.DailyOperationsLocation)
 	baseline := map[string]float64{"2026-11-20": 1800}
@@ -27,12 +27,12 @@ func TestActivityDailyCreditMatchesOrdinaryAcrossMissingDatesAndArchive(t *testi
 		{0, baseline, 0},
 		{30 * time.Minute, map[string]float64{"2026-11-20": 2400}, 600},
 		{65 * time.Minute, map[string]float64{"2026-11-21": 300}, 900},
-		{75 * time.Minute, map[string]float64{"2026-11-20": 3000, "2026-11-21": 600}, 1800},
-		{90 * time.Minute, map[string]float64{"2026-11-20": 9000, "2026-11-21": 900, "2000-01-01": 999999}, 2100},
-		{105 * time.Minute, map[string]float64{"2026-11-20": 15000, "2026-11-21": 300}, 2100},
+		{75 * time.Minute, map[string]float64{"2026-11-21": 600}, 1200},
+		{90 * time.Minute, map[string]float64{"2026-11-21": 900}, 1500},
+		{105 * time.Minute, map[string]float64{"2026-11-21": 300}, 1500},
 	} {
 		at := start.Add(step.elapsed)
-		credited, err := recordOfficialDailyListeningStatsAt(1, "abs1", step.days, at, at)
+		credited, err := recordListeningDays(1, "abs1", step.days, at, at, true)
 		contributionMust(t, err)
 		progress, err = advanceActivityListeningDays(step.days, at, at, start, progress, &snapshot)
 		contributionMust(t, err)
@@ -115,7 +115,7 @@ func TestBossAndSecretRealmUseTheSameDailyDelta(t *testing.T) {
 				}
 			}
 			bossEvidenceServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if !strings.HasSuffix(r.URL.Path, "/listening-stats") {
+				if !strings.HasSuffix(r.URL.Path, "/listening-days") {
 					t.Errorf("unexpected history request: %s", r.URL.Path)
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"totalTime": 999999999, "days": map[string]float64{SectDayKey(start): 1800, "2000-01-01": 999999}})

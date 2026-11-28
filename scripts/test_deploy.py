@@ -88,6 +88,12 @@ def fake_docker(args):
             return 0
         index = cmd.index("maintenance")
         cmd = cmd[index:]
+        # The authenticated probe itself is covered by the Go HTTP tests.
+        if cmd == ["maintenance", "preflight"]:
+            if state.get("preflight_fail"):
+                print("ABS listening-days preflight: HTTP 404", file=sys.stderr)
+                return 1
+            return 0
         if os.environ.get("BOT_TEST_DOCKER_IMAGE"):
             return subprocess.run([
                 os.environ["REAL_DOCKER"], "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp", "--user", f"{os.getuid()}:{os.getgid()}",
@@ -199,6 +205,21 @@ class DeploymentRehearsal(unittest.TestCase):
         self.assertTrue(self.state()["running"])
         self.run_deploy("rollback", "v1.0.1", success=False)
         self.assertTrue(self.state()["running"])
+
+    def test_failed_abs_probe_leaves_current_bot_running(self):
+        self.run_deploy("update", "v1.0.0")
+        before = len(self.state(preflight_fail=True)["calls"])
+        result = self.run_deploy("update", "v1.0.1", success=False)
+        after = self.state()
+        calls = after["calls"][before:]
+        self.assertIn("ABS listening-days preflight: HTTP 404", result.stderr)
+        self.assertTrue(after["running"])
+        self.assertEqual(after["version"], "v1.0.0")
+        self.assertIn("BOT_VERSION=v1.0.0", (self.root / ".release.env").read_text())
+        self.assertFalse(any(call[0] == "compose" and "stop" in call for call in calls))
+        probe = next(call for call in calls if "preflight" in call)
+        self.assertEqual(probe[probe.index("--network") + 1], "bridge")
+        self.assertFalse(any("dst=/app/data" in arg for arg in probe))
 
     def test_cached_rollback_does_not_need_registry(self):
         self.run_deploy("update", "v1.0.0")

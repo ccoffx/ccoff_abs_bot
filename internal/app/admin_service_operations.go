@@ -319,6 +319,7 @@ func openRegistrationStatusText(now time.Time) string {
 type compensationRecipient struct {
 	TelegramID  int64
 	Username    string
+	DisplayName string
 	AbsUserID   string
 	ExpireAt    *time.Time
 	IsSuspended bool
@@ -333,7 +334,7 @@ func createCompensationCampaign(actorID int64, points int, days int, announcemen
 		return model.CompensationCampaign{}, fmt.Errorf("COMPENSATION_ANNOUNCEMENT_INVALID")
 	}
 	var recipients []compensationRecipient
-	if err := storage.DB.Model(&model.User{}).Select("telegram_id", "username", "abs_user_id", "expire_at", "is_suspended").Where("telegram_id <> ?", 0).Order("id ASC").Scan(&recipients).Error; err != nil {
+	if err := storage.DB.Model(&model.User{}).Select("telegram_id", "username", "display_name", "abs_user_id", "expire_at", "is_suspended").Where("telegram_id <> ?", 0).Order("id ASC").Scan(&recipients).Error; err != nil {
 		return model.CompensationCampaign{}, err
 	}
 	if len(recipients) == 0 {
@@ -345,7 +346,7 @@ func createCompensationCampaign(actorID int64, points int, days int, announcemen
 	}
 	grants := make([]model.CompensationGrant, 0, len(recipients))
 	for _, u := range recipients {
-		grants = append(grants, model.CompensationGrant{CampaignID: campaign.CampaignID, UserID: u.TelegramID, UserName: u.Username, Points: points, Days: days, Status: compensationGrantPending})
+		grants = append(grants, model.CompensationGrant{CampaignID: campaign.CampaignID, UserID: u.TelegramID, UserName: (model.User{TelegramID: u.TelegramID, Username: u.Username, DisplayName: u.DisplayName}).DisplayLabel(), Points: points, Days: days, Status: compensationGrantPending})
 	}
 	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&campaign).Error; err != nil {

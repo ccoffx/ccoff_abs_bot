@@ -12,6 +12,33 @@ import (
 	"ccoff-abs-bot/internal/titles"
 )
 
+// Bound ABS batch concurrency and leave one worker slot for interactive work.
+func runListeningSyncBatch(count int, work func(int) error) []error {
+	errors := make([]error, count)
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(listeningSyncWorkers-1, count) {
+		workers.Go(func() {
+			for i := range jobs {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							errors[i] = fmt.Errorf("listening sync panic: %s", textfmt.FormatPlainValue(r))
+						}
+					}()
+					errors[i] = work(i)
+				}()
+			}
+		})
+	}
+	for i := range count {
+		jobs <- i
+	}
+	close(jobs)
+	workers.Wait()
+	return errors
+}
+
 // A batch owns the write lock through title publication. Other ABS refresh
 // paths take a read lock, so individual refreshes can still run concurrently
 // with each other, but cannot replace batch data before it is published.

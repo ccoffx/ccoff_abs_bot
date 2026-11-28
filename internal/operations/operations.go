@@ -1,5 +1,5 @@
-// Package operations provides offline maintenance without Telegram, schedulers,
-// configuration validation for the Bot, or automatic business migrations.
+// Package operations provides deployment checks and offline database
+// maintenance without Telegram, schedulers or automatic business migrations.
 package operations
 
 import (
@@ -18,9 +18,11 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 
+	"ccoff-abs-bot/internal/abs"
 	"ccoff-abs-bot/internal/backup"
 	"ccoff-abs-bot/internal/buildinfo"
 	"ccoff-abs-bot/internal/config"
+	"ccoff-abs-bot/internal/storage"
 )
 
 type VersionInfo struct {
@@ -323,6 +325,21 @@ func Health(database string, now time.Time) error {
 	return nil
 }
 
+func checkListeningDaysEndpoint(client *abs.AbsClient, userID string, now time.Time) error {
+	day := now.In(storage.DailyOperationsLocation).Format(time.DateOnly)
+	body, status, err := client.SendRequest("GET", abs.AbsUserListeningDaysPath(userID, day), nil)
+	if err != nil {
+		return fmt.Errorf("ABS listening-days preflight: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("ABS listening-days preflight: HTTP %d", status)
+	}
+	if _, err := abs.ParseListeningDay(body, day); err != nil {
+		return fmt.Errorf("ABS listening-days preflight: %w", err)
+	}
+	return nil
+}
+
 // RunCLI returns handled=false for the normal Bot entry point.
 func RunCLI(args []string) (handled bool, err error) {
 	if len(args) == 0 {
@@ -355,7 +372,7 @@ func RunCLI(args []string) (handled bool, err error) {
 		if config.AppConfig.IsTest() || config.AppConfig.DbURL != "data/bot_data.db" {
 			return true, fmt.Errorf("deployment requires production and DATABASE_URL=data/bot_data.db")
 		}
-		return true, nil
+		return true, checkListeningDaysEndpoint(abs.NewAbsClient(), strings.TrimSpace(config.AppConfig.AbsTemplateID), time.Now())
 	case "health":
 		return true, Health(database, time.Now())
 	case "check-db":

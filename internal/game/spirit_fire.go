@@ -221,12 +221,12 @@ func spiritFireBoard(holders bool, now time.Time) (string, error) {
 		return "", err
 	}
 	var users []model.User
-	if err := storage.DB.Select("telegram_id", "username").Find(&users).Error; err != nil {
+	if err := storage.DB.Select("telegram_id", "username", "display_name").Find(&users).Error; err != nil {
 		return "", err
 	}
 	names := map[int64]string{}
 	for _, u := range users {
-		names[u.TelegramID] = textfmt.FormatPlainValue(u.Username)
+		names[u.TelegramID] = textfmt.FormatPlainValue(u.DisplayLabel())
 	}
 	ownerName := func(id int64) string {
 		if n := names[id]; n != "" {
